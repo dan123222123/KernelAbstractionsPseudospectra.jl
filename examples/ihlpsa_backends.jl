@@ -2,18 +2,19 @@
 using LinearAlgebra, MatrixDepot
 using Plots, LaTeXStrings
 # GR has some issues with colorbar ticks/lables -- use pyplot to get a nicer figure (needs PyPlot.jl)
-pyplot()
+#pyplot()
+gr()
 ##
 
 ## choose your backend
 using KernelAbstractions
-backend = CPU()
+#backend = CPU()
 #
 #using CUDA
 #backend = CUDABackend()
 #
 #using AMDGPU
-#backend = ROCBackend()
+backend = ROCBackend()
 #
 #using Metal
 #backend = MtlBackend()
@@ -28,7 +29,7 @@ T = ComplexF32
 n = 16
 g = 300
 nit = 8
-A = MatrixDepot.parter(T, n)
+A = MatrixDepot.grcar(T, n)
 gx, gy, zg = qgrid(T, (-2, 5), (-4.5, 4.5), (g, g))
 P = MatrixPencil(schur(A))
 srg = ihlpsa(backend, zg, P, nit; wgs)
@@ -41,4 +42,5 @@ color = :darkrainbow
 clabels = false
 contour!(gx, gy, log10.(srg); color, colorbar_ticks=(tv, tl), levels, line=(1, :solid), clabels)
 scatter!(eigvals(A), markershape=:diamond, label="")
+gui()
 ##

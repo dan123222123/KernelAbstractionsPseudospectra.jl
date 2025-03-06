@@ -4,6 +4,7 @@ include("core.jl")
 export MatrixPencil
 
 include("svdpsa.jl")
+export ℂsvdpsa!, ℝsvdpsa!
 export ℂsvdpsa, ℝsvdpsa
 
 include("ihlpsa.jl")

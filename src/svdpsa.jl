@@ -2,8 +2,8 @@
 # svdpsa computations are multi-threaded, but run solely on the CPU
 
 """
-    svdpsa!(srg, zg, A::Matrix, B::Matrix, γ, δ)
-    svdpsa!(srg, zg, P::AbstractMatrixPencil, γ=1, δ=0)
+    ℂsvdpsa!(srg, zg, A::Matrix, B::Matrix, γ, δ)
+    ℂsvdpsa!(srg, zg, P::AbstractMatrixPencil, γ=1, δ=0)
 
 Compute matrix of resolvent norms for `zB-A` using the SVD.
 
