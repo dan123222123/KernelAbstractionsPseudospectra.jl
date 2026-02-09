@@ -3,7 +3,8 @@ using LinearAlgebra, MatrixDepot
 using Plots, LaTeXStrings
 # GR has some issues with colorbar ticks/lables -- use pyplot to get a nicer figure (needs PyPlot.jl)
 #pyplot()
-gr()
+#gr()
+unicodeplots()
 ##
 
 ## choose your backend
@@ -20,8 +21,8 @@ backend = ROCBackend()
 #backend = MtlBackend()
 using KAPseudospectra
 # workgroup size of the trsm kernels -- will bake this into the package extensions at some point TODO
-wgs = 256 # good for multi-threaded CPU and CUDA
-#wgs = 16 # good for AMDGPU
+#wgs = 256 # good for multi-threaded CPU and CUDA
+wgs = 16 # good for AMDGPU
 ##
 
 ##
