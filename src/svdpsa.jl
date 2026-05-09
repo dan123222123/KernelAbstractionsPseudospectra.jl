@@ -52,8 +52,9 @@ This is the real stability radii (see Qiu et al., 1995) computed for s ∈ {z}.
 The algorithm is essentially verbatim from §50 of SAP2005.
 """
 function distzeigAB(z::T, A::AbstractMatrix{T}, B::AbstractMatrix{T}) where {T<:Complex}
-    R = inv(z * B - A)
-    f = γ -> svdvals([real(R) -γ*imag(R); inv(γ)*imag(R) real(R)])[2]
+    R = (z * B - A) \ Matrix{T}(I, size(A))
+    Rr, Ri = real(R), imag(R)
+    f = γ -> svdvals([Rr -γ*Ri; inv(γ)*Ri Rr])[2]
     return 1 / optimize(f, eps(real(T)), one(real(T))).minimum
 end
 

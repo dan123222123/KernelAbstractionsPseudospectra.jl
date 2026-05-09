@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Only one CI run per branch; cancel in-progress runs on new pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-cpu:
+    name: Julia ${{ matrix.julia-version }} / ${{ matrix.os }} (CPU)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version:
+          - '1.10'  # LTS
+          - '1'     # latest stable
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+
+      - uses: julia-actions/cache@v2
+
+      - name: Develop main package into test env
+        run: |
+          julia --project=test -e '
+            using Pkg
+            Pkg.develop(path=".")
+            Pkg.instantiate()
+          '
+
+      - name: Run CPU test suite
+        env:
+          JULIA_NUM_THREADS: auto
+        run: julia --project=test --threads=auto test/runtests.jl cpu

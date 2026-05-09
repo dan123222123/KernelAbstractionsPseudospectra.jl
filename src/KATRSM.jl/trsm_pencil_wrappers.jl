@@ -15,7 +15,7 @@ function batched_forward_solve_pencil(bV, zv, A, B)
     # launch
     xV = deepcopy(bV)
     batched_forward_solve_pencil!(xV, zv, A, B)
-    synchronize(backend)
+    synchronize(get_backend(A))
     return Vector.(xV)
 end
 
@@ -32,15 +32,15 @@ function batched_backward_solve_pencil(bV, zv, A, B)
     @assert m == n
     # launch
     xV = deepcopy(bV)
-    batched_back_solve_pencil!(xV, zv, A, B)
-    synchronize(backend)
+    batched_backward_solve_pencil!(xV, zv, A, B)
+    synchronize(get_backend(A))
     return Vector.(xV)
 end
 
 function batched_column_oriented_forward_solve_pencil!(bv, zv, A, B, wgs=64)
     backend = get_backend(A)
     g = length(zv)
-    _batched_forward_solve_pencil(backend, wgs)(bv, zv, A, B, ndrange=(wgs, g))
+    _batched_column_oriented_forward_solve_pencil(backend, wgs)(bv, zv, A, B, ndrange=(wgs, g))
 end
 
 function batched_column_oriented_forward_solve_pencil(bv, zv, A, B, wgs=64)
@@ -49,7 +49,7 @@ function batched_column_oriented_forward_solve_pencil(bv, zv, A, B, wgs=64)
     @assert get_backend(zv) == backend
     @assert get_backend(B) == backend
     xv = deepcopy(bv)
-    batched_forward_solve_pencil_column_oriented!(xv, zv, A, B, wgs)
+    batched_column_oriented_forward_solve_pencil!(xv, zv, A, B, wgs)
     return xv
 end
 
@@ -67,11 +67,15 @@ function blkco_backward_solve_pencil!(b, z, A, B; nblkcols=16, blkbsk=_blkco_bac
         @views blkbs(b[cols], z, A[cols, cols], B[cols, cols], ndrange=length(cols))
         mvrows = 1:(cols[1]-1)
         if !isempty(mvrows)
-            @views b[mvrows] .-= ((z .* B[mvrows, cols] .- A[mvrows, cols]) * b[cols])
+            # b_cols is materialized (not @views) so the GEMV rhs is a
+            # contiguous device vector — AMDGPU's complex `gemv!` has no
+            # method for SubArray-of-ROCArray rhs.
+            b_cols = b[cols]
+            @views b[mvrows] .-= ((z .* B[mvrows, cols] .- A[mvrows, cols]) * b_cols)
         end
     end
 end
-function blkco_forward_solve_pencil!(b, z, A, B; nblkcols=16, blkfsk=_batched_blkco_forward_solve_pencil)
+function blkco_forward_solve_pencil!(b, z, A, B; nblkcols=16, blkfsk=_blkco_forward_solve_pencil)
     @assert size(A) == size(B)
     m, n = size(A)
     @assert m == n
@@ -85,7 +89,8 @@ function blkco_forward_solve_pencil!(b, z, A, B; nblkcols=16, blkfsk=_batched_bl
         @views blkfs(b[cols], z, A[cols, cols], B[cols, cols], ndrange=length(cols))
         mvrows = (cols[end]+1):m
         if !isempty(mvrows)
-            @views b[mvrows] .-= ((z * B[mvrows, cols] - A[mvrows, cols]) * b[cols])
+            b_cols = b[cols]
+            @views b[mvrows] .-= ((z * B[mvrows, cols] - A[mvrows, cols]) * b_cols)
         end
     end
 end

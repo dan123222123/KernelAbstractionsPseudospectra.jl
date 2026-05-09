@@ -15,5 +15,16 @@ They are:
 - `test_real_structured_psa.jl` -- compute structured/unstructured pseudospectra for a matrix using `CPU()` and plot them together
 - `test_ihlpsa_large.jl` -- compute pseudospectra for increasingly large matrices using `CUDABackend()`, writing timing information and plots to `examples/test_large_results/`
 
-Run `]add LinearAlgebra MatrixDepot Plots LaTeXStrings PyPlot KernelAbstractions` to be able to run `ihlpsa_backends.jl` and `test_real_structured_psa.jl`.
-Optionally, run `]add CUDA` if you have a cuda-enabled device to run `test_ihlpsa_large.jl`.
+The `examples/` directory has its own `Project.toml` listing every dependency the
+scripts use (including PyPlot for nice colorbar formatting via `Plots.jl`'s
+PyPlot backend, plus optional `CUDA`/`AMDGPU`/`Metal`). Instantiate it once:
+
+```sh
+julia --project=examples -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+```
+
+then run any example as:
+
+```sh
+julia --project=examples examples/ihlpsa_backends.jl
+```

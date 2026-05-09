@@ -7,16 +7,15 @@ struct MatrixPencil{T} <: AbstractMatrixPencil{T}
     B::AbstractMatrix{T}
 end
 
-function MatrixPencil(A::AbstractMatrix{T}, B::AbstractMatrix{T}) where {T<:Complex}
-    @assert size(A) == size(B)
-    MatrixPencil{T}(A, B)
-end
-
+# User-facing constructor: always returns a SchurMatrixPencil so the GPU trsm
+# path (which dispatches on SchurMatrixPencil) just works. Direct access to the
+# raw, non-factored MatrixPencil struct is still possible via MatrixPencil{T}(A, B).
 function MatrixPencil(A::AbstractMatrix{T}, B::Union{AbstractMatrix{T},UniformScaling}=I) where {T<:Complex}
     if B isa UniformScaling
-        B = Matrix{T}(I, size(A))
+        return MatrixPencil(schur(A))
     end
-    MatrixPencil(A, B)
+    @assert size(A) == size(B)
+    return MatrixPencil(schur(A, B))
 end
 
 struct SchurMatrixPencil{T} <: AbstractMatrixPencil{T}
@@ -24,13 +23,25 @@ struct SchurMatrixPencil{T} <: AbstractMatrixPencil{T}
     Ac::AbstractMatrix{T}
     B::AbstractMatrix{T}
     Bc::AbstractMatrix{T}
+    # Right Schur transform: A_orig = Z * A * Z' (standard) or A_orig = Q * A * Z',
+    # B_orig = Q * B * Z' (generalized). Used by ihlpsa to bring a user-supplied
+    # x₀ from the original-A basis into the Schur basis so that ihlpsa's Lanczos
+    # iterates match textbook Lanczos applied to the original problem with the
+    # same x₀. Lazy adjoint by default to avoid duplicating m×m bytes.
+    Z::AbstractMatrix{T}
 end
+# Backward-compat constructor for direct use (no Schur transform known).
+# Stores a typed Diagonal of ones (O(m) memory) so x₀-transform via Z'*x is a no-op
+# and Adapt-to-GPU is essentially free.
+SchurMatrixPencil{T}(A, Ac, B, Bc) where {T<:Complex} =
+    SchurMatrixPencil{T}(A, Ac, B, Bc, Diagonal(ones(T, size(A, 1))))
 
-function MatrixPencil(F::Schur)
-    SchurMatrixPencil{eltype(F)}(Matrix{eltype(F)}(F.T), Matrix{eltype(F)}(F.T'), Matrix{eltype(F)}(I, size(F.T)), Matrix{eltype(F)}(I, size(F.T)))
+function MatrixPencil(F::Schur{T}) where {T<:Complex}
+    Iₘ = Matrix{T}(I, size(F.T))
+    SchurMatrixPencil{T}(F.T, F.T', Iₘ, Iₘ, F.Z)
 end
-function MatrixPencil(F::GeneralizedSchur)
-    SchurMatrixPencil{eltype(F)}(Matrix{eltype(F)}(F.S), Matrix{eltype(F)}(F.S'), Matrix{eltype(F)}(F.T), Matrix{eltype(F)}(F.T'))
+function MatrixPencil(F::GeneralizedSchur{T}) where {T<:Complex}
+    SchurMatrixPencil{T}(F.S, F.S', F.T, F.T', F.Z)
 end
 
 Base.size(x::AbstractMatrixPencil) = size(x.A)
@@ -51,11 +62,11 @@ Checks the following:
 """
 function validate(zg, A::AbstractMatrix, B, γ=missing, δ=missing)
     @assert !isempty(zg)
-    if B != I
+    if !(B isa UniformScaling)
         @assert size(A) == size(B)
     end
     if !(ismissing(γ) && ismissing(δ))
-        @assert γ + δ == 1
+        @assert isapprox(γ + δ, 1) "γ + δ must sum to 1 (got $(γ + δ))"
     end
 end
 function validate(zg, P::AbstractMatrixPencil, γ=missing, δ=missing)

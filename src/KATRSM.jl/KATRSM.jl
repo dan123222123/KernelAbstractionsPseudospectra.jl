@@ -3,9 +3,6 @@ module KATRSM
 include("trsm_wrappers.jl")
 include("trsm_pencil_wrappers.jl")
 
-export batched_blkco_backward_solve_pencil!
-export batched_blkco_forward_solve_pencil!
-
 export _batched_backward_solve_pencil, _batched_column_oriented_backward_solve_pencil
 export _batched_forward_solve_pencil, _batched_column_oriented_forward_solve_pencil
 

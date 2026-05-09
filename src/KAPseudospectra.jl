@@ -9,12 +9,14 @@ export ℂsvdpsa, ℝsvdpsa
 include("ihlpsa.jl")
 export ihlpsa
 
-using GridArrays
+# Build a 2D grid of complex shifts. Returns (gx, gy, zg) where gx and gy are
+# real ranges along the real and imaginary axes and zg[i,j] = gx[i] + im*gy[j].
 function qgrid(T, tx, ty, gp)
-    gx = EquispacedGrid(gp[1], tx...)
-    gy = EquispacedGrid(gp[2], ty...)
-    grid = ProductGrid(gx, gy * 1im)
-    return gx, gy, Matrix{T}(sum.(collect(grid)))
+    nx, ny = gp
+    gx = range(tx[1], tx[2], length=nx)
+    gy = range(ty[1], ty[2], length=ny)
+    zg = [T(complex(x, y)) for x in gx, y in gy]
+    return collect(gx), collect(gy), zg
 end
 export qgrid
 
