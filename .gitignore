@@ -1,2 +1,5 @@
 Manifest.toml
 test/Manifest.toml
+
+# Generated Documenter HTML output (sources live in docs/src on dev_docs)
+docs/build/
