@@ -62,10 +62,11 @@ end
 end
 
 # Cross-backend: same problem, same explicit x₀, results agree element-wise.
-function test_cross_backend(backend)
+# `types` lets FP64-less backends (Intel iGPUs) restrict to ComplexF32.
+function test_cross_backend(backend; types=(ComplexF32, ComplexF64))
     @testset "cross-backend: CPU vs $(backend)" begin
         Random.seed!(0xDADA)
-        for T in (ComplexF32, ComplexF64)
+        for T in types
             m = 32
             nit = ceil(Int, log2(m))
             A = randn(T, m, m)

@@ -45,7 +45,7 @@ end
 
     for j = 1:1:m
         if i == 1
-            sbj[1] = bv[gi][j] / (zv[gi] * B[j, j] - A[j, j])
+            sbj[1] = _pdiv(bv[gi][j], zv[gi] * B[j, j] - A[j, j])
             bv[gi][j] = sbj[1]
         end
         @synchronize()
@@ -70,7 +70,7 @@ end
 
     for j = m:-1:1
         if i == 1
-            sbj[1] = bv[gi][j] / (zv[gi] * B[j, j] - A[j, j])
+            sbj[1] = _pdiv(bv[gi][j], zv[gi] * B[j, j] - A[j, j])
             bv[gi][j] = sbj[1]
         end
         @synchronize()
@@ -113,7 +113,7 @@ end
     @synchronize()
     for j = 1:MSIZE
         if i == j
-            sd[i] /= sM[i, i]
+            sd[i] = _pdiv(sd[i], sM[i, i])
         end
         @synchronize()
         if i > j && i <= size(A, 1)
@@ -151,7 +151,7 @@ end
     @synchronize()
     for j = MSIZE:-1:1
         if i == j
-            sd[i] /= sM[i, i]
+            sd[i] = _pdiv(sd[i], sM[i, i])
         end
         @synchronize()
         if i < j
@@ -192,7 +192,7 @@ end
     @synchronize()
     for j = 1:MSIZE
         if i == j
-            sd[i] /= sM[i, i]
+            sd[i] = _pdiv(sd[i], sM[i, i])
         end
         @synchronize()
         if i > j && i <= size(A, 1)
@@ -233,7 +233,7 @@ end
     @synchronize()
     for j = MSIZE:-1:1
         if i == j
-            sd[i] /= sM[i, i]
+            sd[i] = _pdiv(sd[i], sM[i, i])
         end
         @synchronize()
         if i < j

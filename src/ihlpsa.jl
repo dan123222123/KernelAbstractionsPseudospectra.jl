@@ -184,6 +184,15 @@ device!(B::CPU, dev) = CPU()
 device_bytes_available(B::CPU) = (Sys.free_memory() |> Int)
 device_reclaim(B::CPU) = GC.gc()
 
+# Whether `backend`'s device can run Float64/ComplexF64 kernels. The default
+# defers to KernelAbstractions' own capability flag: `supports_float64` is `true`
+# for CPU/CUDA/AMDGPU and declared `false` by Metal (Metal Shading Language has no
+# `double` type). The oneAPI extension overrides this with a device-accurate query
+# (oneAPI's KA flag is a conservative static `false`), so F64 auto-enables on
+# FP64-capable Intel GPUs (Arc/Max) and stays off on FP64-less iGPUs. The F64
+# grid/test/precompile paths consult this and skip unsupported devices.
+supports_fp64(B) = KernelAbstractions.supports_float64(B)
+
 ## END DEVICE FUNCTIONS ##
 
 ## HOST FUNCTIONS ##

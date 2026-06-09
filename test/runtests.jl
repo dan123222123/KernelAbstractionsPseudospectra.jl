@@ -19,13 +19,17 @@ include("eigtool_core.jl")
     end
 end
 
-function test_ihlpsa_parter16(backend)
+function test_ihlpsa_parter16(backend; types=(ComplexF32, ComplexF64))
     @testset "ihlpsa parter16 -- $(backend)" begin
-        @testset "F32" begin
-            @test testihlpsa(tdir * "F32parter16.mat", backend, 1e-6)
+        if ComplexF32 in types
+            @testset "F32" begin
+                @test testihlpsa(tdir * "F32parter16.mat", backend, 1e-6)
+            end
         end
-        @testset "F64" begin
-            @test testihlpsa(tdir * "F64parter16.mat", backend, 1e-14)
+        if ComplexF64 in types
+            @testset "F64" begin
+                @test testihlpsa(tdir * "F64parter16.mat", backend, 1e-14)
+            end
         end
     end
 end
@@ -60,5 +64,31 @@ if all_tests || "amdgpu" in ARGS
         test_ihlpsa_parter16(ROCBackend())
         test_cross_backend(ROCBackend())
         test_katrsm_kernels(ROCBackend())
+    end
+end
+
+if all_tests || "oneapi" in ARGS
+    using oneAPI
+    if oneAPI.functional()
+        # Most Intel iGPUs lack native FP64; restrict to ComplexF32 there, and
+        # auto-enable ComplexF64 on FP64-capable Intel GPUs (Arc, Data Center Max).
+        Ts = KAPseudospectra.supports_fp64(oneAPIBackend()) ? (ComplexF32, ComplexF64) : (ComplexF32,)
+        test_ihlpsa_parter16(oneAPIBackend(); types=Ts)
+        test_cross_backend(oneAPIBackend(); types=Ts)
+        test_katrsm_kernels(oneAPIBackend(); types=Ts)
+    end
+end
+
+# Metal is opt-in ("metal" only — NOT part of `all`): it can only be installed and
+# run on Apple silicon, so add it to the test env there first
+# (`julia --project=test -e 'using Pkg; Pkg.add("Metal")'`) and run
+# `test/runtests.jl metal`. Apple GPUs have no FP64, so this is ComplexF32-only.
+if "metal" in ARGS
+    using Metal
+    if Metal.functional()
+        Ts = KAPseudospectra.supports_fp64(MetalBackend()) ? (ComplexF32, ComplexF64) : (ComplexF32,)
+        test_ihlpsa_parter16(MetalBackend(); types=Ts)
+        test_cross_backend(MetalBackend(); types=Ts)
+        test_katrsm_kernels(MetalBackend(); types=Ts)
     end
 end

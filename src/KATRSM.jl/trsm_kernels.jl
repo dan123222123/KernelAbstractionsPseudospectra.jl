@@ -35,7 +35,7 @@ end
     i = @index(Local)
     for j = MSIZE:-1:1
         if i == 1
-            sd[1] = b[j] / M[j, j]
+            sd[1] = _pdiv(b[j], M[j, j])
             b[j] = sd[1]
         end
         @synchronize()
@@ -84,7 +84,7 @@ end
     # solve M column-wise
     for j = MSIZE:-1:1
         if i == j
-            sd[i] /= sM[i, i]
+            sd[i] = _pdiv(sd[i], sM[i, i])
         end
         @synchronize()
         if i < j
@@ -117,7 +117,7 @@ end
     # solve M column-wise
     for j = MSIZE:-1:1
         if i == j
-            sd[i] /= sM[i, MSIZE-j+1]
+            sd[i] = _pdiv(sd[i], sM[i, MSIZE-j+1])
         end
         @synchronize()
         if i < j
@@ -146,7 +146,7 @@ end
     # solve M column-wise
     for j = MSIZE:-1:1
         if i == j
-            sd[i] /= M[i, i]
+            sd[i] = _pdiv(sd[i], M[i, i])
         end
         @synchronize()
         if i < j
@@ -172,7 +172,7 @@ end
     # solve M column-wise
     for j = MSIZE:-1:1
         if i == j
-            sd[1] = d[i] / M[i, i]
+            sd[1] = _pdiv(d[i], M[i, i])
             d[i] = sd[1]
         end
         @synchronize()
@@ -205,7 +205,7 @@ end
     @synchronize()
     for j = 1:MSIZE
         if i == j
-            sd[i] /= sM[i, i]
+            sd[i] = _pdiv(sd[i], sM[i, i])
         end
         @synchronize()
         if i > j && i <= size(M, 1)
