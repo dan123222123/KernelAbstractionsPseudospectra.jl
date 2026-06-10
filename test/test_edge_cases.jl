@@ -6,7 +6,7 @@
 #  - findmaxbatchihl returns sane positive values on each backend
 
 using Test, KAPseudospectra, KernelAbstractions, LinearAlgebra
-using KAPseudospectra: findmaxbatchihl
+using KAPseudospectra: findmaxbatchihl, _device_column_partition
 
 @testset "edge cases" begin
     @testset "m=1" begin
@@ -66,4 +66,29 @@ end
         @test n_gpu > 0
         @test isfinite(n_gpu)
     end
+end
+
+@testset "_device_column_partition invariants" begin
+    # The multi-device dispatch in ihlpsa indexes zgidxbatches[1:nblocks] and
+    # zips blocks against devices, so the partition must always yield exactly
+    # min(ndev, ncols) contiguous, ordered, balanced blocks. The old ceil-based
+    # Iterators.partition could yield fewer blocks than devices (e.g. 9 cols /
+    # 4 devs → 3 blocks of 3) and BoundsError the device loops — these are the
+    # host-side regression tests for that fix (there is no GPU CI).
+    for ncols in 1:20, ndev in 1:6
+        blocks = _device_column_partition(ncols, ndev)
+        @test blocks isa Vector{UnitRange{Int}}
+        @test length(blocks) == min(ndev, ncols)
+        # coverage + ordering + disjointness in one shot
+        @test reduce(vcat, collect.(blocks)) == collect(1:ncols)
+        # balance: block sizes differ by at most 1
+        @test maximum(length.(blocks)) - minimum(length.(blocks)) <= 1
+    end
+
+    # Pinned regression cases (verified failures of the old partition):
+    @test _device_column_partition(1, 4) == [1:1]              # was 1 block, loop hit [2]
+    @test _device_column_partition(9, 4) == [1:3, 4:5, 6:7, 8:9]  # was 3,3,3 (3 blocks)
+    @test _device_column_partition(2, 4) == [1:1, 2:2]
+    @test isempty(_device_column_partition(0, 4))
+    @test_throws ArgumentError _device_column_partition(4, 0)
 end

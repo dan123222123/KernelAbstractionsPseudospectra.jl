@@ -289,6 +289,29 @@ function findmaxbatchihl(backend, T, m, nit; moe=0.1)
     floor(Integer, (device_bytes_available(backend) * (1 - moe) - (sizeof(T) * (4 * m * m + 1))) / (sizeof(T) * (1 + 4 * m + 2 * nit + 1)))
 end
 
+# Balanced contiguous partition of 1:ncols into min(ndev, ncols) blocks whose
+# sizes differ by at most 1 (the first r blocks get the extra column). Returns
+# Vector{UnitRange{Int}} in column order; empty when ncols == 0. Replaces the
+# old ceil-based Iterators.partition in the multi-device dispatch, which could
+# yield FEWER blocks than devices (e.g. 9 cols / 4 devs → blocks of 3,3,3) and
+# BoundsError the device loops that index zgidxbatches[1:ndev] — besides idling
+# devices the balanced split now uses (9/4 → 3,2,2,2 on all four).
+function _device_column_partition(ncols::Integer, ndev::Integer)
+    ndev ≥ 1 || throw(ArgumentError("ndev must be ≥ 1, got $ndev"))
+    ncols ≥ 0 || throw(ArgumentError("ncols must be ≥ 0, got $ncols"))
+    nblocks = min(Int(ndev), Int(ncols))
+    blocks = Vector{UnitRange{Int}}(undef, nblocks)
+    nblocks == 0 && return blocks
+    q, r = divrem(Int(ncols), nblocks)
+    lo = 1
+    for b in 1:nblocks
+        hi = lo + q + (b ≤ r) - 1
+        blocks[b] = lo:hi
+        lo = hi + 1
+    end
+    return blocks
+end
+
 # multi-device, general purpose batched inverse lanczos pseudospectra caller
 function ihlpsa(
     backend,
@@ -320,23 +343,28 @@ function ihlpsa(
         if ismissing(devs)
             devs = devices(backend)
         end
-        progress && set_description(pbar, "$(length(devs)) device(s), grid points * nit:")
-        zgidxbatches = Vector(collect(Iterators.partition(1:size(zg, 2), ceil(Integer, size(zg, 2) / length(devs)))))
+        zgidxbatches = _device_column_partition(size(zg, 2), length(devs))
+        progress && set_description(pbar, "$(length(zgidxbatches))/$(length(devs)) device(s), grid points * nit:")
         # Resolve per-device zpd sequentially BEFORE the parallel fan-out: device!
         # is process-global on AMDGPU/CUDA, and findmaxbatchihl reclaims+queries
         # free memory of "the current device" — racing this across spawns can
         # query the wrong device's memory budget.
-        zpd_devs = map(enumerate(devs)) do (did, dev)
+        # zip pairs each block with a device and truncates to the shorter side,
+        # so when ncols < ndev the surplus devices are simply never touched.
+        # devs need only be iterable (CUDA.devices() is a non-indexable
+        # DeviceIterator); only zgidxbatches is ever indexed, and zip guarantees
+        # did ≤ length(zgidxbatches).
+        zpd_devs = map(zip(devs, zgidxbatches)) do (dev, zgidx)
             device!(backend, dev)
-            zgb_len = length(zgidxbatches[did]) * size(zg, 1)
+            zgb_len = length(zgidx) * size(zg, 1)
             ismissing(zpd) ? min(findmaxbatchihl(backend, T, m, nit), zgb_len) : zpd
         end
-        results = Vector{Any}(undef, length(devs))
+        results = Vector{Any}(undef, length(zgidxbatches))
         @sync begin
-            for (did, dev) in enumerate(devs)
+            for (did, (dev, zgidx)) in enumerate(zip(devs, zgidxbatches))
                 Threads.@spawn begin
                     device!(backend, dev)
-                    zgb = zg[:, zgidxbatches[did]]
+                    zgb = zg[:, zgidx]
                     zpd_dev = zpd_devs[did]
                     if progress
                         results[did] = sdihlpsa(backend, zgb, P, γ, δ, zpd_dev, nit, x₀, pchnl, wgs)
