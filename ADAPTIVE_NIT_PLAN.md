@@ -199,4 +199,17 @@ in O(log m) iterations even on hard problems; budget 2× that for safety.
   motivation): **done**, in `src/core.jl` (added `Z` field to
   `SchurMatrixPencil`) and `src/ihlpsa.jl` (`x₀ ← P.Z' * x₀` in the
   `IHLworkspace` constructor when user supplies `x₀`).
-- Adaptive `nit`: **planned**, this document.
+- Adaptive `nit`: **done** — see `PROGRESS.md` for what was actually built and
+  measured. The implementation diverges from this document in important ways:
+  - Tier 3 needed **no kernel changes** (per-point state already lives in the
+    workspace; `lockstep_ihl!` just gained a `start` kwarg).
+  - The real speedup required a **hybrid of Tiers 2+3** (per-point retirement
+    + resident-state gather + small `nit_chunk`), selected via
+    `ihlpsa_adaptive(...; compact=true, resumable=true)` — Tiers 1–3 alone are
+    roughly wall-clock-neutral.
+  - The convergence criterion gained an `nconfirm` confirmation streak and an
+    eps-sentinel short-circuit; a fixed seeded `x₀` is reused across chunks
+    (this document's sketch drew a fresh random `x₀` per chunk, which would
+    have made the cross-chunk convergence comparison meaningless).
+  - `ihlpsa`'s multi-device dispatch was fixed along the way (balanced column
+    partition; surplus devices idle instead of BoundsError).

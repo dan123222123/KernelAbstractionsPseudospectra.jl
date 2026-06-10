@@ -24,11 +24,18 @@ function test_ihlpsa_parter16(backend; types=(ComplexF32, ComplexF64))
         if ComplexF32 in types
             @testset "F32" begin
                 @test testihlpsa(tdir * "F32parter16.mat", backend, 1e-6)
+                # hybrid adaptive vs the same eigtool reference; stops at the
+                # adaptive rtol (measured 3.9e-7 normed — matches the fixed run).
+                @test testihlpsa_adaptive(tdir * "F32parter16.mat", backend, 1e-5;
+                    compact=true, resumable=true)
             end
         end
         if ComplexF64 in types
             @testset "F64" begin
                 @test testihlpsa(tdir * "F64parter16.mat", backend, 1e-14)
+                # measured 7.0e-13 normed at the default stopping rtol.
+                @test testihlpsa_adaptive(tdir * "F64parter16.mat", backend, 1e-11;
+                    compact=true, resumable=true)
             end
         end
     end
@@ -54,6 +61,7 @@ if all_tests || "cuda" in ARGS
     if CUDA.functional()
         test_ihlpsa_parter16(CUDABackend())
         test_cross_backend(CUDABackend())
+        test_adaptive_backend(CUDABackend())
         test_katrsm_kernels(CUDABackend())
     end
 end
@@ -63,6 +71,7 @@ if all_tests || "amdgpu" in ARGS
     if AMDGPU.functional()
         test_ihlpsa_parter16(ROCBackend())
         test_cross_backend(ROCBackend())
+        test_adaptive_backend(ROCBackend())
         test_katrsm_kernels(ROCBackend())
     end
 end
@@ -75,6 +84,7 @@ if all_tests || "oneapi" in ARGS
         Ts = KAPseudospectra.supports_fp64(oneAPIBackend()) ? (ComplexF32, ComplexF64) : (ComplexF32,)
         test_ihlpsa_parter16(oneAPIBackend(); types=Ts)
         test_cross_backend(oneAPIBackend(); types=Ts)
+        test_adaptive_backend(oneAPIBackend(); types=Ts)
         test_katrsm_kernels(oneAPIBackend(); types=Ts)
     end
 end
@@ -89,6 +99,7 @@ if "metal" in ARGS
         Ts = KAPseudospectra.supports_fp64(MetalBackend()) ? (ComplexF32, ComplexF64) : (ComplexF32,)
         test_ihlpsa_parter16(MetalBackend(); types=Ts)
         test_cross_backend(MetalBackend(); types=Ts)
+        test_adaptive_backend(MetalBackend(); types=Ts)
         test_katrsm_kernels(MetalBackend(); types=Ts)
     end
 end

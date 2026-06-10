@@ -7,7 +7,7 @@ include("svdpsa.jl")
 export ℂsvdpsa, ℝsvdpsa
 
 include("ihlpsa.jl")
-export ihlpsa
+export ihlpsa, ihlpsa_adaptive
 
 # Build a 2D grid of complex shifts. Returns (gx, gy, zg) where gx and gy are
 # real ranges along the real and imaginary axes and zg[i,j] = gx[i] + im*gy[j].
@@ -36,6 +36,9 @@ using PrecompileTools
             ℂsvdpsa(zg, P)
             ℝsvdpsa(zg, P)
             ihlpsa(CPU(), zg, P)
+            ihlpsa_adaptive(CPU(), zg, P)
+            ihlpsa_adaptive(CPU(), zg, P; resumable=true)
+            ihlpsa_adaptive(CPU(), zg, P; compact=true, resumable=true)
         end
     end
 end

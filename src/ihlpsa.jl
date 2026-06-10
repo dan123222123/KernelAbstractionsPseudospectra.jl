@@ -1,6 +1,7 @@
 using ArraysOfArrays
 using ThreadsX
 using ProgressBars
+using Random
 
 # triangular solves using kernel abstractions
 include("KATRSM.jl/KATRSM.jl")
@@ -162,14 +163,23 @@ function trsmIHL(backend::CPU, bV, zv, P::SchurMatrixPencil; wgs=missing)
     _batched_backward_solve_pencil(backend)(bV, zv, P.A, P.B, ndrange=g)
 end
 
-function lockstep_ihl!(α, β, ihl::IHLworkspace, nit, g; wgs=missing)
+# Runs Lanczos iterations `start:nit` on the first g grid points of the batch.
+# `start == 1` (the default) seeds q₁ from x₀ first; `start > 1` RESUMES a prior
+# call: the loop body at iteration n only reads β[n] plus the Qv[1]/Qv[2]/v state
+# left in the workspace, so continuing is just running more iterations. Resume
+# contract: same `ihl` instance (Qv/v/zv untouched since the previous call), the
+# same `α`/`β` arrays (sized for the deepest nit up front), the same g, and the
+# previous call ended at iteration start-1.
+function lockstep_ihl!(α, β, ihl::IHLworkspace, nit, g; wgs=missing, start::Integer=1)
     backend = get_backend(ihl)
-    # `_qₙnext` writes Qv[2] (= q₁); `_v2v` then copies all m elements of
-    # each q₁ into v[1:g] before the trsm loop runs. v[1:g] is fully
-    # overwritten there, so no separate seed copy is needed.
-    _qₙnext(backend)(view(ihl.x₀, 1:g), view(β, 2, 1:g), view(ihl.Qv[2], 1:g, :), ndrange=g)
-    _v2v(backend)(view(ihl.Qv[2], 1:g, :), view(ihl.v, 1:g), ndrange=g)
-    for n = 1:nit
+    if start == 1
+        # `_qₙnext` writes Qv[2] (= q₁); `_v2v` then copies all m elements of
+        # each q₁ into v[1:g] before the trsm loop runs. v[1:g] is fully
+        # overwritten there, so no separate seed copy is needed.
+        _qₙnext(backend)(view(ihl.x₀, 1:g), view(β, 2, 1:g), view(ihl.Qv[2], 1:g, :), ndrange=g)
+        _v2v(backend)(view(ihl.Qv[2], 1:g, :), view(ihl.v, 1:g), ndrange=g)
+    end
+    for n = start:nit
         trsmIHL(backend, view(ihl.v, 1:g), view(ihl.zv, 1:g), ihl.P; wgs)
         _ihl_ttr_qₙnext(backend)(view(β, n, 1:g), view(ihl.Qv[1], 1:g, :), view(α, n, 1:g), view(ihl.Qv[2], 1:g, :), view(ihl.v, 1:g), view(β, n + 1, 1:g), ndrange=g)
     end
@@ -383,6 +393,421 @@ function ihlpsa(
     end
     progress && close(pchnl)
     return permutedims(result)
+end
+
+# Deterministic unit-norm complex start vector for the adaptive driver. The
+# SAME vector is reused for every chunk so that eigmax(T_k) vs eigmax(T_{k+chunk})
+# compares one Lanczos run at two depths (a principled convergence monitor). If
+# instead x₀ were `missing`, the IHLworkspace ctor would draw a FRESH randn per
+# chunk (see line ~102) and consecutive chunks would be independent runs, making
+# the convergence test meaningless. Mirrors the test helper `_seeded_x₀`.
+function _adaptive_x₀(::Type{T}, m, seed) where {T<:Complex}
+    rng = MersenneTwister(seed)
+    x = randn(rng, T, m)
+    return x ./ norm(x)
+end
+
+# eltype-branched default tolerances. The F32 relative floor ~1e-4 matches the
+# SVD-oracle tolerance in test_consistency.jl; below it, F32 Lanczos roundoff in
+# σ_min dominates and the criterion would never trip.
+_adaptive_default_rtol(::Type{T}) where {T<:Complex} = real(T) == Float32 ? 1.0f-4 : 1e-6
+_adaptive_default_atol(::Type{T}) where {T<:Complex} = eps(real(T))
+
+# Per-grid-point convergence test between two consecutive chunk results. σ are
+# the resolvent-derived values from `ihlsrg!` (= (γ + δ|z|)·σ_min). Combined
+# absolute + relative tolerance, with an explicit eps-sentinel short-circuit:
+# `ihlsrg!` pins a point at/near a true eigenvalue to `eps(real(T))` (σ_min ≈ 0,
+# resolvent norm → ∞), which is already physically converged — no further
+# iteration moves it — and a bare |Δ|/|σ| there would divide by ~eps and never
+# retire the point. The atol floor likewise keeps the test well-defined as σ → 0.
+@inline function _adaptive_converged(σ_new::R, σ_prev::R, rtol::R, atol::R) where {R<:Real}
+    σ_new <= eps(R) && return true
+    return abs(σ_new - σ_prev) <= atol + rtol * abs(σ_new)
+end
+
+# Adaptive `nit` for `ihlpsa`. Runs lockstep inverse-Lanczos in chunks of
+# `nit_chunk`, retiring grid points once their σ has converged between successive
+# chunks. Two modes:
+#   compact=false (Tier 1, default): re-run the WHOLE grid each chunk; stop when
+#     every point has converged. Simplest; inherits ihlpsa's multi-device fan-out;
+#     still pays the slowest-point cost across the whole grid every chunk.
+#   compact=true  (Tier 2): after each chunk, prune the converged points and
+#     re-launch only the still-active remainder. The active set shrinks
+#     geometrically, so total work scales with grid heterogeneity rather than the
+#     slowest point. See `_ihlpsa_adaptive_compact`.
+#   resumable=true (Tier 3): keep the Lanczos state (workspace + α/β) resident
+#     between chunks and CONTINUE iterating instead of restarting from iteration
+#     1 — total kernel work equals one fixed-`nit` run at the converged depth,
+#     i.e. optimal for lockstep. Per grid-point-batch (and per device) stopping.
+#     See `_ihlpsa_adaptive_resumable`.
+#   compact=true, resumable=true (hybrid — the recommended fast path): per-POINT
+#     retirement with resident state. Each chunk, converged points retire and
+#     the survivors' Lanczos state (Qv/v/zv/α/β rows) is gathered to a packed
+#     prefix so kernels only touch live points — no restart, no wasted lockstep.
+#     Per-point work ≈ its own converged depth (+ one confirm chunk), which the
+#     convergence census shows is 3–8 iterations for the large majority of a
+#     pseudospectra grid vs tens for the slowest point. Uses a small default
+#     `nit_chunk` (2) because the retirement floor is 2·nit_chunk.
+#     See `_sdihlpsa_adaptive_hybrid`.
+# Returns `(σ, nit_used)`; `σ` matches `ihlpsa`'s shape/layout (so
+# `first(ihlpsa_adaptive(...))` is interchangeable with `ihlpsa(...)`) and
+# `nit_used` is the deepest iteration count reached.
+#
+# The non-adaptive `ihlpsa(backend, zg, P, nit, ...)` is untouched as the
+# fixed-`nit` regression control. (`progress` is honored only in the
+# compact=false, resumable=false path.)
+function ihlpsa_adaptive(
+    backend,
+    zg::AbstractArray{T,2},
+    P::AbstractMatrixPencil{T},
+    γ=1,
+    δ=0;
+    nit_chunk::Union{Missing,Integer}=missing,
+    nit_max::Integer=8 * max(1, ceil(Integer, log2(size(P, 1)))),
+    rtol::Real=_adaptive_default_rtol(T),
+    atol::Real=_adaptive_default_atol(T),
+    nconfirm::Integer=2,
+    x₀::Union{Missing,AbstractVector{T}}=missing,
+    seed::Integer=0x61646170,
+    compact::Bool=false,
+    resumable::Bool=false,
+    progress=false,
+    zpd=missing,
+    devs=missing,
+    wgs=missing,
+    verbose=false
+) where {T<:Complex}
+    R = real(T)
+    rtolR, atolR = R(rtol), R(atol)
+    m = size(P, 1)
+    # Hybrid retires points at multiples of (nconfirm+1)·nit_chunk, so it wants
+    # a SMALL chunk (most grid points converge in 3–8 iterations); the other
+    # modes pay a full-grid relaunch or whole-batch sweep per chunk, so they
+    # want log2(m).
+    if ismissing(nit_chunk)
+        nit_chunk = (compact && resumable) ? 2 : max(1, ceil(Integer, log2(m)))
+    end
+    x₀_fixed = ismissing(x₀) ? _adaptive_x₀(T, m, seed) : x₀
+
+    if compact && resumable
+        return _ihlpsa_adaptive_resident(_sdihlpsa_adaptive_hybrid, "hybrid",
+            backend, zg, P, γ, δ, nit_chunk, nit_max,
+            rtolR, atolR, nconfirm, x₀_fixed, zpd, devs, wgs, verbose)
+    end
+    if compact
+        return _ihlpsa_adaptive_compact(backend, zg, P, γ, δ, nit_chunk, nit_max,
+            rtolR, atolR, nconfirm, x₀_fixed, zpd, devs, wgs, verbose)
+    end
+    if resumable
+        return _ihlpsa_adaptive_resident(_sdihlpsa_adaptive_resumable, "resumable",
+            backend, zg, P, γ, δ, nit_chunk, nit_max,
+            rtolR, atolR, nconfirm, x₀_fixed, zpd, devs, wgs, verbose)
+    end
+
+    # Tier 1 — whole grid each chunk.
+    σ_prev = nothing
+    nit_total = 0
+    streak = 0
+    while nit_total < nit_max
+        nit_new = min(nit_total + nit_chunk, nit_max)
+        σ_new = ihlpsa(backend, zg, P, nit_new, γ, δ; x₀=x₀_fixed, progress, zpd, devs, wgs)
+        if σ_prev !== nothing &&
+           all(_adaptive_converged(σ_new[i], σ_prev[i], rtolR, atolR) for i in eachindex(σ_new))
+            streak += 1
+            if streak >= nconfirm
+                verbose && @info "ihlpsa_adaptive converged" nit = nit_new
+                return σ_new, nit_new
+            end
+        else
+            streak = 0
+        end
+        σ_prev = σ_new
+        nit_total = nit_new
+    end
+    @warn "ihlpsa_adaptive hit nit_max=$nit_max without full convergence (rtol=$rtol)"
+    return σ_prev, nit_total
+end
+
+# Tier 2 worker — per-point compaction. Each chunk, the still-active grid points
+# are packed into a (nrows × ncols) sub-grid with ncols = min(#devices, nact),
+# so ihlpsa's column partition spreads work across every device whenever the
+# active set is large enough (a naive N×1 active set would put it all on one
+# device). The packing is column-major; the trailing pad slots (only when
+# nact > ncols and nact % ncols ≠ 0) replicate an active z and their results
+# are discarded. ihlpsa returns
+# `permutedims(sr_grid)`, so `vec(permutedims(S))` recovers column-major order
+# matching `vec(zg_sub)`, and the first `nact` entries map back through `idx` to
+# the flat column-major grid. Per-point Lanczos is independent across the batch
+# (same fixed `x₀`), so compaction is pure work-reduction — results are identical
+# to Tier 1 within the convergence tolerance.
+function _ihlpsa_adaptive_compact(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T},
+    γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀_fixed, zpd, devs, wgs, verbose) where {T<:Complex}
+    R = real(T)
+    rtolR, atolR = R(rtol), R(atol)
+    nx, ny = size(zg)
+    n = nx * ny
+    zg_flat = vec(zg)
+    σ_out = zeros(R, n)
+    σ_prev = zeros(R, n)
+    streak = zeros(Int, n)
+    active = trues(n)
+    ndev = KernelAbstractions.isgpu(backend) ? length(ismissing(devs) ? devices(backend) : devs) : 1
+
+    nit_used = 0
+    while any(active) && nit_used < nit_max
+        idx = findall(active)
+        nact = length(idx)
+        nit_new = min(nit_used + nit_chunk, nit_max)
+
+        # min(ndev, nact) columns: when nact ≥ ndev this spreads the active set
+        # across every device (ihlpsa partitions by columns via
+        # _device_column_partition, which always yields min(ndev, ncols) blocks
+        # — surplus devices idle safely); in the convergence tail (nact < ndev)
+        # it gives nrows == 1 with zero pad slots. On CPU ndev == 1 → one column.
+        ncols = min(ndev, nact)
+        nrows = cld(nact, ncols)
+        zg_sub = Matrix{T}(undef, nrows, ncols)
+        vzs = vec(zg_sub)
+        @inbounds for k in 1:nact
+            vzs[k] = zg_flat[idx[k]]
+        end
+        @inbounds for k in (nact+1):(nrows*ncols)
+            vzs[k] = zg_flat[idx[1]]   # pad with an active z; result discarded
+        end
+
+        S = ihlpsa(backend, zg_sub, P, nit_new, γ, δ; x₀=x₀_fixed, zpd, devs, wgs)
+        σ_sub = vec(permutedims(S))    # column-major, matching vec(zg_sub)
+
+        first_pass = nit_used == 0
+        @inbounds for k in 1:nact
+            ai = idx[k]
+            snew = σ_sub[k]
+            # A point retires only after the criterion holds at nconfirm
+            # consecutive checkpoints — a single small successive difference can
+            # be a slow-convergence plateau, not convergence.
+            if !first_pass && _adaptive_converged(snew, σ_prev[ai], rtolR, atolR)
+                streak[ai] += 1
+                if streak[ai] >= nconfirm
+                    σ_out[ai] = snew
+                    active[ai] = false
+                end
+            else
+                streak[ai] = 0
+            end
+            σ_prev[ai] = snew
+        end
+        nit_used = nit_new
+    end
+
+    if any(active)
+        @warn "ihlpsa_adaptive(compact) hit nit_max=$nit_max with $(count(active)) point(s) unconverged"
+        @inbounds for ai in findall(active)
+            σ_out[ai] = σ_prev[ai]
+        end
+    end
+    verbose && @info "ihlpsa_adaptive(compact) done" nit = nit_used
+    return permutedims(reshape(σ_out, (nx, ny))), nit_used
+end
+
+# Tier 3 single-device worker — resumable lockstep. Mirrors `sdihlpsa`'s batch
+# structure, but the chunk loop runs INSIDE each batch: the Lanczos state stays
+# resident in the workspace between chunks and `lockstep_ihl!` continues from
+# `start = nit_done + 1` instead of reseeding, so total kernel work for a batch
+# equals one fixed-`nit` run at its converged depth. `α`/`β` are sized `nit_max`
+# up front (the resume contract); per chunk only the leading `nit_new` rows feed
+# `ihlsrg!`. Batches are processed sequentially (state residency); each batch
+# stops as soon as ALL of its points converge. Reusing the workspace across
+# batches is safe for the same reason it is in `sdihlpsa`: iteration 1 reads the
+# fresh batch columns of β (still zero), so stale Qv[1] is multiplied by 0.
+# Returns (sr_matrix, nit_deepest, unconverged::Bool).
+function _sdihlpsa_adaptive_resumable(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T},
+    γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, wgs) where {T<:Complex}
+    R = real(T)
+    bgarray = get_bgarray(backend)
+    zv = collect(Iterators.flatten(zg))
+    gtotal = length(zv)
+    sr = zeros(R, gtotal)
+    sr_prev = zeros(R, gtotal)
+    idxbatches = Vector(collect(Iterators.partition(1:gtotal, min(gtotal, zpd))))
+    dzv = adapt(bgarray, zv)
+    α = adapt(bgarray, zeros(T, nit_max, gtotal))
+    β = adapt(bgarray, zeros(T, nit_max + 1, gtotal))
+    ihl = adapt(bgarray, IHLworkspace(P, min(gtotal, zpd), x₀))
+    nit_deepest = 0
+    unconverged = false
+    for idxb in idxbatches
+        g = length(idxb)
+        view(ihl.zv, 1:g) .= view(dzv, idxb)
+        nit_done = 0
+        batch_converged = false
+        streak = 0
+        while nit_done < nit_max
+            nit_new = min(nit_done + nit_chunk, nit_max)
+            lockstep_ihl!(view(α, :, idxb), view(β, :, idxb), ihl, nit_new, g; wgs, start=nit_done + 1)
+            ihlsrg!(view(sr, idxb), view(zv, idxb), γ, δ,
+                adapt(Array, α[1:nit_new, idxb]), adapt(Array, β[1:nit_new+1, idxb]))
+            if nit_done > 0 &&
+               all(_adaptive_converged(sr[i], sr_prev[i], rtol, atol) for i in idxb)
+                streak += 1
+                if streak >= nconfirm
+                    nit_done = nit_new
+                    batch_converged = true
+                    break
+                end
+            else
+                streak = 0
+            end
+            view(sr_prev, idxb) .= view(sr, idxb)
+            nit_done = nit_new
+        end
+        batch_converged || (unconverged = true)
+        nit_deepest = max(nit_deepest, nit_done)
+    end
+    return Matrix{R}(reshape(sr, size(zg))), nit_deepest, unconverged
+end
+
+# Multi-device dispatcher shared by the state-resident workers (Tier 3
+# `_sdihlpsa_adaptive_resumable` and the hybrid `_sdihlpsa_adaptive_hybrid`).
+# Splits grid columns across devices like `ihlpsa` (same
+# `_device_column_partition` + zip truncation), but each device runs its own
+# adaptive loop and stops at its OWN converged depth — devices over easy regions
+# retire early instead of lockstepping to the global worst point. `nit_used` is
+# the deepest depth across devices.
+function _ihlpsa_adaptive_resident(sdworker::F, label, backend, zg::AbstractArray{T,2},
+    P::AbstractMatrixPencil{T}, γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, devs,
+    wgs, verbose) where {F,T<:Complex}
+    if KernelAbstractions.isgpu(backend)
+        m = size(P, 1)
+        if ismissing(devs)
+            devs = devices(backend)
+        end
+        zgidxbatches = _device_column_partition(size(zg, 2), length(devs))
+        # zpd resolved sequentially before the fan-out (device! is process-global);
+        # findmaxbatchihl is sized with nit_max since α/β hold the full budget.
+        zpd_devs = map(zip(devs, zgidxbatches)) do (dev, zgidx)
+            device!(backend, dev)
+            zgb_len = length(zgidx) * size(zg, 1)
+            ismissing(zpd) ? min(findmaxbatchihl(backend, T, m, nit_max), zgb_len) : zpd
+        end
+        results = Vector{Any}(undef, length(zgidxbatches))
+        @sync begin
+            for (did, (dev, zgidx)) in enumerate(zip(devs, zgidxbatches))
+                Threads.@spawn begin
+                    device!(backend, dev)
+                    results[did] = sdworker(backend, zg[:, zgidx], P,
+                        γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd_devs[did], wgs)
+                end
+            end
+        end
+        sr = (hcat((r[1] for r in results)...))::Matrix{real(T)}
+        nit_used = maximum(r[2] for r in results)
+        unconverged = any(r[3] for r in results)
+    else
+        # Unlike sdihlpsa (whose batches run under ThreadsX and would race on the
+        # shared workspace), the resident workers process batches sequentially,
+        # so honoring a user-supplied zpd is safe on CPU too — useful for
+        # memory-capping and for exercising the multi-batch path in tests.
+        sr, nit_used, unconverged = sdworker(backend, zg, P,
+            γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀,
+            ismissing(zpd) ? length(zg) : zpd, wgs)
+    end
+    unconverged &&
+        @warn "ihlpsa_adaptive($label) hit nit_max=$nit_max with unconverged point(s) (rtol=$rtol)"
+    verbose && @info "ihlpsa_adaptive($label) done" nit = nit_used
+    return permutedims(sr), nit_used
+end
+
+# Hybrid single-device worker — per-point retirement WITH resident state. Each
+# batch starts with its own workspace and full-budget α/β; after each chunk the
+# converged points retire and the survivors' per-point state — workspace rows
+# (Qv batch-major, v/x₀ batch-minor, zv) plus α/β columns — is GATHERED into a
+# packed prefix via array indexing (GPUArrays fancy indexing; no custom
+# kernels). Subsequent chunks therefore run kernels over live points only,
+# continuing each point's own Lanczos recurrence uninterrupted: per-point work
+# ≈ its converged depth + one confirm chunk, instead of the batch-worst depth.
+# The gather traffic is O(m·survivors) per chunk — negligible against the
+# O(nit_chunk·m²·survivors) solve work it avoids re-running.
+# `idx_glob` maps packed position → original flat grid index throughout.
+# Returns (sr_matrix, nit_deepest, unconverged::Bool).
+function _sdihlpsa_adaptive_hybrid(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T},
+    γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, wgs) where {T<:Complex}
+    R = real(T)
+    bgarray = get_bgarray(backend)
+    zv_h = collect(Iterators.flatten(zg))
+    gtotal = length(zv_h)
+    σ_out = zeros(R, gtotal)
+    σ_prev = zeros(R, gtotal)            # indexed by ORIGINAL flat grid index
+    idxbatches = Vector(collect(Iterators.partition(1:gtotal, min(gtotal, zpd))))
+    nit_deepest = 0
+    unconverged = false
+    for idxb in idxbatches
+        g = length(idxb)
+        ihl = adapt(bgarray, IHLworkspace(P, g, x₀))
+        α = adapt(bgarray, zeros(T, nit_max, g))
+        β = adapt(bgarray, zeros(T, nit_max + 1, g))
+        view(ihl.zv, 1:g) .= adapt(bgarray, zv_h[idxb])
+        idx_glob = collect(idxb)
+        streak = zeros(Int, g)        # per packed point, gathered with survivors
+        nit_done = 0
+        while g > 0 && nit_done < nit_max
+            nit_new = min(nit_done + nit_chunk, nit_max)
+            lockstep_ihl!(view(α, :, 1:g), view(β, :, 1:g), ihl, nit_new, g; wgs, start=nit_done + 1)
+            sr_a = zeros(R, g)
+            ihlsrg!(sr_a, view(zv_h, idx_glob), γ, δ,
+                adapt(Array, α[1:nit_new, 1:g]), adapt(Array, β[1:nit_new+1, 1:g]))
+            if nit_done == 0
+                for k in 1:g
+                    σ_prev[idx_glob[k]] = sr_a[k]
+                end
+            else
+                keep = Int[]
+                for k in 1:g
+                    gi = idx_glob[k]
+                    # Retire only after nconfirm consecutive passing checkpoints
+                    # — one small successive difference can be a slow-convergence
+                    # plateau rather than convergence.
+                    if _adaptive_converged(sr_a[k], σ_prev[gi], rtol, atol)
+                        streak[k] += 1
+                    else
+                        streak[k] = 0
+                    end
+                    if streak[k] >= nconfirm
+                        σ_out[gi] = sr_a[k]
+                    else
+                        σ_prev[gi] = sr_a[k]
+                        push!(keep, k)
+                    end
+                end
+                if length(keep) < g
+                    if isempty(keep)
+                        g = 0
+                    else
+                        # Gather survivors' state to a packed prefix. Layouts:
+                        # Qv flat (batch, m, 2); v/x₀ flat (m, batch); zv (batch).
+                        Qv = VectorOfSimilarArrays(flatview(ihl.Qv)[keep, :, :])
+                        v = VectorOfSimilarVectors(flatview(ihl.v)[:, keep])
+                        x₀p = VectorOfSimilarVectors(flatview(ihl.x₀)[:, keep])
+                        zvp = ihl.zv[keep]
+                        ihl = IHLworkspace{T,get_backend(ihl)}(length(keep), zvp, ihl.P, x₀p, Qv, v)
+                        α = α[:, keep]
+                        β = β[:, keep]
+                        idx_glob = idx_glob[keep]
+                        streak = streak[keep]
+                        g = length(keep)
+                    end
+                end
+            end
+            nit_done = nit_new
+        end
+        if g > 0
+            unconverged = true
+            for k in 1:g
+                σ_out[idx_glob[k]] = σ_prev[idx_glob[k]]
+            end
+        end
+        nit_deepest = max(nit_deepest, nit_done)
+    end
+    return Matrix{R}(reshape(σ_out, size(zg))), nit_deepest, unconverged
 end
 
 ## END WRAPPER FUNCTIONS ##
