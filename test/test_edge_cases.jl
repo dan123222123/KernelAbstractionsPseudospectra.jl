@@ -69,12 +69,12 @@ end
 end
 
 @testset "_device_column_partition invariants" begin
-    # The multi-device dispatch in ihlpsa indexes zgidxbatches[1:nblocks] and
-    # zips blocks against devices, so the partition must always yield exactly
-    # min(ndev, ncols) contiguous, ordered, balanced blocks. The old ceil-based
-    # Iterators.partition could yield fewer blocks than devices (e.g. 9 cols /
-    # 4 devs → 3 blocks of 3) and BoundsError the device loops — these are the
-    # host-side regression tests for that fix (there is no GPU CI).
+    # The multi-device fan-out (`_ihlpsa_fanout`) zips blocks against devices, so
+    # the partition must always yield exactly min(ndev, ncols) contiguous,
+    # ordered, balanced blocks. The old ceil-based Iterators.partition could yield
+    # fewer blocks than devices (e.g. 9 cols / 4 devs → 3 blocks of 3) and
+    # BoundsError the device loop — these are the host-side regression tests for
+    # that fix (there is no GPU CI).
     for ncols in 1:20, ndev in 1:6
         blocks = _device_column_partition(ncols, ndev)
         @test blocks isa Vector{UnitRange{Int}}

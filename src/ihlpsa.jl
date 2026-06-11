@@ -304,8 +304,8 @@ end
 # Vector{UnitRange{Int}} in column order; empty when ncols == 0. Replaces the
 # old ceil-based Iterators.partition in the multi-device dispatch, which could
 # yield FEWER blocks than devices (e.g. 9 cols / 4 devs → blocks of 3,3,3) and
-# BoundsError the device loops that index zgidxbatches[1:ndev] — besides idling
-# devices the balanced split now uses (9/4 → 3,2,2,2 on all four).
+# BoundsError the device fan-out, which assumed one block per device — besides
+# idling devices the balanced split now uses (9/4 → 3,2,2,2 on all four).
 function _device_column_partition(ncols::Integer, ndev::Integer)
     ndev ≥ 1 || throw(ArgumentError("ndev must be ≥ 1, got $ndev"))
     ncols ≥ 0 || throw(ArgumentError("ncols must be ≥ 0, got $ncols"))
@@ -399,8 +399,8 @@ end
 # Deterministic unit-norm complex start vector for the adaptive driver. The
 # SAME vector is reused for every chunk so that eigmax(T_k) vs eigmax(T_{k+chunk})
 # compares one Lanczos run at two depths (a principled convergence monitor). If
-# instead x₀ were `missing`, the IHLworkspace ctor would draw a FRESH randn per
-# chunk (see line ~102) and consecutive chunks would be independent runs, making
+# instead x₀ were `missing`, the IHLworkspace constructor would draw a FRESH randn
+# per chunk and consecutive chunks would be independent runs, making
 # the convergence test meaningless. Mirrors the test helper `_seeded_x₀`.
 function _adaptive_x₀(::Type{T}, m, seed) where {T<:Complex}
     rng = MersenneTwister(seed)
@@ -505,11 +505,11 @@ function ihlpsa(
         R(rtol), R(atol), nconfirm, x₀_fixed, zpd, devs, wgs, verbose)
 end
 
-# Multi-device adaptive dispatcher. Splits grid columns across devices like the
-# fixed engine (`_device_column_partition` + zip truncation), but each device runs
-# its own per-point adaptive loop (`_sdihlpsa_adaptive`) and stops at its OWN
-# converged depth — devices over easy regions retire early instead of lockstepping
-# to the global worst point. `nit_used` is the deepest depth across devices.
+# Multi-device adaptive dispatcher. Fans grid columns out across devices via
+# `_ihlpsa_fanout` (shared with the fixed engine), but each device runs its own
+# per-point adaptive loop (`_sdihlpsa_adaptive`) and stops at its OWN converged
+# depth — devices over easy regions retire early instead of lockstepping to the
+# global worst point. `nit_used` is the deepest depth across devices.
 function _ihlpsa_adaptive(backend, zg::AbstractArray{T,2},
     P::AbstractMatrixPencil{T}, γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, devs,
     wgs, verbose) where {T<:Complex}
