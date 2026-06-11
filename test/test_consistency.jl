@@ -125,6 +125,30 @@ end
     end
 end
 
+@testset "ihlpsa adaptive nit_max cap" begin
+    # With nconfirm=2 a point needs ≥2 real checkpoints to retire, which nit_max=3
+    # (chunks at 2,3) cannot provide — so every point hits the cap. The driver must
+    # @warn, set nit_used=nit_max, and fall back to the deepest-chunk σ (≈ the
+    # fixed run at the cap), not error or return garbage.
+    Random.seed!(0xCA9F)
+    for T in (ComplexF32, ComplexF64)
+        m = 24
+        A = randn(T, m, m)
+        P = MatrixPencil(A)
+        gx, gy, zg = qgrid(T, (-1.5, 1.5), (-1.5, 1.5), (8, 8))
+        x₀ = _seeded_x₀(T, m, 0xBEEF)
+        nit_cap = 3
+
+        s_adp, nit_used = @test_logs (:warn,) match_mode = :any ihlpsa(CPU(), zg, P;
+            x₀=x₀, nit_max=nit_cap, rtol=1e-12)
+        s_fix = ihlpsa(CPU(), zg, P, nit_cap; x₀=x₀)
+
+        @test nit_used == nit_cap
+        @test all(isfinite, s_adp)
+        @test isapprox(s_adp, s_fix; rtol=(T == ComplexF32 ? 1e-4 : 1e-10))
+    end
+end
+
 # Cross-backend: same problem, same explicit x₀, results agree element-wise.
 # `types` lets FP64-less backends (Intel iGPUs) restrict to ComplexF32.
 function test_cross_backend(backend; types=(ComplexF32, ComplexF64))

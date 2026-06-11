@@ -237,45 +237,15 @@ end
 
 ## WRAPPER FUNCTIONS ##
 
-# single-device batched inverse lanczos pseudospectra
-function sdihlpsa(
-    backend;
-    zg::AbstractArray{T,2},
-    P::AbstractMatrixPencil{T},
-    γ,
-    δ,
-    zpd::Integer,
-    nit::Integer=max(1, ceil(Integer, log2(size(P, 1)))),
-    x₀::Union{Missing,AbstractVector{T},AbstractArrayOfSimilarArrays{T}}=missing,
-    pchnl::Union{Missing,Channel}=missing,
-    wgs=missing
-) where {T<:Complex}
-    dev = device(backend)
-    bgarray = get_bgarray(backend)
+# Flatten the grid to a point vector and split 1:n into contiguous zpd-sized
+# batches. Shared by the fixed (`sdihlpsa`) and adaptive (`_sdihlpsa_adaptive`)
+# single-device workers.
+function _grid_batches(zg, zpd)
     zv = collect(Iterators.flatten(zg))
-    gtotal = length(zv)
-    sr = zeros(real(T), length(zv))
-    idxbatches = Vector(collect(Iterators.partition(1:gtotal, min(gtotal, zpd))))
-    batches = idxbatches
-    dzv = adapt(bgarray, zv)
-    α = adapt(bgarray, zeros(T, nit, gtotal))
-    β = adapt(bgarray, zeros(T, nit + 1, gtotal))
-    ihl = adapt(bgarray, IHLworkspace(P, zpd, x₀))
-    _foreach = !KernelAbstractions.isgpu(backend) ? ThreadsX.foreach : Base.foreach
-    @sync _foreach(batches) do idxb
-        view(ihl.zv, 1:length(idxb)) .= view(dzv, idxb)
-        lockstep_ihl!(view(α, :, idxb), view(β, :, idxb), ihl, nit, length(idxb); wgs)
-        Threads.@spawn begin
-            device!(backend, dev)
-            if !ismissing(pchnl)
-                put!(pchnl, length(idxb) * nit)
-            end
-            ihlsrg!(view(sr, idxb), view(zv, idxb), γ, δ, adapt(Array, α[:, idxb]), adapt(Array, β[:, idxb]))
-        end
-    end
-    return Matrix{real(T)}(reshape(sr, size(zg)))
+    return zv, collect(Iterators.partition(1:length(zv), min(length(zv), zpd)))
 end
 
+# single-device batched inverse lanczos pseudospectra
 function sdihlpsa(
     backend,
     zg::AbstractArray{T,2},
@@ -288,8 +258,28 @@ function sdihlpsa(
     pchnl::Union{Missing,Channel}=missing,
     wgs=missing
 ) where {T<:Complex}
-    sdargs = (; zg, P, γ, δ, zpd, nit, x₀, pchnl, wgs)
-    sdihlpsa(backend; sdargs...)
+    dev = device(backend)
+    bgarray = get_bgarray(backend)
+    zv, idxbatches = _grid_batches(zg, zpd)
+    gtotal = length(zv)
+    sr = zeros(real(T), gtotal)
+    dzv = adapt(bgarray, zv)
+    α = adapt(bgarray, zeros(T, nit, gtotal))
+    β = adapt(bgarray, zeros(T, nit + 1, gtotal))
+    ihl = adapt(bgarray, IHLworkspace(P, zpd, x₀))
+    _foreach = !KernelAbstractions.isgpu(backend) ? ThreadsX.foreach : Base.foreach
+    @sync _foreach(idxbatches) do idxb
+        view(ihl.zv, 1:length(idxb)) .= view(dzv, idxb)
+        lockstep_ihl!(view(α, :, idxb), view(β, :, idxb), ihl, nit, length(idxb); wgs)
+        Threads.@spawn begin
+            device!(backend, dev)
+            if !ismissing(pchnl)
+                put!(pchnl, length(idxb) * nit)
+            end
+            ihlsrg!(view(sr, idxb), view(zv, idxb), γ, δ, adapt(Array, α[:, idxb]), adapt(Array, β[:, idxb]))
+        end
+    end
+    return Matrix{real(T)}(reshape(sr, size(zg)))
 end
 
 # computes the largest maxbatch that will fit in the target device memory up to the specified margin of error (moe)
@@ -552,11 +542,10 @@ function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPe
     γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, wgs) where {T<:Complex}
     R = real(T)
     bgarray = get_bgarray(backend)
-    zv_h = collect(Iterators.flatten(zg))
+    zv_h, idxbatches = _grid_batches(zg, zpd)
     gtotal = length(zv_h)
     σ_out = zeros(R, gtotal)
     σ_prev = zeros(R, gtotal)            # indexed by ORIGINAL flat grid index
-    idxbatches = Vector(collect(Iterators.partition(1:gtotal, min(gtotal, zpd))))
     nit_deepest = 0
     unconverged = false
     for idxb in idxbatches
