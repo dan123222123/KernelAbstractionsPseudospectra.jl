@@ -140,18 +140,27 @@ Tier 2 lands and we measure the chunk-restart overhead in production.
 
 ## API
 
-Surface both tiers as exported functions, plus keep `ihlpsa(..., nit)` for
-backward compat:
+> **Consolidated (final).** The tiered exploration below shipped only its winner:
+> the **per-point hybrid**. Tiers 1–3 and the `compact`/`resumable` flags have been
+> removed, and `ihlpsa_adaptive` is folded into `ihlpsa` itself. There is now one
+> public entry point — omit `nit` for adaptive, pass it for fixed:
+>
+> ```julia
+> ihlpsa(backend, zg, P, nit::Integer, γ=1, δ=0; ...)   # fixed → Matrix
+> ihlpsa(backend, zg, P; γ=1, δ=0, rtol, nit_max, ...)  # adaptive (hybrid) → (σ, nit_used)
+> ```
+
+Default adaptive kwargs: `nit_chunk=2, nit_max=8*ceil(Int, log2(m))`,
+`rtol=_adaptive_default_rtol(T)` (1e-4 F32 / 1e-6 F64), `nconfirm=2`. The small
+`nit_chunk` matches the per-point hybrid's retirement granularity.
+
+The original tier sketch (kept below for history):
 
 ```julia
-ihlpsa(backend, zg, P, nit::Integer, ...)             # existing fixed-nit
-ihlpsa_adaptive(backend, zg, P; ...)                  # Tier 1
-ihlpsa_adaptive(backend, zg, P; compact=true, ...)    # Tier 2 (single entry)
+ihlpsa(backend, zg, P, nit::Integer, ...)             # fixed-nit
+ihlpsa_adaptive(backend, zg, P; ...)                  # Tier 1   (removed)
+ihlpsa_adaptive(backend, zg, P; compact=true, ...)    # Tier 2   (removed)
 ```
-
-Default kwargs: `nit_chunk=8, nit_max=2 * ceil(Int, log2(m)), rtol=1e-6`.
-The `nit_max` default is conservative — the reasoning: most points converge
-in O(log m) iterations even on hard problems; budget 2× that for safety.
 
 ---
 

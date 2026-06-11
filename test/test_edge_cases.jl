@@ -13,8 +13,8 @@ using KAPseudospectra: findmaxbatchihl, _device_column_partition
         A = reshape([2.0 + 0.0im], 1, 1)
         P = MatrixPencil(A)
         gx, gy, zg = qgrid(ComplexF64, (-1.0, 1.0), (-1.0, 1.0), (4, 4))
-        # Default nit was clamped to ≥ 1 to handle this.
-        s = ihlpsa(CPU(), zg, P)
+        # Fixed nit=1: degenerate single-step Lanczos on a 1×1 pencil.
+        s = ihlpsa(CPU(), zg, P, 1)
         @test all(isfinite, s)
         @test size(s) == (4, 4)
     end
@@ -23,7 +23,7 @@ using KAPseudospectra: findmaxbatchihl, _device_column_partition
         A = ComplexF64[1.0 0.5; 0.0 2.0]
         P = MatrixPencil(A)
         gx, gy, zg = qgrid(ComplexF64, (-1.0, 1.0), (-1.0, 1.0), (4, 4))
-        s = ihlpsa(CPU(), zg, P)
+        s = ihlpsa(CPU(), zg, P, 2)
         @test all(isfinite, s)
         @test size(s) == (4, 4)
     end
@@ -43,7 +43,7 @@ using KAPseudospectra: findmaxbatchihl, _device_column_partition
         # nx=4, ny=32. ihlpsa returns permutedims(result), so output shape is
         # (ny, nx) = (32, 4).
         gx, gy, zg = qgrid(ComplexF64, (-1.0, 1.0), (-1.0, 1.0), (4, 32))
-        s = ihlpsa(CPU(), zg, P)
+        s = ihlpsa(CPU(), zg, P, 3)
         @test size(s) == (32, 4)
         @test all(isfinite, s)
     end

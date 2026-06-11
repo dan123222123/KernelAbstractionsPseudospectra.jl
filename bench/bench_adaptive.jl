@@ -1,15 +1,10 @@
-# Benchmark: fixed-`nit` `ihlpsa` vs Tier-1 `ihlpsa_adaptive`.
+# Benchmark: fixed-`nit` `ihlpsa` vs adaptive `ihlpsa` (per-point hybrid).
 #
 # Reports wall-time and the converged `nit` for the Grcar matrix — a classic
 # pseudospectra example with highly heterogeneous per-grid-point convergence
 # (near-eigenvalue points converge in 1–2 iters; mid-pseudospectrum points need
-# tens). This is the baseline that quantifies the Tier-1 win ("stop guessing
-# nit") and motivates Tier 2 (per-point compaction, the real wall-clock speedup).
-#
-# NOTE: Tier 1 re-runs Lanczos from iteration 1 each chunk and still pays the
-# slowest-point cost on the whole grid, so its raw wall-time vs a single
-# well-chosen fixed-`nit` run is roughly break-even — the value is not having to
-# pick `nit` by hand. The dramatic speedup is a Tier 2 deliverable.
+# tens). The adaptive driver retires each grid point at its own converged depth,
+# so its win over a hand-picked fixed `nit` grows with grid heterogeneity and m.
 #
 # Usage:
 #   julia --project=test bench/bench_adaptive.jl            # CPU, m ∈ {64,128,256}
@@ -46,26 +41,16 @@ function bench(backend=CPU(); ms=(64, 128, 256), region=((-1, 3), (-3, 3)), gp=(
         _, _, zg = qgrid(T, region[1], region[2], gp)
         nit_fixed = 4 * ceil(Int, log2(m))
 
-        # Warm up all paths (compilation + device init) before timing.
+        # Warm up both paths (compilation + device init) before timing.
         ihlpsa(backend, zg, P, 2)
-        ihlpsa_adaptive(backend, zg, P; nit_max=nit_fixed)
-        ihlpsa_adaptive(backend, zg, P; nit_max=nit_fixed, compact=true)
-        ihlpsa_adaptive(backend, zg, P; nit_max=nit_fixed, resumable=true)
-        ihlpsa_adaptive(backend, zg, P; nit_max=nit_fixed, compact=true, resumable=true)
+        ihlpsa(backend, zg, P; nit_max=nit_fixed)
 
         t_fixed = @elapsed ihlpsa(backend, zg, P, nit_fixed)
-        n_glob = 0
-        t_glob = @elapsed ((_, n_glob) = ihlpsa_adaptive(backend, zg, P; nit_max=nit_fixed))
-        n_comp = 0
-        t_comp = @elapsed ((_, n_comp) = ihlpsa_adaptive(backend, zg, P; nit_max=nit_fixed, compact=true))
-        n_res = 0
-        t_res = @elapsed ((_, n_res) = ihlpsa_adaptive(backend, zg, P; nit_max=nit_fixed, resumable=true))
-        n_hyb = 0
-        t_hyb = @elapsed ((_, n_hyb) = ihlpsa_adaptive(backend, zg, P; nit_max=nit_fixed, compact=true, resumable=true))
+        n_adp = 0
+        t_adp = @elapsed ((_, n_adp) = ihlpsa(backend, zg, P; nit_max=nit_fixed))
 
-        @printf("  m=%4d   fixed(nit=%2d) %7.3fs   global(nit=%2d) %7.3fs (%.2f×)   compact(nit=%2d) %7.3fs (%.2f×)   resumable(nit=%2d) %7.3fs (%.2f×)   hybrid(nit=%2d) %7.3fs (%.2f×)\n",
-                m, nit_fixed, t_fixed, n_glob, t_glob, t_fixed / t_glob, n_comp, t_comp, t_fixed / t_comp,
-                n_res, t_res, t_fixed / t_res, n_hyb, t_hyb, t_fixed / t_hyb)
+        @printf("  m=%4d   fixed(nit=%2d) %7.3fs   adaptive(nit=%2d) %7.3fs (%.2f×)\n",
+                m, nit_fixed, t_fixed, n_adp, t_adp, t_fixed / t_adp)
     end
 end
 

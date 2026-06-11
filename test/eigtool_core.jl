@@ -33,14 +33,14 @@ function testihlpsa(fname, backend, tol)
     return (norm(abs.(srgref .- srg)) / norm(srgref)) < tol
 end
 
-# test ihlpsa_adaptive against eigtool. Stops at the adaptive rtol rather than
+# test adaptive ihlpsa against eigtool. Stops at the adaptive rtol rather than
 # running to full convergence like testihlpsa, so `tol` is looser (≈ stopping
-# rtol) than the fixed-nit reference tolerances. kwargs select the mode (e.g.
-# compact=true, resumable=true for the hybrid).
+# rtol) than the fixed-nit reference tolerances. kwargs forward adaptive options
+# (rtol, nit_chunk, nit_max, …).
 function testihlpsa_adaptive(fname, backend, tol; kwargs...)
     srgref, A, zg = readvars(fname)
     P = MatrixPencil(schur(Matrix{complex(eltype(A))}(A)))
-    srg, nit_used = ihlpsa_adaptive(backend, zg, P; kwargs...)
-    println("Normed Error for ihlpsa_adaptive on $(backend) is $(norm(abs.(srgref .- srg))/norm(srgref)) (nit=$nit_used)")
+    srg, nit_used = ihlpsa(backend, zg, P; kwargs...)
+    println("Normed Error for ihlpsa adaptive on $(backend) is $(norm(abs.(srgref .- srg))/norm(srgref)) (nit=$nit_used)")
     return (norm(abs.(srgref .- srg)) / norm(srgref)) < tol
 end

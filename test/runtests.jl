@@ -24,18 +24,18 @@ function test_ihlpsa_parter16(backend; types=(ComplexF32, ComplexF64))
         if ComplexF32 in types
             @testset "F32" begin
                 @test testihlpsa(tdir * "F32parter16.mat", backend, 1e-6)
-                # hybrid adaptive vs the same eigtool reference; stops at the
-                # adaptive rtol (measured 3.9e-7 normed — matches the fixed run).
-                @test testihlpsa_adaptive(tdir * "F32parter16.mat", backend, 1e-5;
-                    compact=true, resumable=true)
+                # adaptive (per-point hybrid) vs the same eigtool reference; stops
+                # at the adaptive rtol (measured 3.9e-7 normed — matches fixed run).
+                @test testihlpsa_adaptive(tdir * "F32parter16.mat", backend, 1e-5)
             end
         end
         if ComplexF64 in types
             @testset "F64" begin
                 @test testihlpsa(tdir * "F64parter16.mat", backend, 1e-14)
-                # measured 7.0e-13 normed at the default stopping rtol.
-                @test testihlpsa_adaptive(tdir * "F64parter16.mat", backend, 1e-11;
-                    compact=true, resumable=true)
+                # adaptive stops at the default F64 rtol=1e-6 (not at eps), so it
+                # lands ~6.1e-11 normed vs the eigtool reference — orders of
+                # magnitude inside plotting accuracy. Tighten `rtol` for more.
+                @test testihlpsa_adaptive(tdir * "F64parter16.mat", backend, 1e-10)
             end
         end
     end

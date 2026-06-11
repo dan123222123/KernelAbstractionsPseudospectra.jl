@@ -45,7 +45,9 @@ if oneAPI.functional()
             A = randn(T, m, m)
             P = MatrixPencil(schur(A))
             @compile_workload begin
-                ihlpsa(oneAPIBackend(), zg, P, 5; devs=[collect(oneAPI.devices())[1]])
+                d = [collect(oneAPI.devices())[1]]
+                ihlpsa(oneAPIBackend(), zg, P, 5; devs=d)   # fixed-nit path
+                ihlpsa(oneAPIBackend(), zg, P; devs=d)      # adaptive (per-point hybrid)
             end
         end
     end

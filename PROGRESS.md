@@ -376,3 +376,27 @@ Measured effect (Grcar m=128, 80×80, vs ℂsvdpsa):
 - Possible hybrid refinement: stop gathering below a small active-set
   threshold (launch-overhead-bound tail) and just run the stragglers to
   convergence in one final chunk of size nit_max − nit_done.
+
+## Consolidation — hybrid-only, merged into `ihlpsa` — DONE
+
+Benchmarking (incl. a 3× K40m box, 500×500 grids) confirmed only the **hybrid**
+(per-point retirement + resident state) is worth keeping; Tiers 1–3 never beat a
+hand-picked fixed `nit` and only added flag-combinatorics. So the public surface
+was collapsed to a single function:
+
+- **Removed:** `ihlpsa_adaptive` (export + function), the `compact`/`resumable`
+  kwargs, and the now-dead workers `_ihlpsa_adaptive_compact` (Tier 2),
+  `_sdihlpsa_adaptive_resumable` (Tier 3), and the Tier-1 whole-grid loop.
+- **Kept, renamed:** the hybrid worker `_sdihlpsa_adaptive_hybrid` →
+  `_sdihlpsa_adaptive`; the multi-device dispatcher `_ihlpsa_adaptive_resident`
+  → `_ihlpsa_adaptive` (specialized to the one worker — no `sdworker`/`label`).
+- **`ihlpsa` is now two methods** sharing the engine: fixed
+  `ihlpsa(b,zg,P,nit::Integer,γ,δ;…)` (forwards to the extracted `_ihlpsa_fixed`,
+  returns `Matrix`) and adaptive `ihlpsa(b,zg,P; …)` (omit `nit` ⇒ per-point
+  hybrid, returns `(σ, nit_used)`; `γ`,`δ` keyword). Arity dispatch: the fixed
+  method dropped its default `nit`, so arity-3 unambiguously selects adaptive.
+- **Tests/bench/precompile** updated: tier-specific testsets in
+  `test_consistency.jl` deleted (the bare adaptive call now *is* the hybrid);
+  `bench_adaptive.jl` reduced to fixed-vs-adaptive; GPU ext `@compile_workload`s
+  now also precompile the adaptive path (first adaptive GPU call no longer cold);
+  a real docstring added to `ihlpsa`, README gained a Usage section.

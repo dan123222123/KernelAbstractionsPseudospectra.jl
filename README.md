@@ -6,6 +6,32 @@ Accelerated pseudospectral calculations using KernelAbstractions.jl
 2) Inside of the Julia REPL (preferably within a top-level environment e.g. @v1.10, etc.) run `]dev path/to/KAPseudospectra.jl`
 3) You may need to run `]instantiate` to resolve package dependencies of `KAPseudospectra.jl`
 
+# Usage
+`ihlpsa` computes pseudospectra (resolvent-norm contours) of a matrix pencil over
+a grid of complex shifts via batched inverse Lanczos, fanned out across all
+devices of the chosen KernelAbstractions backend.
+
+```julia
+using KAPseudospectra, KernelAbstractions   # + `using CUDA`/`AMDGPU`/... for a GPU backend
+A = my_matrix
+P = MatrixPencil(A)                          # or MatrixPencil(A, B) for a pencil zB − A
+_, _, zg = qgrid(ComplexF64, (-2, 5), (-4.5, 4.5), (300, 300))   # grid of shifts
+
+# Fixed depth: every grid point runs exactly `nit` Lanczos iterations.
+srg = ihlpsa(CPU(), zg, P, 16)               # returns the grid Matrix of σ values
+
+# Adaptive depth (omit `nit`): each grid point retires at its own converged
+# depth (per-point hybrid). Returns (σ, nit_used).
+srg, nit_used = ihlpsa(CPU(), zg, P)
+srg, nit_used = ihlpsa(CUDABackend(), zg, P) # same call, multi-GPU
+```
+
+Adaptive knobs are keywords on the no-`nit` form: `rtol`/`atol` (convergence
+tolerance), `nconfirm` (confirmation chunks), `nit_chunk`, `nit_max`, and `γ`,`δ`
+for perturbation scaling (`γ`,`δ` are positional in the fixed form). Pass `devs`
+to restrict which GPUs are used. Adaptive runs across multiple GPUs the same way
+the fixed path does.
+
 # Examples
 Check out `examples/` for three scripts that showcase usage of this package.
 

@@ -49,7 +49,8 @@ if Metal.functional()
             A = randn(T, m, m)
             P = MatrixPencil(schur(A))
             @compile_workload begin
-                ihlpsa(MetalBackend(), zg, P, 5; devs=[Metal.device()])
+                ihlpsa(MetalBackend(), zg, P, 5; devs=[Metal.device()])   # fixed-nit path
+                ihlpsa(MetalBackend(), zg, P; devs=[Metal.device()])       # adaptive (per-point hybrid)
             end
         end
     end

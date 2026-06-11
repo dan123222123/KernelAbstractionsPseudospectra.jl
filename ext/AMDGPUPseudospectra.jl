@@ -30,7 +30,9 @@ if AMDGPU.functional()
             A = randn(T, m, m)
             P = MatrixPencil(schur(A))
             @compile_workload begin
-                ihlpsa(ROCBackend(), zg, P, 5; devs=[collect(AMDGPU.devices())[1]])
+                d = [collect(AMDGPU.devices())[1]]
+                ihlpsa(ROCBackend(), zg, P, 5; devs=d)   # fixed-nit path
+                ihlpsa(ROCBackend(), zg, P; devs=d)      # adaptive (per-point hybrid)
             end
         end
     end

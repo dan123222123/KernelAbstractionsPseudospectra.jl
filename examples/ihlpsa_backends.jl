@@ -36,6 +36,9 @@ A = MatrixDepot.parter(T, n)
 gx, gy, zg = qgrid(T, (-2, 5), (-4.5, 4.5), (g, g))
 P = MatrixPencil(schur(A))
 srg = ihlpsa(backend, zg, P, nit; wgs)
+# Adaptive nit (omit the positional `nit`): retires each grid point at its own
+# converged depth and returns (σ, nit_used). Drop-in for the line above:
+#srg, nit_used = ihlpsa(backend, zg, P; wgs)
 #
 tv = -3:0.25:0
 tl = [L"10^{%$i}" for i in tv]

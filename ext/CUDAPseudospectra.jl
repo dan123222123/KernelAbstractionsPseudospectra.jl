@@ -30,7 +30,9 @@ if CUDA.functional()
             A = randn(T, m, m)
             P = MatrixPencil(schur(A))
             @compile_workload begin
-                ihlpsa(CUDABackend(), zg, P, 5; devs=[collect(CUDA.devices())[1]])
+                d = [collect(CUDA.devices())[1]]
+                ihlpsa(CUDABackend(), zg, P, 5; devs=d)   # fixed-nit path
+                ihlpsa(CUDABackend(), zg, P; devs=d)      # adaptive (per-point hybrid)
             end
         end
     end
