@@ -34,21 +34,11 @@ end
 ## precompile gpu code (only when a device is actually usable)
 if oneAPI.functional()
     @setup_workload begin
-        using LinearAlgebra
         # Only precompile the element types the device can actually run, or the
         # F64 workload would throw at precompile time on an FP64-less iGPU.
         Ts = KAPseudospectra.supports_fp64(oneAPIBackend()) ? [ComplexF32, ComplexF64] : [ComplexF32]
-        for T in Ts
-            m = 32
-            g = 100
-            gx, gy, zg = qgrid(T, (-4, 4), (-4, 4), (g, g))
-            A = randn(T, m, m)
-            P = MatrixPencil(schur(A))
-            @compile_workload begin
-                d = [collect(oneAPI.devices())[1]]
-                ihlpsa(oneAPIBackend(), zg, P, 5; devs=d)   # fixed-nit path
-                ihlpsa(oneAPIBackend(), zg, P; devs=d)      # adaptive (per-point hybrid)
-            end
+        @compile_workload begin
+            KAPseudospectra._precompile_ihlpsa(oneAPIBackend(), collect(oneAPI.devices())[1], Ts)
         end
     end
 end

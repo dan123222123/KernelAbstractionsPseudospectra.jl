@@ -40,18 +40,9 @@ KAPseudospectra.device_reclaim(B::Metal.MetalBackend) = GC.gc()
 ## precompile gpu code (only when a device is actually usable)
 if Metal.functional()
     @setup_workload begin
-        using LinearAlgebra
         # Apple GPUs have no FP64 — ComplexF32 only.
-        for T in [ComplexF32]
-            m = 32
-            g = 100
-            gx, gy, zg = qgrid(T, (-4, 4), (-4, 4), (g, g))
-            A = randn(T, m, m)
-            P = MatrixPencil(schur(A))
-            @compile_workload begin
-                ihlpsa(MetalBackend(), zg, P, 5; devs=[Metal.device()])   # fixed-nit path
-                ihlpsa(MetalBackend(), zg, P; devs=[Metal.device()])       # adaptive (per-point hybrid)
-            end
+        @compile_workload begin
+            KAPseudospectra._precompile_ihlpsa(MetalBackend(), Metal.device(), [ComplexF32])
         end
     end
 end

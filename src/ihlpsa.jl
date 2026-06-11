@@ -322,6 +322,38 @@ function _device_column_partition(ncols::Integer, ndev::Integer)
     return blocks
 end
 
+# Multi-device GPU fan-out shared by the fixed and adaptive drivers. Partitions
+# zg's columns across `devs`, resolves a per-device zpd (device-memory budget
+# sized by `budget_nit`), then spawns `worker(zgb, zpd_dev)` on each device with
+# that device active; returns the per-device results in column order. zpd is
+# resolved sequentially BEFORE the parallel fan-out because device! is
+# process-global on CUDA/AMDGPU and findmaxbatchihl queries the *current* device's
+# free memory — racing it across spawns can read the wrong device's budget. `zip`
+# pairs blocks with devices and truncates to the shorter side, so when ncols < ndev
+# the surplus devices are simply never touched (devs need only be iterable; only
+# the blocks are indexed). Pass `pbar` to label a progress bar with the block count.
+function _ihlpsa_fanout(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T},
+    budget_nit, zpd, devs, worker; pbar=nothing) where {T<:Complex}
+    m = size(P, 1)
+    ismissing(devs) && (devs = devices(backend))
+    blocks = _device_column_partition(size(zg, 2), length(devs))
+    pbar === nothing ||
+        set_description(pbar, "$(length(blocks))/$(length(devs)) device(s), grid points * nit:")
+    zpd_devs = map(zip(devs, blocks)) do (dev, zgidx)
+        device!(backend, dev)
+        zgb_len = length(zgidx) * size(zg, 1)
+        ismissing(zpd) ? min(findmaxbatchihl(backend, T, m, budget_nit), zgb_len) : zpd
+    end
+    results = Vector{Any}(undef, length(blocks))
+    @sync for (did, (dev, zgidx)) in enumerate(zip(devs, blocks))
+        Threads.@spawn begin
+            device!(backend, dev)
+            results[did] = worker(zg[:, zgidx], zpd_devs[did])
+        end
+    end
+    return results
+end
+
 # Fixed-nit engine: multi-device batched inverse-Lanczos at a caller-given depth.
 # The public `ihlpsa(..., nit::Integer, ...)` method forwards here.
 function _ihlpsa_fixed(
@@ -337,7 +369,6 @@ function _ihlpsa_fixed(
     devs=missing,
     wgs=missing
 ) where {T<:Complex}
-    m = size(P.A, 1)
     # progress bar + consumer task only when caller asks for one. Otherwise the
     # consumer just blocks forever on an empty channel and the spawn leaks at
     # precompile time.
@@ -351,40 +382,9 @@ function _ihlpsa_fixed(
         end
     end
     if KernelAbstractions.isgpu(backend)
-        if ismissing(devs)
-            devs = devices(backend)
-        end
-        zgidxbatches = _device_column_partition(size(zg, 2), length(devs))
-        progress && set_description(pbar, "$(length(zgidxbatches))/$(length(devs)) device(s), grid points * nit:")
-        # Resolve per-device zpd sequentially BEFORE the parallel fan-out: device!
-        # is process-global on AMDGPU/CUDA, and findmaxbatchihl reclaims+queries
-        # free memory of "the current device" — racing this across spawns can
-        # query the wrong device's memory budget.
-        # zip pairs each block with a device and truncates to the shorter side,
-        # so when ncols < ndev the surplus devices are simply never touched.
-        # devs need only be iterable (CUDA.devices() is a non-indexable
-        # DeviceIterator); only zgidxbatches is ever indexed, and zip guarantees
-        # did ≤ length(zgidxbatches).
-        zpd_devs = map(zip(devs, zgidxbatches)) do (dev, zgidx)
-            device!(backend, dev)
-            zgb_len = length(zgidx) * size(zg, 1)
-            ismissing(zpd) ? min(findmaxbatchihl(backend, T, m, nit), zgb_len) : zpd
-        end
-        results = Vector{Any}(undef, length(zgidxbatches))
-        @sync begin
-            for (did, (dev, zgidx)) in enumerate(zip(devs, zgidxbatches))
-                Threads.@spawn begin
-                    device!(backend, dev)
-                    zgb = zg[:, zgidx]
-                    zpd_dev = zpd_devs[did]
-                    if progress
-                        results[did] = sdihlpsa(backend, zgb, P, γ, δ, zpd_dev, nit, x₀, pchnl, wgs)
-                    else
-                        results[did] = sdihlpsa(backend, zgb, P, γ, δ, zpd_dev, nit, x₀, missing, wgs)
-                    end
-                end
-            end
-        end
+        results = _ihlpsa_fanout(backend, zg, P, nit, zpd, devs,
+            (zgb, zpd_dev) -> sdihlpsa(backend, zgb, P, γ, δ, zpd_dev, nit, x₀,
+                progress ? pchnl : missing, wgs); pbar)
         result = (hcat(results...))::Matrix{real(T)}
     else
         # note, cpu CANNOT currently batch zg -- there are race conditions present due to pre-allocation of ihl for device codes
@@ -514,28 +514,10 @@ function _ihlpsa_adaptive(backend, zg::AbstractArray{T,2},
     P::AbstractMatrixPencil{T}, γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, devs,
     wgs, verbose) where {T<:Complex}
     if KernelAbstractions.isgpu(backend)
-        m = size(P, 1)
-        if ismissing(devs)
-            devs = devices(backend)
-        end
-        zgidxbatches = _device_column_partition(size(zg, 2), length(devs))
-        # zpd resolved sequentially before the fan-out (device! is process-global);
         # findmaxbatchihl is sized with nit_max since α/β hold the full budget.
-        zpd_devs = map(zip(devs, zgidxbatches)) do (dev, zgidx)
-            device!(backend, dev)
-            zgb_len = length(zgidx) * size(zg, 1)
-            ismissing(zpd) ? min(findmaxbatchihl(backend, T, m, nit_max), zgb_len) : zpd
-        end
-        results = Vector{Any}(undef, length(zgidxbatches))
-        @sync begin
-            for (did, (dev, zgidx)) in enumerate(zip(devs, zgidxbatches))
-                Threads.@spawn begin
-                    device!(backend, dev)
-                    results[did] = _sdihlpsa_adaptive(backend,zg[:, zgidx], P,
-                        γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd_devs[did], wgs)
-                end
-            end
-        end
+        results = _ihlpsa_fanout(backend, zg, P, nit_max, zpd, devs,
+            (zgb, zpd_dev) -> _sdihlpsa_adaptive(backend, zgb, P, γ, δ, nit_chunk,
+                nit_max, rtol, atol, nconfirm, x₀, zpd_dev, wgs))
         sr = (hcat((r[1] for r in results)...))::Matrix{real(T)}
         nit_used = maximum(r[2] for r in results)
         unconverged = any(r[3] for r in results)

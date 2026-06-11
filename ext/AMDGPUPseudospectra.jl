@@ -22,18 +22,9 @@ KAPseudospectra.device_reclaim(B::AMDGPU.ROCBackend) = AMDGPU.HIP.reclaim()
 ## precompile gpu code (only when a device is actually usable)
 if AMDGPU.functional()
     @setup_workload begin
-        using LinearAlgebra
-        for T in [ComplexF32, ComplexF64]
-            m = 32
-            g = 100
-            gx, gy, zg = qgrid(T, (-4, 4), (-4, 4), (g, g))
-            A = randn(T, m, m)
-            P = MatrixPencil(schur(A))
-            @compile_workload begin
-                d = [collect(AMDGPU.devices())[1]]
-                ihlpsa(ROCBackend(), zg, P, 5; devs=d)   # fixed-nit path
-                ihlpsa(ROCBackend(), zg, P; devs=d)      # adaptive (per-point hybrid)
-            end
+        @compile_workload begin
+            KAPseudospectra._precompile_ihlpsa(ROCBackend(), collect(AMDGPU.devices())[1],
+                [ComplexF32, ComplexF64])
         end
     end
 end
