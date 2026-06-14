@@ -1,2 +1,8 @@
 Manifest.toml
 test/Manifest.toml
+
+# benchmark scratch: local env + generated outputs (scripts are tracked)
+bench/Project.toml
+bench/*.out
+bench/results/
+bench/results_adaptive/
