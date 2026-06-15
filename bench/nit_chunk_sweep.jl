@@ -20,22 +20,40 @@
 # proxy for the number of host round-trips a point's lifetime pays. The winning
 # nit_chunk per m is flagged.
 #
+# Backend-selectable: pass cuda | oneapi | amdgpu | cpu as ARGS[1] (default cuda).
+# Uses the package's backend-agnostic device interface (device_reclaim/devices), so
+# the same script runs on any backend — e.g. the Intel iGPU via oneAPI.
+#
 # Usage:  unset LD_LIBRARY_PATH; JULIA_NUM_THREADS=auto \
-#           julia --project=test bench/nit_chunk_sweep.jl
+#           julia --project=test bench/nit_chunk_sweep.jl oneapi
 
 using KAPseudospectra
-using CUDA
+using KernelAbstractions
 using LinearAlgebra, Printf, Dates
+
+const WHICH = isempty(ARGS) ? "cuda" : lowercase(ARGS[1])
+const BACKEND = if WHICH == "cuda"
+    @eval using CUDA; CUDA.CUDABackend()
+elseif WHICH == "oneapi"
+    @eval using oneAPI; oneAPI.oneAPIBackend()
+elseif WHICH == "amdgpu"
+    @eval using AMDGPU; AMDGPU.ROCBackend()
+elseif WHICH == "cpu"
+    CPU()
+else
+    error("unknown backend $(WHICH); use cuda|oneapi|amdgpu|cpu")
+end
 
 const RESULTS = joinpath(@__DIR__, "results_adaptive")
 mkpath(RESULTS)
-const ALLDEVS = collect(CUDA.devices())
 const T       = ComplexF32
 const REGION  = ((-1, 3), (-3, 3))
-const G       = 300                         # 300x300 = 90k grid points
-const MS      = [64, 128, 256, 512, 1024]   # small (round-trip-bound) -> large (compute-bound)
-const CHUNKS  = [1, 2, 3, 4, 6, 8, 12, 16]  # nit_chunk values to sweep
-const REPS    = 3
+# Discrete-GPU defaults; shrink for a weak iGPU via env, e.g.
+#   NSWEEP_G=120 NSWEEP_MS=32,64,128,256 julia ... bench/nit_chunk_sweep.jl oneapi
+const G       = parse(Int, get(ENV, "NSWEEP_G", "300"))    # G×G grid points
+const MS      = parse.(Int, split(get(ENV, "NSWEEP_MS", "64,128,256,512,1024"), ","))
+const CHUNKS  = [1, 2, 3, 4, 6, 8, 12, 16]                 # nit_chunk values to sweep
+const REPS    = parse(Int, get(ENV, "NSWEEP_REPS", "3"))
 
 logio = open(joinpath(RESULTS, "nit_chunk_sweep_log.txt"), "w")
 clock() = Dates.format(Dates.now(), "HH:MM:SS")
@@ -51,9 +69,10 @@ function grcar(::Type{S}, m, k=3) where {S}
     A
 end
 
-# reclaim every device so no config inherits another's allocator state
+# reclaim device memory so no config inherits another's allocator state
+# (backend-agnostic via the package's device interface; a GC for good measure)
 function reclaim_all()
-    for d in ALLDEVS; CUDA.device!(d); CUDA.reclaim(); end
+    KAPseudospectra.device_reclaim(BACKEND)
     GC.gc(); GC.gc()
 end
 
@@ -65,7 +84,7 @@ function best_adaptive(zg, P, nit_chunk, nit_max)
     for _ in 1:REPS
         reclaim_all(); local n = 0
         t = @elapsed ((_, n) = KAPseudospectra._ihlpsa_adaptive(
-            CUDABackend(), zg, P; nit_chunk=nit_chunk, nit_max=nit_max))
+            BACKEND, zg, P; nit_chunk=nit_chunk, nit_max=nit_max))
         t < best && (best = t; nu = n)
     end
     (best, nu)
@@ -75,7 +94,7 @@ _, _, zg = qgrid(T, REGION[1], REGION[2], (G, G))
 
 logln("="^88)
 logln("ADAPTIVE nit_chunk crossover sweep (best-of-", REPS, ")   ", Dates.now())
-logln("Grcar  grid=", G, "x", G, " (", G*G, " pts)  T=", T, "  GPUs=", length(ALLDEVS))
+logln("Grcar  grid=", G, "x", G, " (", G*G, " pts)  T=", T, "  backend=", BACKEND)
 logln("="^88)
 
 csv = open(joinpath(RESULTS, "nit_chunk_sweep.csv"), "w")

@@ -47,6 +47,20 @@ is roughly wall-clock-neutral:
   `nit_chunk` exactly when the round-trip dominates — but the crossover is
   backend- and size-dependent and wants the `bench/` harness to pin it down.
 
+`bench/nit_chunk_sweep.jl` measures that curve. On an **integrated GPU** (Intel
+Raptor Lake iGPU via oneAPI, Grcar F32) the result is one-sided: `nit_chunk` larger
+than the optimum is *monotonically* slower, and the optimum moves from 2 toward 1
+as `m` grows — best `nit_chunk = 2` at m≤128, but `nit_chunk = 1` at m=256 (≈23%
+faster than the default) and m=512. The reason is exactly the tradeoff above read
+in the iGPU regime: host and device share system RAM, so the per-chunk round-trip
+is nearly free, while over-iteration costs ∝ `nit_chunk · m²` — `nit_used` climbs
+steeply with chunk size (m=256: 33 iters at c=1 vs 64 at c=16), so the finest
+granularity wins, more so as `m²` grows. The *opposite* regime — where a larger
+`nit_chunk` amortizes an expensive PCIe round-trip and wins — needs a discrete GPU
+to confirm; the default 2 is a reasonable middle, but a discrete-GPU large-`m` run
+may prefer 1, and a latency-bound one >2. (Re-run: `NSWEEP_MS=… NSWEEP_G=…
+julia --project=test bench/nit_chunk_sweep.jl <cuda|oneapi|amdgpu>`.)
+
 The shipped driver does all three: after each chunk the converged points retire
 and the survivors' resident state (workspace rows + α/β columns) is gathered to a
 packed prefix with plain array indexing (GPUArrays fancy indexing — no custom
