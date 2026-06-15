@@ -69,10 +69,17 @@ function grcar(::Type{S}, m, k=3) where {S}
     A
 end
 
-# reclaim device memory so no config inherits another's allocator state
-# (backend-agnostic via the package's device interface; a GC for good measure)
+# reclaim memory on EVERY device so no config inherits another's allocator state
+# (multi-GPU honesty: the adaptive driver fans out across all devices, so reclaim
+# all of them, not just the current one — cf. strong_scaling_adaptive.jl). Uses the
+# package's backend-agnostic device interface; CPU has nothing to reclaim per device.
+const DEVS = KernelAbstractions.isgpu(BACKEND) ? collect(KAPseudospectra.devices(BACKEND)) : []
 function reclaim_all()
-    KAPseudospectra.device_reclaim(BACKEND)
+    for d in DEVS
+        KAPseudospectra.device!(BACKEND, d)
+        KAPseudospectra.device_reclaim(BACKEND)
+    end
+    isempty(DEVS) && KAPseudospectra.device_reclaim(BACKEND)
     GC.gc(); GC.gc()
 end
 
@@ -94,7 +101,8 @@ _, _, zg = qgrid(T, REGION[1], REGION[2], (G, G))
 
 logln("="^88)
 logln("ADAPTIVE nit_chunk crossover sweep (best-of-", REPS, ")   ", Dates.now())
-logln("Grcar  grid=", G, "x", G, " (", G*G, " pts)  T=", T, "  backend=", BACKEND)
+logln("Grcar  grid=", G, "x", G, " (", G*G, " pts)  T=", T, "  backend=", BACKEND,
+      "  ndev=", max(1, length(DEVS)))
 logln("="^88)
 
 csv = open(joinpath(RESULTS, "nit_chunk_sweep.csv"), "w")
@@ -133,6 +141,9 @@ end
 close(csv)
 logln("")
 logln("="^88)
-logln("DONE.  Expect best nit_chunk to shrink toward 2 as m grows (solve dominates the")
-logln("host round-trip); a larger best at small m confirms the comms-amortization win.")
+logln("DONE.  Two regimes (see DESIGN.md): on an integrated GPU (shared RAM, ~free")
+logln("round-trip) over-iteration dominates, so the best nit_chunk shrinks toward 1 as")
+logln("m grows (measured: 2 at m<=128, 1 at m>=256). On a discrete GPU the per-chunk")
+logln("PCIe round-trip is real, so a LARGER nit_chunk may win at small m / few survivors —")
+logln("the case this sweep on a multi-GPU box is meant to pin down.")
 close(logio)
