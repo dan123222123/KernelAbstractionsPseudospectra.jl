@@ -84,6 +84,18 @@ end
     end
 end
 
+# Gather rows `keepd` of a (g, m, k) source into a packed (nkeep, m, k) prefix:
+# dst[i,:,:] = src[keepd[i],:,:]. Used for the adaptive survivor gather of the Qv
+# workspace. We can't use a plain `src[keep,:,:]` fancy index: GPUArrays' first-axis
+# fancy indexing of a 3-D array is miscompiled on oneAPI (silently wrong rows + device
+# out-of-bounds, even through a 2-D reshape), so we do the row copy with this explicit
+# kernel — correct and on-device on every backend, like the other gathers (`[:, keep]`
+# on the last axis) which are fine.
+@kernel function _qv_gather!(dst, @Const(src), @Const(keepd))
+    i, j, l = @index(Global, NTuple)
+    @inbounds dst[i, j, l] = src[keepd[i], j, l]
+end
+
 ## END KERNELS ##
 
 struct IHLworkspace{T,B}
@@ -560,12 +572,25 @@ function _ihlpsa_adaptive(
     return permutedims(sr), nit_used
 end
 
+# Gather rows `keep` (a host Int vector) from a (g, m, k) device array into a fresh
+# packed (nkeep, m, k) array, via the `_qv_gather!` kernel (see its note — a direct
+# `A[keep,:,:]` is miscompiled on oneAPI). `keep` is moved to the device once for the
+# kernel to index.
+function _gather_rows(backend, A, keep)
+    g, m, k = size(A)
+    dst = similar(A, length(keep), m, k)
+    keepd = adapt(get_bgarray(backend), keep)
+    _qv_gather!(backend)(dst, A, keepd; ndrange=(length(keep), m, k))
+    return dst
+end
+
 # Single-device adaptive worker — per-point retirement with resident state. Each
 # batch starts with its own workspace and full-budget α/β; after each chunk the
 # converged points retire and the survivors' per-point state — workspace rows
 # (Qv batch-major, v/x₀ batch-minor, zv) plus α/β columns — is GATHERED into a
 # packed prefix via array indexing (GPUArrays fancy indexing; no custom
-# kernels). Subsequent chunks therefore run kernels over live points only,
+# kernels; the 3-D Qv gather goes through `_gather_rows`, see its note).
+# Subsequent chunks therefore run kernels over live points only,
 # continuing each point's own Lanczos recurrence uninterrupted: per-point work
 # ≈ its converged depth + one confirm chunk, instead of the batch-worst depth.
 # The gather traffic is O(m·survivors) per chunk — negligible against the
@@ -626,7 +651,13 @@ function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPe
                     else
                         # Gather survivors' state to a packed prefix. Layouts:
                         # Qv flat (batch, m, 2); v/x₀ flat (m, batch); zv (batch).
-                        Qv = VectorOfSimilarArrays(flatview(ihl.Qv)[keep, :, :])
+                        # The v/x₀/α/β gathers index the LAST axis (`[:, keep]`),
+                        # which is correct on every backend. Qv must gather its
+                        # FIRST axis — and a first-axis fancy index on a 3-D
+                        # GPUArray is miscompiled on oneAPI (silently returns wrong
+                        # rows + out-of-bounds), so route it through `_gather_rows`,
+                        # which does the row copy with an explicit KA kernel.
+                        Qv = VectorOfSimilarArrays(_gather_rows(backend, flatview(ihl.Qv), keep))
                         v = VectorOfSimilarVectors(flatview(ihl.v)[:, keep])
                         x₀p = VectorOfSimilarVectors(flatview(ihl.x₀)[:, keep])
                         zvp = ihl.zv[keep]

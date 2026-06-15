@@ -184,13 +184,20 @@ function test_adaptive_backend(backend; types=(ComplexF32, ComplexF64))
             m = 32
             A = randn(T, m, m)
             P = MatrixPencil(A)
-            gx, gy, zg = qgrid(T, (-1.0, 1.0), (-1.0, 1.0), (16, 16))
+            # A deliberately LARGER grid (40x40, not a token 16x16): the on-device
+            # survivor gather runs once per retirement round, and a too-small grid
+            # retires in a couple of rounds whose index-sets can miss a backend's
+            # indexing bugs. oneAPI in particular miscompiles a first-axis fancy
+            # index on the 3-D Qv backing — latent at 16x16, exposed here — which
+            # the gather kernel (`_qv_gather!`) fixes. Keep this grid non-trivial so
+            # the test actually guards that path across many gather rounds.
+            gx, gy, zg = qgrid(T, (-1.0, 1.0), (-1.0, 1.0), (40, 40))
 
             x₀ = _seeded_x₀(T, m, 0xACED)
             rtol = T == ComplexF32 ? 1e-3 : 1e-5
 
             # Adaptive (per-point hybrid) across the device fan-out: exercises the
-            # on-device state gather (fancy indexing) and multi-device partition.
+            # on-device state gather (custom `_qv_gather!` kernel) and multi-device partition.
             s_cpu, n_cpu = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀=x₀)
             s_gpu, n_gpu = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀=x₀)
             @test isapprox(s_cpu, s_gpu; rtol=rtol)
