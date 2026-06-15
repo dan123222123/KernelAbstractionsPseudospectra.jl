@@ -9,9 +9,11 @@ All notable changes to KAPseudospectra.jl are documented here.
   `nit` argument now runs the adaptive (per-point hybrid) inverse-Lanczos driver:
   each grid point retires at its own converged depth (relative `rtol` / absolute
   `atol`, confirmed over `nconfirm` chunks), with survivors' Lanczos state kept
-  resident across chunks. Returns `(σ, nit_used)`. New keywords: `rtol`, `atol`,
-  `nconfirm`, `nit_chunk`, `nit_max`, `seed`, `verbose`. Runs across multiple GPUs
-  via the same device fan-out as the fixed path.
+  resident across chunks. Returns the grid-shaped `Matrix` of σ, exactly like the
+  fixed form; the convergence depth reached is a diagnostic, logged when
+  `verbose=true`. New keywords: `rtol`, `atol`, `nconfirm`, `nit_chunk`, `nit_max`,
+  `seed`, `verbose`. Runs across multiple GPUs via the same device fan-out as the
+  fixed path.
 - Docstring for `ihlpsa` (both fixed and adaptive forms) and a Usage section in
   the README.
 - Adaptive path added to every backend's precompile workload (CPU + CUDA/AMDGPU/
@@ -20,10 +22,13 @@ All notable changes to KAPseudospectra.jl are documented here.
 
 ### Changed
 - **Breaking:** `ihlpsa` no longer has a default `nit`. Omitting `nit` selects the
-  adaptive driver (returns `(σ, nit_used)`) instead of fixed-`nit` with
-  `nit = ceil(log2 m)` (returned a `Matrix`). Pass an explicit `nit::Integer` for
-  the fixed-depth behaviour. Perturbation scaling `γ`,`δ` are positional in the
-  fixed form and keyword in the adaptive form.
+  adaptive driver instead of fixed-`nit` with `nit = ceil(log2 m)`. Pass an explicit
+  `nit::Integer` for the fixed-depth behaviour. Both forms return the grid-shaped
+  `Matrix` of σ; the adaptive convergence depth is a diagnostic, surfaced via
+  `verbose=true` logging (or from the un-exported `KAPseudospectra._ihlpsa_adaptive`
+  driver, which returns `(σ, nit_used)`).
+- **Breaking:** perturbation scaling `γ`,`δ` are now **keyword** arguments in both
+  forms (previously positional in the fixed form): `ihlpsa(b, zg, P, nit; γ, δ)`.
 
 ### Removed
 - **Breaking:** `ihlpsa_adaptive` and its tier flags (`compact`, `resumable`).

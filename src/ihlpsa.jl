@@ -186,7 +186,17 @@ function lockstep_ihl!(α, β, ihl::IHLworkspace, nit, g; wgs=missing, start::In
     synchronize(backend)
 end
 
-# device operations "interface" for kernel abstractions
+# device operations "interface" for kernel abstractions.
+#
+# Why a package-local interface and not KA's own device functions: KernelAbstractions
+# 0.9 does expose `device(::Backend)::Int` / `device!(::Backend, ::Int)` / `ndevices`,
+# but those address devices by *ordinal* and KA has no equivalent of `devices`
+# (an iterable of concrete device handles), `get_bgarray`, `device_bytes_available`,
+# or `device_reclaim` — all of which the multi-GPU fan-out (`_ihlpsa_fanout`) and the
+# VRAM-budget batch sizing (`findmaxbatchihl`) need. So we keep a small handle-based
+# interface (CPU defaults here; each GPU extension overrides the six methods) rather
+# than bolt the missing pieces onto KA's ordinal model. `supports_fp64` below is the
+# one method that *does* delegate to KA (see its note).
 get_bgarray(B::CPU) = Array
 device(B::CPU) = CPU()
 devices(B::CPU) = CPU()
@@ -194,13 +204,16 @@ device!(B::CPU, dev) = CPU()
 device_bytes_available(B::CPU) = (Sys.free_memory() |> Int)
 device_reclaim(B::CPU) = GC.gc()
 
-# Whether `backend`'s device can run Float64/ComplexF64 kernels. The default
-# defers to KernelAbstractions' own capability flag: `supports_float64` is `true`
-# for CPU/CUDA/AMDGPU and declared `false` by Metal (Metal Shading Language has no
-# `double` type). The oneAPI extension overrides this with a device-accurate query
-# (oneAPI's KA flag is a conservative static `false`), so F64 auto-enables on
-# FP64-capable Intel GPUs (Arc/Max) and stays off on FP64-less iGPUs. The F64
-# grid/test/precompile paths consult this and skip unsupported devices.
+# Whether `backend`'s device can run Float64/ComplexF64 kernels. This IS the KA
+# interface — the default just forwards to `KernelAbstractions.supports_float64`
+# (`true` for CPU/CUDA/AMDGPU, declared `false` by Metal, which has no `double`
+# type). The thin `supports_fp64` wrapper exists for exactly one reason: it gives
+# the oneAPI extension a method to override *without* committing type piracy on
+# `supports_float64` (oneAPI.jl owns that method for its backend and statically
+# declares `false`, even on FP64-capable Arc/Max parts). The oneAPI override does a
+# device-accurate Level-Zero query so F64 auto-enables where the hardware really
+# supports it. The F64 grid/test/precompile paths consult this and skip unsupported
+# devices.
 supports_fp64(B) = KernelAbstractions.supports_float64(B)
 
 ## END DEVICE FUNCTIONS ##
@@ -377,8 +390,16 @@ function _ihlpsa_fixed(
                 progress ? pchnl : missing, wgs); pbar)
         result = (hcat(results...))::Matrix{real(T)}
     else
-        # note, cpu CANNOT currently batch zg -- there are race conditions present due to pre-allocation of ihl for device codes
-        # if you run out of memory here...you should have just used the gpu anyways!
+        # CPU runs the whole grid as one batch (zpd = length(zg)). It can't split
+        # the grid the way the GPU path does: the single preallocated IHLworkspace
+        # (Qv/v/zv) is shared, and `ThreadsX.foreach` inside `sdihlpsa` already
+        # parallelizes that one batch across threads — a second level of batching
+        # would need a per-batch (or per-thread) workspace to avoid racing on those
+        # buffers. That's the GPU's memory-budget concern, not the CPU's: on CPU the
+        # workspace is cheap and threading already saturates the cores, so batching
+        # would add allocation churn for no throughput. If a grid is too large to
+        # hold in host RAM at once, use the GPU path. (The adaptive driver DOES batch
+        # on CPU — its resident workers run batches sequentially, no shared-state race.)
         progress && set_description(pbar, "CPU device, grid points * nit:")
         result = sdihlpsa(backend, zg, P, γ, δ, length(zg), nit, x₀, progress ? pchnl : missing, wgs)
     end
@@ -391,7 +412,9 @@ end
 # compares one Lanczos run at two depths (a principled convergence monitor). If
 # instead x₀ were `missing`, the IHLworkspace constructor would draw a FRESH randn
 # per chunk and consecutive chunks would be independent runs, making
-# the convergence test meaningless. Mirrors the test helper `_seeded_x₀`.
+# the convergence test meaningless. The test suite reuses this exact routine (as
+# `_seeded_x₀`, aliased in test_consistency.jl) so the seeded x₀ the tests pass and
+# the driver's own default x₀ can never drift apart.
 function _adaptive_x₀(::Type{T}, m, seed) where {T<:Complex}
     rng = MersenneTwister(seed)
     x = randn(rng, T, m)
@@ -417,17 +440,18 @@ _adaptive_default_atol(::Type{T}) where {T<:Complex} = eps(real(T))
 end
 
 """
-    ihlpsa(backend, zg, P, nit::Integer, γ=1, δ=0; x₀, progress, zpd, devs, wgs)
+    ihlpsa(backend, zg, P, nit::Integer; γ=1, δ=0, x₀, progress, zpd, devs, wgs)
     ihlpsa(backend, zg, P; γ=1, δ=0, nit_chunk=2, nit_max=…, rtol, atol, nconfirm,
                            x₀, seed, zpd, devs, wgs, verbose)
 
 Batched inverse-Lanczos pseudospectra of the matrix pencil `P` over the complex
 grid `zg`, fanned out across all devices of `backend` (pass `devs` to restrict).
-Each grid point's value is `(γ + δ|z|)·σ_min(zB − A)`.
+Each grid point's value is `(γ + δ|z|)·σ_min(zB − A)`. Both forms return the
+grid-shaped `Matrix` of σ values. Perturbation scaling `γ`,`δ` are keyword
+arguments.
 
 **Fixed depth** — pass `nit::Integer`: every grid point runs exactly `nit`
-Lanczos iterations. Returns the grid-shaped `Matrix` of σ values. `progress=true`
-shows a progress bar.
+Lanczos iterations. `progress=true` shows a progress bar.
 
 **Adaptive depth** — omit `nit`: runs lockstep inverse-Lanczos in chunks of
 `nit_chunk` with resident per-point state, retiring each grid point once its σ
@@ -436,10 +460,11 @@ consecutive chunks) and gathering the survivors so kernels only touch live
 points. Per-point work tracks each point's own convergence depth rather than the
 slowest point's, capped at `nit_max`. A fixed deterministic start vector (`seed`)
 is reused across chunks so the convergence check compares one Lanczos run at
-successive depths. Returns `(σ::Matrix, nit_used::Integer)`, where `σ` matches the
-fixed layout (`first(ihlpsa(...)) ≈ ihlpsa(..., nit)` at the converged depth) and
-`nit_used` is the deepest iteration count reached. Perturbation scaling `γ`,`δ`
-are keyword arguments in this form.
+successive depths. The σ match the fixed layout
+(`ihlpsa(...) ≈ ihlpsa(..., nit)` at the converged depth). The convergence depth
+reached is a diagnostic, not a routine return value: pass `verbose=true` to log
+it, or call the un-exported `KAPseudospectra._ihlpsa_adaptive` driver, which
+returns `(σ::Matrix, nit_used::Integer)`.
 
 # Examples
 ```julia
@@ -447,9 +472,9 @@ using KAPseudospectra, KernelAbstractions
 P = MatrixPencil(A)                                   # or MatrixPencil(A, B)
 _, _, zg = qgrid(ComplexF64, (-2, 5), (-4.5, 4.5), (300, 300))
 
-srg = ihlpsa(CPU(), zg, P, 16)                        # fixed nit=16 → Matrix
-srg, nit = ihlpsa(CPU(), zg, P)                       # adaptive → (σ, nit_used)
-srg, nit = ihlpsa(CUDABackend(), zg, P; rtol=1e-8)    # tighter tol, multi-GPU
+srg = ihlpsa(CPU(), zg, P, 16)                        # fixed nit=16
+srg = ihlpsa(CPU(), zg, P)                            # adaptive depth
+srg = ihlpsa(CUDABackend(), zg, P; rtol=1e-8, verbose=true)  # tighter tol, logs depth, multi-GPU
 ```
 
 See also [`MatrixPencil`](@ref), [`qgrid`](@ref), [`ℂsvdpsa`](@ref).
@@ -458,9 +483,9 @@ function ihlpsa(
     backend,
     zg::AbstractArray{T,2},
     P::AbstractMatrixPencil{T},
-    nit::Integer,
+    nit::Integer;
     γ=1,
-    δ=0;
+    δ=0,
     x₀::Union{Missing,AbstractVector{T}}=missing,
     progress=false,
     zpd=missing,
@@ -470,7 +495,26 @@ function ihlpsa(
     return _ihlpsa_fixed(backend, zg, P, nit, γ, δ; x₀, progress, zpd, devs, wgs)
 end
 
-function ihlpsa(
+# Adaptive form — omit `nit`. Always returns just `srg::Matrix`, mirroring the
+# fixed-nit form: the convergence depth reached is a diagnostic, not a routine
+# return value. To read the depth, pass `verbose=true` (it is logged) or call the
+# un-exported `_ihlpsa_adaptive` driver below, which returns `(srg, nit_used)`.
+function ihlpsa(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T};
+    kwargs...) where {T<:Complex}
+    return first(_ihlpsa_adaptive(backend, zg, P; kwargs...))
+end
+
+# Internal adaptive driver — multi-device per-point adaptive inverse Lanczos.
+# Returns `(srg::Matrix, nit_used::Integer)`; the public `ihlpsa(...; …)` wraps
+# this and drops `nit_used`. NOT exported: the depth is exposed to power users via
+# `verbose=true` logging, and to the test suite by calling this directly.
+#
+# Fans grid columns out across devices via `_ihlpsa_fanout` (shared with the fixed
+# engine), but each device runs its own per-point adaptive loop
+# (`_sdihlpsa_adaptive`) and stops at its OWN converged depth — devices over easy
+# regions retire early instead of lockstepping to the global worst point.
+# `nit_used` is the deepest depth across devices.
+function _ihlpsa_adaptive(
     backend,
     zg::AbstractArray{T,2},
     P::AbstractMatrixPencil{T};
@@ -490,24 +534,14 @@ function ihlpsa(
 ) where {T<:Complex}
     R = real(T)
     m = size(P, 1)
+    rtol = R(rtol)
+    atol = R(atol)
     x₀_fixed = ismissing(x₀) ? _adaptive_x₀(T, m, seed) : x₀
-    return _ihlpsa_adaptive(backend, zg, P, γ, δ, nit_chunk, nit_max,
-        R(rtol), R(atol), nconfirm, x₀_fixed, zpd, devs, wgs, verbose)
-end
-
-# Multi-device adaptive dispatcher. Fans grid columns out across devices via
-# `_ihlpsa_fanout` (shared with the fixed engine), but each device runs its own
-# per-point adaptive loop (`_sdihlpsa_adaptive`) and stops at its OWN converged
-# depth — devices over easy regions retire early instead of lockstepping to the
-# global worst point. `nit_used` is the deepest depth across devices.
-function _ihlpsa_adaptive(backend, zg::AbstractArray{T,2},
-    P::AbstractMatrixPencil{T}, γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, devs,
-    wgs, verbose) where {T<:Complex}
     if KernelAbstractions.isgpu(backend)
         # findmaxbatchihl is sized with nit_max since α/β hold the full budget.
         results = _ihlpsa_fanout(backend, zg, P, nit_max, zpd, devs,
             (zgb, zpd_dev) -> _sdihlpsa_adaptive(backend, zgb, P, γ, δ, nit_chunk,
-                nit_max, rtol, atol, nconfirm, x₀, zpd_dev, wgs))
+                nit_max, rtol, atol, nconfirm, x₀_fixed, zpd_dev, wgs))
         sr = (hcat((r[1] for r in results)...))::Matrix{real(T)}
         nit_used = maximum(r[2] for r in results)
         unconverged = any(r[3] for r in results)
@@ -516,8 +550,8 @@ function _ihlpsa_adaptive(backend, zg::AbstractArray{T,2},
         # shared workspace), the resident workers process batches sequentially,
         # so honoring a user-supplied zpd is safe on CPU too — useful for
         # memory-capping and for exercising the multi-batch path in tests.
-        sr, nit_used, unconverged = _sdihlpsa_adaptive(backend,zg, P,
-            γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀,
+        sr, nit_used, unconverged = _sdihlpsa_adaptive(backend, zg, P,
+            γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀_fixed,
             ismissing(zpd) ? length(zg) : zpd, wgs)
     end
     unconverged &&

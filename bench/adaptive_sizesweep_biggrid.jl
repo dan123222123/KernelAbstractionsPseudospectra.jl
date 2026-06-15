@@ -46,7 +46,8 @@ function best_adaptive(zg, P, nmax)
     best = Inf; nu = 0
     for _ in 1:REPS
         reclaim_all(); local n = 0
-        t = @elapsed ((_, n) = ihlpsa(CUDABackend(), zg, P; nit_max=nmax))
+        # internal driver returns (σ, nit_used); public ihlpsa returns only σ
+        t = @elapsed ((_, n) = KAPseudospectra._ihlpsa_adaptive(CUDABackend(), zg, P; nit_max=nmax))
         t < best && (best = t; nu = n)
     end
     (best, nu)

@@ -32,8 +32,20 @@ is roughly wall-clock-neutral:
   whole-grid re-run keeps paying the slowest point);
 - **resident state / continuation** — keep each point's Lanczos state and continue
   (restarting from iteration 1 each chunk wastes the early iterations);
-- **small chunks** — retirement can't happen before ≈ `nconfirm · nit_chunk`
-  iterations, so large chunks floor every point (default `nit_chunk = 2`).
+- **chunk size is a real tradeoff** — a point can't retire before
+  ≈ `nconfirm · nit_chunk` iterations, so a *small* `nit_chunk` (default 2) gives
+  the finest retirement and the least wasted iteration on the easy majority. But
+  each chunk also pays a host round-trip — copy α/β back, run `ihlsrg!` + the
+  convergence test on the host, relaunch the next chunk — and on GPU that fixed
+  sync cost can exceed the cost of simply running a couple more on-device
+  iterations, especially at small `m` or once few points survive (the per-chunk
+  solve is cheap, the round-trip is not). So a *larger* `nit_chunk` can be a net
+  win by amortizing the sync, paying for it with some over-iteration. The default
+  favours granularity; it stays a kwarg precisely so a comms-bound problem can
+  trade the other way. A principled auto-tune would balance a chunk's compute
+  (∝ `nit_chunk · m² · survivors`) against the fixed host round-trip and raise
+  `nit_chunk` exactly when the round-trip dominates — but the crossover is
+  backend- and size-dependent and wants the `bench/` harness to pin it down.
 
 The shipped driver does all three: after each chunk the converged points retire
 and the survivors' resident state (workspace rows + α/β columns) is gathered to a

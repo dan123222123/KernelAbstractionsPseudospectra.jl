@@ -1,0 +1,20 @@
+name = "KAPseudospectraBench"
+authors = ["Dan Folescu"]
+version = "0.1.0"
+
+[deps]
+KAPseudospectra = "8b8afa22-3073-43c5-8823-151938199226"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MatrixDepot = "b51810bb-c9f3-55da-ae3c-350fc1fbce05"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+# GPU backends are optional but listed here so the bench scripts can `using CUDA`
+# (etc.) to compare per-backend performance without a separate `]add` step. Mirror
+# the examples/ environment: instantiate, then add a device's package if needed.
+AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
+oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"

@@ -26,6 +26,14 @@ KAPseudospectra.device_reclaim(B::oneAPI.oneAPIBackend) = GC.gc()
 # Most Intel iGPUs lack native FP64; oneAPI then errors with "Double type is not
 # supported on this platform" on any Float64 kernel. Gate F64 grid points (and the
 # F64 precompile workload below) on the device's FP64 capability flag.
+#
+# KernelAbstractions does expose `supports_float64(::Backend)`, but oneAPI.jl
+# implements it as a conservative static `false` for *every* oneAPIBackend — so it
+# also disables F64 on the Arc / Data Center Max parts that genuinely support it.
+# Rather than pirate oneAPI's `supports_float64` method, we override the package's
+# own `supports_fp64` hook (its whole reason for existing — see the note on the
+# default in src/ihlpsa.jl) with a device-accurate Level-Zero query of the actual
+# FP64 module flag, so F64 auto-enables exactly on the hardware that can run it.
 function KAPseudospectra.supports_fp64(B::oneAPI.oneAPIBackend)
     f = oneAPI.oneL0.module_properties(oneAPI.device()).fp64flags
     return (f & oneAPI.oneL0.ZE_DEVICE_MODULE_FLAG_FP64) != 0

@@ -12,12 +12,11 @@ using Test, KAPseudospectra, KernelAbstractions, LinearAlgebra
 using Random
 
 # Use a non-default explicit x₀ so cross-backend comparisons can match
-# bit-equivalent (modulo floating-point accumulation order).
-function _seeded_x₀(::Type{T}, m, seed) where {T<:Complex}
-    rng = MersenneTwister(seed)
-    x = randn(rng, T, m)
-    x ./ norm(x)
-end
+# bit-equivalent (modulo floating-point accumulation order). This is exactly the
+# deterministic seeded start vector the adaptive driver builds internally, so we
+# reuse the package's routine (un-exported) instead of duplicating it — the test
+# x₀ and the driver's default x₀ then can't drift apart.
+const _seeded_x₀ = KAPseudospectra._adaptive_x₀
 
 @testset "ihlpsa vs ℂsvdpsa" begin
     # Standard pencil, dense random A. nit > log2(m) by a healthy margin to
@@ -54,7 +53,7 @@ end
         γ, δ = T <: Complex ? (0.5, 0.5) : (0.5, 0.5)
 
         x₀ = _seeded_x₀(T, m, 0xFEED)
-        s_ihl = ihlpsa(CPU(), zg, P, nit, γ, δ; x₀=x₀)
+        s_ihl = ihlpsa(CPU(), zg, P, nit; γ=γ, δ=δ, x₀=x₀)
         s_svd = ℂsvdpsa(zg, P, γ, δ)
         rtol = T == ComplexF32 ? 1e-4 : 1e-10
         @test isapprox(s_ihl, s_svd; rtol=rtol)
@@ -75,7 +74,9 @@ end
         x₀ = _seeded_x₀(T, m, 0xBEEF)
         nit_max = 8 * ceil(Int, log2(m))                  # adaptive cap (= default)
         s_fixed = ihlpsa(CPU(), zg, P, nit_max; x₀=x₀)    # over-converged control
-        s_adp, nit_used = ihlpsa(CPU(), zg, P; x₀=x₀)
+        # Public `ihlpsa(…; …)` returns only σ; the internal driver also returns the
+        # convergence depth this testset asserts on.
+        s_adp, nit_used = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀=x₀)
         s_svd = ℂsvdpsa(zg, P)
 
         # Comparison tol ~10× the adaptive stopping rtol (default 1e-4 F32 /
@@ -99,7 +100,7 @@ end
         γ, δ = 0.5, 0.5
 
         x₀ = _seeded_x₀(T, m, 0xFEED)
-        s_adp, nit_used = ihlpsa(CPU(), zg, P; γ=γ, δ=δ, x₀=x₀)
+        s_adp, nit_used = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; γ=γ, δ=δ, x₀=x₀)
         s_svd = ℂsvdpsa(zg, P, γ, δ)
         rtol = T == ComplexF32 ? 1e-3 : 1e-5
         @test isapprox(s_adp, s_svd; rtol=rtol)
@@ -119,8 +120,8 @@ end
         gx, gy, zg = qgrid(T, (-1.5, 1.5), (-1.5, 1.5), (12, 12))
         x₀ = _seeded_x₀(T, m, 0xBEEF)
 
-        s_one, _ = ihlpsa(CPU(), zg, P; x₀=x₀)
-        s_many, _ = ihlpsa(CPU(), zg, P; x₀=x₀, zpd=37)   # 144 = 3·37 + 33 → 4 batches
+        s_one = ihlpsa(CPU(), zg, P; x₀=x₀)
+        s_many = ihlpsa(CPU(), zg, P; x₀=x₀, zpd=37)      # 144 = 3·37 + 33 → 4 batches
         @test isapprox(s_one, s_many; rtol=(T == ComplexF32 ? 1e-3 : 1e-5))
     end
 end
@@ -139,8 +140,8 @@ end
         x₀ = _seeded_x₀(T, m, 0xBEEF)
         nit_cap = 3
 
-        s_adp, nit_used = @test_logs (:warn,) match_mode = :any ihlpsa(CPU(), zg, P;
-            x₀=x₀, nit_max=nit_cap, rtol=1e-12)
+        s_adp, nit_used = @test_logs (:warn,) match_mode = :any KAPseudospectra._ihlpsa_adaptive(
+            CPU(), zg, P; x₀=x₀, nit_max=nit_cap, rtol=1e-12)
         s_fix = ihlpsa(CPU(), zg, P, nit_cap; x₀=x₀)
 
         @test nit_used == nit_cap
@@ -190,8 +191,8 @@ function test_adaptive_backend(backend; types=(ComplexF32, ComplexF64))
 
             # Adaptive (per-point hybrid) across the device fan-out: exercises the
             # on-device state gather (fancy indexing) and multi-device partition.
-            s_cpu, n_cpu = ihlpsa(CPU(), zg, P; x₀=x₀)
-            s_gpu, n_gpu = ihlpsa(backend, zg, P; x₀=x₀)
+            s_cpu, n_cpu = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀=x₀)
+            s_gpu, n_gpu = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀=x₀)
             @test isapprox(s_cpu, s_gpu; rtol=rtol)
             @test abs(n_cpu - n_gpu) <= ceil(Int, log2(m))   # within one chunk
         end

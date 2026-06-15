@@ -10,6 +10,13 @@ module KATRSM
 # well-conditioned (Schur-triangular) systems these solves target it is accurate
 # to a small multiple of eps(T). Float64 keeps Base's robust division (it does not
 # widen), so CPU/CUDA/AMDGPU F64 results are unchanged.
+#
+# Performance, not just compilability: on the FP64-capable backends (CUDA/AMDGPU)
+# only the F32 path is affected, and there `_pdiv` is if anything faster — it stays
+# in single precision instead of taking Base's widen-to-double detour (double-
+# precision throughput is a fraction of single on consumer GPUs). The accuracy
+# give-up (a few eps) is immaterial for these triangular systems, so there is no
+# backend on which the naive form is sub-optimal. F16 likewise stays in-half.
 @inline _pdiv(x::Complex{T}, d::Complex{T}) where {T<:Union{Float16,Float32}} = (x * conj(d)) / abs2(d)
 @inline _pdiv(x, d) = x / d
 

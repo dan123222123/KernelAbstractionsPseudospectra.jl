@@ -21,16 +21,19 @@ _, _, zg = qgrid(ComplexF64, (-2, 5), (-4.5, 4.5), (300, 300))   # grid of shift
 srg = ihlpsa(CPU(), zg, P, 16)               # returns the grid Matrix of σ values
 
 # Adaptive depth (omit `nit`): each grid point retires at its own converged
-# depth (per-point hybrid). Returns (σ, nit_used).
-srg, nit_used = ihlpsa(CPU(), zg, P)
-srg, nit_used = ihlpsa(CUDABackend(), zg, P) # same call, multi-GPU
+# depth (per-point hybrid). Returns the grid Matrix, just like the fixed form.
+srg = ihlpsa(CPU(), zg, P)
+srg = ihlpsa(CUDABackend(), zg, P)           # same call, multi-GPU
+srg = ihlpsa(CPU(), zg, P; verbose=true)     # also logs the convergence depth reached
 ```
 
 Adaptive knobs are keywords on the no-`nit` form: `rtol`/`atol` (convergence
 tolerance), `nconfirm` (confirmation chunks), `nit_chunk`, `nit_max`, and `γ`,`δ`
-for perturbation scaling (`γ`,`δ` are positional in the fixed form). Pass `devs`
-to restrict which GPUs are used. Adaptive runs across multiple GPUs the same way
-the fixed path does.
+for perturbation scaling (`γ`,`δ` are keywords in both forms). Pass `devs` to
+restrict which GPUs are used. Adaptive runs across multiple GPUs the same way the
+fixed path does. The convergence depth reached is a diagnostic — pass
+`verbose=true` to log it, or call `KAPseudospectra._ihlpsa_adaptive(...)` for the
+`(σ, nit_used)` tuple.
 
 # Examples
 Check out `examples/` for three scripts that showcase usage of this package.
