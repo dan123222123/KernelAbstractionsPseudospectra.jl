@@ -70,25 +70,31 @@ end
 
 @testset "_device_column_partition invariants" begin
     # The multi-device fan-out (`_ihlpsa_fanout`) zips blocks against devices, so
-    # the partition must always yield exactly min(ndev, ncols) contiguous,
-    # ordered, balanced blocks. The old ceil-based Iterators.partition could yield
-    # fewer blocks than devices (e.g. 9 cols / 4 devs → 3 blocks of 3) and
-    # BoundsError the device loop — these are the host-side regression tests for
-    # that fix (there is no GPU CI).
-    for ncols in 1:20, ndev in 1:6
-        blocks = _device_column_partition(ncols, ndev)
-        @test blocks isa Vector{UnitRange{Int}}
+    # the partition must always yield exactly min(ndev, ncols) balanced blocks that
+    # cover 1:ncols exactly once. Default is round-robin (strided) so spatially
+    # clustered hard points spread across devices; KAPSEUDO_STRIDED=0 gives the
+    # legacy contiguous bands. Both modes satisfy the same coverage/balance
+    # invariants (host-side regression tests — there is no GPU CI). The old
+    # ceil-based Iterators.partition could yield fewer blocks than devices (e.g.
+    # 9 cols / 4 devs → 3 blocks) and BoundsError the device loop.
+    for stride in ("1", "0"), ncols in 1:20, ndev in 1:6
+        blocks = withenv(() -> _device_column_partition(ncols, ndev),
+                         "KAPSEUDO_STRIDED" => stride)
+        @test blocks isa Vector{StepRange{Int,Int}}
         @test length(blocks) == min(ndev, ncols)
-        # coverage + ordering + disjointness in one shot
-        @test reduce(vcat, collect.(blocks)) == collect(1:ncols)
+        # coverage + disjointness as a SET (strided blocks are interleaved, not
+        # ordered, so compare sorted)
+        @test sort(reduce(vcat, collect.(blocks))) == collect(1:ncols)
         # balance: block sizes differ by at most 1
         @test maximum(length.(blocks)) - minimum(length.(blocks)) <= 1
     end
 
-    # Pinned regression cases (verified failures of the old partition):
-    @test _device_column_partition(1, 4) == [1:1]              # was 1 block, loop hit [2]
-    @test _device_column_partition(9, 4) == [1:3, 4:5, 6:7, 8:9]  # was 3,3,3 (3 blocks)
-    @test _device_column_partition(2, 4) == [1:1, 2:2]
+    # Pinned cases. Strided (default): device b takes columns b, b+nblocks, …
+    @test withenv(() -> _device_column_partition(1, 4), "KAPSEUDO_STRIDED" => "1") == [1:1:1]
+    @test withenv(() -> _device_column_partition(9, 4), "KAPSEUDO_STRIDED" => "1") == [1:4:9, 2:4:9, 3:4:9, 4:4:9]
+    @test withenv(() -> _device_column_partition(2, 4), "KAPSEUDO_STRIDED" => "1") == [1:2:2, 2:2:2]
+    # Contiguous (legacy): balanced bands, exactly min(ndev, ncols) of them.
+    @test withenv(() -> _device_column_partition(9, 4), "KAPSEUDO_STRIDED" => "0") == [1:1:3, 4:1:5, 6:1:7, 8:1:9]
     @test isempty(_device_column_partition(0, 4))
     @test_throws ArgumentError _device_column_partition(4, 0)
 end

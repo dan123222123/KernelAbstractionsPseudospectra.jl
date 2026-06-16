@@ -325,16 +325,28 @@ function _device_column_partition(ncols::Integer, ndev::Integer)
     ndev ≥ 1 || throw(ArgumentError("ndev must be ≥ 1, got $ndev"))
     ncols ≥ 0 || throw(ArgumentError("ncols must be ≥ 0, got $ncols"))
     nblocks = min(Int(ndev), Int(ncols))
-    blocks = Vector{UnitRange{Int}}(undef, nblocks)
-    nblocks == 0 && return blocks
-    q, r = divrem(Int(ncols), nblocks)
-    lo = 1
-    for b in 1:nblocks
-        hi = lo + q + (b ≤ r) - 1
-        blocks[b] = lo:hi
-        lo = hi + 1
+    nblocks == 0 && return StepRange{Int,Int}[]
+    # Round-robin (strided) column→device assignment: device b takes columns
+    # b, b+nblocks, b+2·nblocks, …  Spatially-clustered hard / deep-iteration grid
+    # points (pseudospectra hard regions) then spread evenly across devices instead
+    # of piling onto one device's contiguous band — load balancing for the ADAPTIVE
+    # driver, whose per-point work varies (the fixed-nit driver is count-balanced
+    # either way). Result reassembly scatters each block back to its original
+    # columns, so output order is preserved regardless of mode. Set
+    # KAPSEUDO_STRIDED=0 for the legacy contiguous bands. Both modes partition
+    # 1:ncols exactly once into `nblocks` blocks whose sizes differ by ≤ 1.
+    if get(ENV, "KAPSEUDO_STRIDED", "1") == "0"
+        blocks = Vector{StepRange{Int,Int}}(undef, nblocks)
+        q, r = divrem(Int(ncols), nblocks)
+        lo = 1
+        for b in 1:nblocks
+            hi = lo + q + (b ≤ r) - 1
+            blocks[b] = lo:1:hi
+            lo = hi + 1
+        end
+        return blocks
     end
-    return blocks
+    return [b:nblocks:Int(ncols) for b in 1:nblocks]
 end
 
 # Multi-device GPU fan-out shared by the fixed and adaptive drivers. Partitions
@@ -366,7 +378,9 @@ function _ihlpsa_fanout(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil
             results[did] = worker(zg[:, zgidx], zpd_devs[did])
         end
     end
-    return results
+    # Return `blocks` too: with strided partitioning the per-device results are no
+    # longer in column order, so callers scatter `results[d]` back to `blocks[d]`.
+    return results, blocks
 end
 
 # Fixed-nit engine: multi-device batched inverse-Lanczos at a caller-given depth.
@@ -397,10 +411,15 @@ function _ihlpsa_fixed(
         end
     end
     if KernelAbstractions.isgpu(backend)
-        results = _ihlpsa_fanout(backend, zg, P, nit, zpd, devs,
+        results, blocks = _ihlpsa_fanout(backend, zg, P, nit, zpd, devs,
             (zgb, zpd_dev) -> sdihlpsa(backend, zgb, P, γ, δ, zpd_dev, nit, x₀,
                 progress ? pchnl : missing, wgs); pbar)
-        result = (hcat(results...))::Matrix{real(T)}
+        # Scatter each device's columns back to their original grid positions
+        # (strided partition ⇒ device results are not in column order).
+        result = Matrix{real(T)}(undef, size(zg))
+        for (r, blk) in zip(results, blocks)
+            @inbounds result[:, blk] = r
+        end
     else
         # CPU runs the whole grid as one batch (zpd = length(zg)). It can't split
         # the grid the way the GPU path does: the single preallocated IHLworkspace
@@ -551,10 +570,15 @@ function _ihlpsa_adaptive(
     x₀_fixed = ismissing(x₀) ? _adaptive_x₀(T, m, seed) : x₀
     if KernelAbstractions.isgpu(backend)
         # findmaxbatchihl is sized with nit_max since α/β hold the full budget.
-        results = _ihlpsa_fanout(backend, zg, P, nit_max, zpd, devs,
+        results, blocks = _ihlpsa_fanout(backend, zg, P, nit_max, zpd, devs,
             (zgb, zpd_dev) -> _sdihlpsa_adaptive(backend, zgb, P, γ, δ, nit_chunk,
                 nit_max, rtol, atol, nconfirm, x₀_fixed, zpd_dev, wgs))
-        sr = (hcat((r[1] for r in results)...))::Matrix{real(T)}
+        # Scatter each device's columns back to their original grid positions
+        # (strided partition ⇒ device results are not in column order).
+        sr = Matrix{real(T)}(undef, size(zg))
+        for (r, blk) in zip(results, blocks)
+            @inbounds sr[:, blk] = r[1]
+        end
         nit_used = maximum(r[2] for r in results)
         unconverged = any(r[3] for r in results)
     else
