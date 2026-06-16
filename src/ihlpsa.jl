@@ -160,8 +160,8 @@ default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, 32) : 1
 function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
     g = length(zv)
-    @views _batched_column_oriented_forward_solve_pencil(backend, wgs, (wgs, g))(bV, conj(zv), P.Ac, P.Bc)
-    @views _batched_column_oriented_backward_solve_pencil(backend, wgs, (wgs, g))(bV, zv, P.A, P.B)
+    @views _batched_column_oriented_forward_solve_pencil(backend, wgs)(bV, conj(zv), P.Ac, P.Bc; ndrange=(wgs, g))
+    @views _batched_column_oriented_backward_solve_pencil(backend, wgs)(bV, zv, P.A, P.B; ndrange=(wgs, g))
 end
 
 # cpu solve step in lockstep_ihl!
