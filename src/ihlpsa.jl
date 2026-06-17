@@ -149,8 +149,80 @@ KernelAbstractions.get_backend(x::IHLworkspace{T,B}) where {T,B} = B
 default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, 32) : 1
 
 # non-cpu solve step in lockstep_ihl!
+#
+# Two GPU solve kernels are available:
+#   * warp-register (default): one warp/grid-point with the RHS held in registers and
+#     pivots broadcast by warp shuffle — no block barriers, no global round-trips on b.
+#     Specialized on R = cld(m, ws) (a Val), so one compile per matrix size m (m is fixed
+#     per ihlpsa run; the survivor count g stays the dynamic ndrange).
+#   * column-oriented (fallback): the original `@synchronize()`-per-column kernel. Select
+#     it with KAPSEUDO_WARP_TRSM=0.
 function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
+    strat = trsm_strategy()
+    if strat == "column"
+        _column_trsm!(backend, bV, zv, P, wgs)
+    elseif strat == "tiled"
+        _tiled_trsm!(backend, bV, zv, P, wgs)
+    elseif strat == "warp"
+        _warp_trsm!(backend, bV, zv, P, wgs)
+    else  # "auto": register-warp for small m, tiled for large m
+        if size(P, 1) >= trsm_crossover()
+            _tiled_trsm!(backend, bV, zv, P, wgs)
+        else
+            _warp_trsm!(backend, bV, zv, P, wgs)
+        end
+    end
+end
+
+# Warp-register solve. The generic implementation uses the portable KA + KernelIntrinsics
+# kernels; the CUDA extension can override `_warp_trsm!` with hand-rolled `@cuda` kernels
+# (opt-in via KAPSEUDO_CUDA_NATIVE=1) that avoid a KA+KI codegen regression at R=16.
+# `_warp_trsm_ka!` is the portable default and is kept callable for that override to fall back to.
+_warp_trsm!(backend, bV, zv, P, wgs) = _warp_trsm_ka!(backend, bV, zv, P, wgs)
+
+# Tiled / blocked solve: right-looking panel sweep with shared-memory A,B-tile reuse across
+# the grid-point batch (see src/KATRSM.jl/trsm_tiled_kernels.jl). `z` is conjugated once for
+# the forward (lower-tri Ac,Bc) sweep; the backward sweep uses (A,B,z) directly. `gt` (grid
+# points per trailing tile = the A,B reuse factor) is tunable via KAPSEUDO_TRSM_GT.
+function _tiled_trsm!(backend, bV, zv, P, wgs)
+    m = size(P, 1)
+    g = length(zv)
+    gt = parse(Int, get(ENV, "KAPSEUDO_TRSM_GT", "32"))
+    nblk = cld(m, 32)
+    zc = conj(zv)
+    # forward (lower-triangular), panels ascending
+    for k in 1:nblk
+        koff = (k - 1) * 32
+        plen = min(32, m - koff)
+        @views _tiled_panel_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen; ndrange=(32, g))
+        rbase = koff + plen
+        ntrail = m - rbase
+        if ntrail > 0
+            rtiles = cld(ntrail, 32)
+            ggrid = cld(g, gt)
+            @views _tiled_trailing_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt, rtiles; ndrange=32 * rtiles * ggrid)
+        end
+    end
+    # backward (upper-triangular), panels descending
+    for k in nblk:-1:1
+        koff = (k - 1) * 32
+        plen = min(32, m - koff)
+        @views _tiled_panel_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen; ndrange=(32, g))
+        if koff > 0
+            rtiles = cld(koff, 32)
+            ggrid = cld(g, gt)
+            @views _tiled_trailing_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen, gt, rtiles; ndrange=32 * rtiles * ggrid)
+        end
+    end
+end
+function _warp_trsm_ka!(backend, bV, zv, P, wgs)
+    g = length(zv)
+    R = cld(size(P, 1), wgs)
+    @views _batched_warp_forward_solve_pencil(backend, wgs)(bV, conj(zv), P.Ac, P.Bc, Val(R); ndrange=(wgs, g))
+    @views _batched_warp_backward_solve_pencil(backend, wgs)(bV, zv, P.A, P.B, Val(R); ndrange=(wgs, g))
+end
+function _column_trsm!(backend, bV, zv, P, wgs)
     g = length(zv)
     @views _batched_column_oriented_forward_solve_pencil(backend, wgs)(bV, conj(zv), P.Ac, P.Bc; ndrange=(wgs, g))
     @views _batched_column_oriented_backward_solve_pencil(backend, wgs)(bV, zv, P.A, P.B; ndrange=(wgs, g))

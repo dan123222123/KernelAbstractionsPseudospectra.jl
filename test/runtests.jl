@@ -63,6 +63,7 @@ if all_tests || "cuda" in ARGS
         test_cross_backend(CUDABackend())
         test_adaptive_backend(CUDABackend())
         test_katrsm_kernels(CUDABackend())
+        test_trsm_strategies(CUDABackend())
     end
 end
 

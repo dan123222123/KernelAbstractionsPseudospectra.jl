@@ -209,6 +209,57 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
             end
         end
 
+        @testset "batched warp-register pencil (KA, shuffle, GPU only)" begin
+            # The warp-register kernels use warp shuffles (@shfl), so they run on GPU
+            # backends only. They must agree with LAPACK and be BITWISE-identical to the
+            # column-oriented kernel (same pencil/_pdiv/update order). wgs is fixed at the
+            # warp width 32; R = cld(m, 32) is the per-lane register-slot count.
+            if KernelAbstractions.isgpu(backend)
+                wgs = 32
+                for T in types, m in (8, 16, 31, 32, 33, 64, 96)
+                    rtol = _tol(T)
+                    g = 4
+                    R = cld(m, wgs)
+                    Au = _rand_uppertri(T, m); Bu = _rand_uppertri(T, m)
+                    Al = _rand_lowertri(T, m); Bl = _rand_lowertri(T, m)
+                    zv = T(2) .+ T(0.3) * randn(T, g)
+                    b0_mat = reduce(hcat, [randn(T, m) for _ = 1:g])
+
+                    Au_d = _to(backend, Au); Bu_d = _to(backend, Bu)
+                    Al_d = _to(backend, Al); Bl_d = _to(backend, Bl)
+                    zv_d = _to(backend, zv)
+
+                    # forward (lower-triangular)
+                    bw = VectorOfSimilarVectors(_to(backend, copy(b0_mat)))
+                    KATRSM._batched_warp_forward_solve_pencil(backend, wgs, (wgs, g))(bw, zv_d, Al_d, Bl_d, Val(R))
+                    KernelAbstractions.synchronize(backend)
+                    bc = VectorOfSimilarVectors(_to(backend, copy(b0_mat)))
+                    KATRSM._batched_column_oriented_forward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, Al_d, Bl_d)
+                    KernelAbstractions.synchronize(backend)
+                    bw_h = _from(bw.data); bc_h = _from(bc.data)
+                    for i = 1:g
+                        yref = LowerTriangular(zv[i] * Bl .- Al) \ b0_mat[:, i]
+                        @test isapprox(bw_h[:, i], yref; rtol=rtol)
+                        @test bw_h[:, i] == bc_h[:, i]      # bitwise vs column-oriented
+                    end
+
+                    # backward (upper-triangular)
+                    bw = VectorOfSimilarVectors(_to(backend, copy(b0_mat)))
+                    KATRSM._batched_warp_backward_solve_pencil(backend, wgs, (wgs, g))(bw, zv_d, Au_d, Bu_d, Val(R))
+                    KernelAbstractions.synchronize(backend)
+                    bc = VectorOfSimilarVectors(_to(backend, copy(b0_mat)))
+                    KATRSM._batched_column_oriented_backward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, Au_d, Bu_d)
+                    KernelAbstractions.synchronize(backend)
+                    bw_h = _from(bw.data); bc_h = _from(bc.data)
+                    for i = 1:g
+                        xref = UpperTriangular(zv[i] * Bu .- Au) \ b0_mat[:, i]
+                        @test isapprox(bw_h[:, i], xref; rtol=rtol)
+                        @test bw_h[:, i] == bc_h[:, i]
+                    end
+                end
+            end
+        end
+
         @testset "blkco non-pencil kernels (KA, single block)" begin
             for T in types, m in (8, 16)
                 rtol = _tol(T)
@@ -281,6 +332,26 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
                 KATRSM.blkco_forward_solve_pencil!(d, z, Al_d, Bl_d; nblkcols)
                 KernelAbstractions.synchronize(backend)
                 @test isapprox(_from(d), LowerTriangular(z * Bl .- Al) \ b0; rtol=rtol)
+            end
+        end
+    end
+end
+
+# End-to-end consistency of the GPU trsm strategies (KAPSEUDO_TRSM): the per-warp `warp`
+# and `tiled` solves, and `auto`, must match the shuffle-free `column` baseline to element-
+# type tolerance, across sizes incl. partial last panels (m not a multiple of 32).
+function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
+    KernelAbstractions.isgpu(backend) || return
+    @testset "trsm strategy consistency -- $(backend)" begin
+        for T in types, m in (32, 100, 128, 300)
+            rng = Random.seed!(2024)
+            P = MatrixPencil(schur(randn(rng, T, m, m)))
+            _, _, zg = qgrid(T, (-3, 3), (-3, 3), (40, 40))
+            σc = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "column")
+            tol = real(T) === Float32 ? 1e-4 : 1e-10
+            for strat in ("warp", "tiled", "auto")
+                σ = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => strat)
+                @test maximum(abs.(σ .- σc)) / maximum(abs.(σc)) < tol
             end
         end
     end
