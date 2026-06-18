@@ -27,22 +27,9 @@
 # Usage:  unset LD_LIBRARY_PATH; JULIA_NUM_THREADS=auto \
 #           julia --project=test bench/nit_chunk_sweep.jl oneapi
 
-using KAPseudospectra
-using KernelAbstractions
-using LinearAlgebra, Printf, Dates
+include(joinpath(@__DIR__, "bench_common.jl"))   # deps + shared helpers
 
-const WHICH = isempty(ARGS) ? "cuda" : lowercase(ARGS[1])
-const BACKEND = if WHICH == "cuda"
-    @eval using CUDA; CUDA.CUDABackend()
-elseif WHICH == "oneapi"
-    @eval using oneAPI; oneAPI.oneAPIBackend()
-elseif WHICH == "amdgpu"
-    @eval using AMDGPU; AMDGPU.ROCBackend()
-elseif WHICH == "cpu"
-    CPU()
-else
-    error("unknown backend $(WHICH); use cuda|oneapi|amdgpu|cpu")
-end
+const BACKEND = select_backend(ARGS; default="cuda")
 
 const RESULTS = joinpath(@__DIR__, "results_adaptive")
 mkpath(RESULTS)
@@ -55,33 +42,11 @@ const MS      = parse.(Int, split(get(ENV, "NSWEEP_MS", "64,128,256,512,1024"), 
 const CHUNKS  = [1, 2, 3, 4, 6, 8, 12, 16]                 # nit_chunk values to sweep
 const REPS    = parse(Int, get(ENV, "NSWEEP_REPS", "3"))
 
-logio = open(joinpath(RESULTS, "nit_chunk_sweep_log.txt"), "w")
-clock() = Dates.format(Dates.now(), "HH:MM:SS")
-logln(args...) = (s = string(args...); println(s); println(logio, s); flush(logio))
+logln, logio = bench_logger(joinpath(RESULTS, "nit_chunk_sweep_log.txt"))
 
-function grcar(::Type{S}, m, k=3) where {S}
-    A = zeros(S, m, m)
-    for i in 1:m
-        A[i, i] = one(S)
-        for j in 1:k; i+j <= m && (A[i, i+j] = one(S)); end
-        i+1 <= m && (A[i+1, i] = -one(S))
-    end
-    A
-end
-
-# reclaim memory on EVERY device so no config inherits another's allocator state
-# (multi-GPU honesty: the adaptive driver fans out across all devices, so reclaim
-# all of them, not just the current one — cf. strong_scaling_adaptive.jl). Uses the
-# package's backend-agnostic device interface; CPU has nothing to reclaim per device.
-const DEVS = KernelAbstractions.isgpu(BACKEND) ? collect(KAPseudospectra.devices(BACKEND)) : []
-function reclaim_all()
-    for d in DEVS
-        KAPseudospectra.device!(BACKEND, d)
-        KAPseudospectra.device_reclaim(BACKEND)
-    end
-    isempty(DEVS) && KAPseudospectra.device_reclaim(BACKEND)
-    GC.gc(); GC.gc()
-end
+# Device count for the header; `reclaim_all` (from bench_common) resets the per-device
+# allocator state between configs so none inherits another's.
+const NDEV = KernelAbstractions.isgpu(BACKEND) ? length(collect(KAPseudospectra.devices(BACKEND))) : 1
 
 # best-of-REPS adaptive run at a given nit_chunk. The internal _ihlpsa_adaptive
 # driver returns (σ, nit_grid) — we report maximum(nit_grid) as the depth reached;
@@ -90,7 +55,7 @@ end
 function best_adaptive(zg, P, nit_chunk, nit_max)
     best = Inf; nu = 0
     for _ in 1:REPS
-        reclaim_all(); local ng = nothing
+        reclaim_all(BACKEND); local ng = nothing
         t = @elapsed ((_, ng) = KAPseudospectra._ihlpsa_adaptive(
             BACKEND, zg, P; nit_chunk=nit_chunk, nit_max=nit_max))
         t < best && (best = t; nu = maximum(ng))
@@ -103,14 +68,14 @@ _, _, zg = qgrid(T, REGION[1], REGION[2], (G, G))
 logln("="^88)
 logln("ADAPTIVE nit_chunk crossover sweep (best-of-", REPS, ")   ", Dates.now())
 logln("Grcar  grid=", G, "x", G, " (", G*G, " pts)  T=", T, "  backend=", BACKEND,
-      "  ndev=", max(1, length(DEVS)))
+      "  ndev=", NDEV)
 logln("="^88)
 
 csv = open(joinpath(RESULTS, "nit_chunk_sweep.csv"), "w")
 println(csv, "m,nit_chunk,nit_max,time_s,gridpts_per_s,nit_used,est_chunks,rel_to_chunk2,is_best")
 
 for m in MS
-    P = MatrixPencil(grcar(T, m))
+    P = grcar_pencil(T, m)
     nit_max = 8 * ceil(Int, log2(m))        # = the ihlpsa default cap
     logln("")
     logln("[", clock(), "] m=", m, "  nit_max=", nit_max)
