@@ -2,8 +2,7 @@
 using KAPseudospectra
 using LinearAlgebra
 using KernelAbstractions
-using Plots
-pyplot()
+using Plots          # GR backend (Plots' default — no extra deps)
 using LaTeXStrings
 ##
 

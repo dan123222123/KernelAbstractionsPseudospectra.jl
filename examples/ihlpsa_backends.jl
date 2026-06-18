@@ -1,8 +1,6 @@
 ##
 using LinearAlgebra, MatrixDepot
-using Plots, LaTeXStrings
-# GR has some issues with colorbar ticks/lables -- use pyplot to get a nicer figure (needs PyPlot.jl)
-pyplot()
+using Plots, LaTeXStrings   # GR backend (Plots' default — no extra deps)
 ##
 
 ## choose your backend

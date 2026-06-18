@@ -209,6 +209,9 @@ end
 # interface (CPU defaults here; each GPU extension overrides the six methods) rather
 # than bolt the missing pieces onto KA's ordinal model. `supports_fp64` below is the
 # one method that *does* delegate to KA (see its note).
+# (Re-checked through KA 0.10.0-dev / `main`: still ordinal-only — no device-memory
+# query, and only a per-array `unsafe_free!`, not a backend-wide reclaim — so the gap
+# stands. Revisit delegating `device!`/`ndevices` if KA adds memory + handle pieces.)
 get_bgarray(B::CPU) = Array
 device(B::CPU) = CPU()
 devices(B::CPU) = CPU()
@@ -251,7 +254,9 @@ function ihlsrg!(sr, zv, γ, δ, α, β)
         αi = Float64.(real.(α[:, i]))
         βi = Float64.(real.(β[2:end-1, i]))
         if all(isfinite, αi) && all(isfinite, βi)
-            sr[i] = (γ + δ * abs(zv[i])) / sqrt(eigmax(SymTridiagonal(αi, βi)))
+            # σ_min = 1/√(eigmax) of [(zB−A)(zB−A)ᴴ]⁻¹; the (γ,δ)-pseudospectral
+            # value is σ_min/(γ+δ|z|) (Frayssé et al.) = 1/((γ+δ|z|)·√eigmax).
+            sr[i] = 1 / ((γ + δ * abs(zv[i])) * sqrt(eigmax(SymTridiagonal(αi, βi))))
         else
             sr[i] = eps(real(eltype(zv)))
         end
@@ -398,6 +403,7 @@ function _ihlpsa_fixed(
     devs=missing,
     wgs=missing
 ) where {T<:Complex}
+    _validate_weights(γ, δ)
     # progress bar + consumer task only when caller asks for one. Otherwise the
     # consumer just blocks forever on an empty channel and the spawn leaks at
     # precompile time.
@@ -459,7 +465,7 @@ _adaptive_default_rtol(::Type{T}) where {T<:Complex} = real(T) == Float32 ? 1.0f
 _adaptive_default_atol(::Type{T}) where {T<:Complex} = eps(real(T))
 
 # Per-grid-point convergence test between two consecutive chunk results. σ are
-# the resolvent-derived values from `ihlsrg!` (= (γ + δ|z|)·σ_min). Combined
+# the resolvent-derived values from `ihlsrg!` (= σ_min/(γ + δ|z|)). Combined
 # absolute + relative tolerance, with an explicit eps-sentinel short-circuit:
 # `ihlsrg!` pins a point at/near a true eigenvalue to `eps(real(T))` (σ_min ≈ 0,
 # resolvent norm → ∞), which is already physically converged — no further
@@ -477,7 +483,9 @@ end
 
 Batched inverse-Lanczos pseudospectra of the matrix pencil `P` over the complex
 grid `zg`, fanned out across all devices of `backend` (pass `devs` to restrict).
-Each grid point's value is `(γ + δ|z|)·σ_min(zB − A)`. Both forms return the
+Each grid point's value is the (γ,δ)-pseudospectral value `σ_min(zB − A)/(γ + δ|z|)`
+(Frayssé et al.; `z ∈ σ_ε^{(γ,δ)}` iff this is `< ε`). With the default `γ=1, δ=0`
+this is the standard pseudospectrum value `σ_min(zB − A)`. Both forms return the
 grid-shaped `Matrix` of σ values. Perturbation scaling `γ`,`δ` are keyword
 arguments.
 
@@ -494,8 +502,9 @@ is reused across chunks so the convergence check compares one Lanczos run at
 successive depths. The σ match the fixed layout
 (`ihlpsa(...) ≈ ihlpsa(..., nit)` at the converged depth). The convergence depth
 reached is a diagnostic, not a routine return value: pass `verbose=true` to log
-it, or call the un-exported `KAPseudospectra._ihlpsa_adaptive` driver, which
-returns `(σ::Matrix, nit_used::Integer)`.
+the deepest depth, or call the un-exported `KAPseudospectra._ihlpsa_adaptive`
+driver, which returns `(σ::Matrix, nit_grid::Matrix{Int})` — `nit_grid[i]` is the
+depth at which grid point `i` retired (`maximum(nit_grid)` is the deepest point).
 
 # Examples
 ```julia
@@ -529,22 +538,22 @@ end
 # Adaptive form — omit `nit`. Always returns just `srg::Matrix`, mirroring the
 # fixed-nit form: the convergence depth reached is a diagnostic, not a routine
 # return value. To read the depth, pass `verbose=true` (it is logged) or call the
-# un-exported `_ihlpsa_adaptive` driver below, which returns `(srg, nit_used)`.
+# un-exported `_ihlpsa_adaptive` driver below, which returns `(srg, nit_grid)`.
 function ihlpsa(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T};
     kwargs...) where {T<:Complex}
     return first(_ihlpsa_adaptive(backend, zg, P; kwargs...))
 end
 
 # Internal adaptive driver — multi-device per-point adaptive inverse Lanczos.
-# Returns `(srg::Matrix, nit_used::Integer)`; the public `ihlpsa(...; …)` wraps
-# this and drops `nit_used`. NOT exported: the depth is exposed to power users via
-# `verbose=true` logging, and to the test suite by calling this directly.
+# Returns `(srg::Matrix, nit_grid::Matrix{Int})`; the public `ihlpsa(...; …)` wraps
+# this and drops `nit_grid`. NOT exported: the per-point depth is exposed to power
+# users via `verbose=true` logging, and to the test suite by calling this directly.
 #
 # Fans grid columns out across devices via `_ihlpsa_fanout` (shared with the fixed
 # engine), but each device runs its own per-point adaptive loop
 # (`_sdihlpsa_adaptive`) and stops at its OWN converged depth — devices over easy
 # regions retire early instead of lockstepping to the global worst point.
-# `nit_used` is the deepest depth across devices.
+# `nit_grid[i]` is point i's retirement depth; `maximum(nit_grid)` is the deepest.
 function _ihlpsa_adaptive(
     backend,
     zg::AbstractArray{T,2},
@@ -563,6 +572,7 @@ function _ihlpsa_adaptive(
     wgs=missing,
     verbose=false
 ) where {T<:Complex}
+    _validate_weights(γ, δ)
     R = real(T)
     m = size(P, 1)
     rtol = R(rtol)
@@ -576,24 +586,25 @@ function _ihlpsa_adaptive(
         # Scatter each device's columns back to their original grid positions
         # (strided partition ⇒ device results are not in column order).
         sr = Matrix{real(T)}(undef, size(zg))
+        nit_grid = Matrix{Int}(undef, size(zg))
         for (r, blk) in zip(results, blocks)
             @inbounds sr[:, blk] = r[1]
+            @inbounds nit_grid[:, blk] = r[2]
         end
-        nit_used = maximum(r[2] for r in results)
         unconverged = any(r[3] for r in results)
     else
         # Unlike sdihlpsa (whose batches run under ThreadsX and would race on the
         # shared workspace), the resident workers process batches sequentially,
         # so honoring a user-supplied zpd is safe on CPU too — useful for
         # memory-capping and for exercising the multi-batch path in tests.
-        sr, nit_used, unconverged = _sdihlpsa_adaptive(backend, zg, P,
+        sr, nit_grid, unconverged = _sdihlpsa_adaptive(backend, zg, P,
             γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀_fixed,
             ismissing(zpd) ? length(zg) : zpd, wgs)
     end
     unconverged &&
         @warn "ihlpsa adaptive hit nit_max=$nit_max with unconverged point(s) (rtol=$rtol)"
-    verbose && @info "ihlpsa adaptive done" nit = nit_used
-    return permutedims(sr), nit_used
+    verbose && @info "ihlpsa adaptive done" nit = maximum(nit_grid)
+    return permutedims(sr), permutedims(nit_grid)
 end
 
 # Gather rows `keep` (a host Int vector) from a (g, m, k) device array into a fresh
@@ -620,7 +631,8 @@ end
 # The gather traffic is O(m·survivors) per chunk — negligible against the
 # O(nit_chunk·m²·survivors) solve work it avoids re-running.
 # `idx_glob` maps packed position → original flat grid index throughout.
-# Returns (sr_matrix, nit_deepest, unconverged::Bool).
+# Returns (sr_matrix, nit_grid, unconverged::Bool), where nit_grid[i] is the
+# depth at which grid point i retired (or nit_max for points that never did).
 function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T},
     γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, wgs) where {T<:Complex}
     R = real(T)
@@ -629,7 +641,7 @@ function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPe
     gtotal = length(zv_h)
     σ_out = zeros(R, gtotal)
     σ_prev = zeros(R, gtotal)            # indexed by ORIGINAL flat grid index
-    nit_deepest = 0
+    nit_at = zeros(Int, gtotal)          # per-point retirement depth (orig flat index)
     unconverged = false
     for idxb in idxbatches
         g = length(idxb)
@@ -664,6 +676,7 @@ function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPe
                     end
                     if streak[k] >= nconfirm
                         σ_out[gi] = sr_a[k]
+                        nit_at[gi] = nit_new        # depth this point retired at
                     else
                         σ_prev[gi] = sr_a[k]
                         push!(keep, k)
@@ -700,11 +713,12 @@ function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPe
             unconverged = true
             for k in 1:g
                 σ_out[idx_glob[k]] = σ_prev[idx_glob[k]]
+                nit_at[idx_glob[k]] = nit_done      # never converged → used full budget
             end
         end
-        nit_deepest = max(nit_deepest, nit_done)
     end
-    return Matrix{R}(reshape(σ_out, size(zg))), nit_deepest, unconverged
+    return Matrix{R}(reshape(σ_out, size(zg))),
+        Matrix{Int}(reshape(nit_at, size(zg))), unconverged
 end
 
 ## END WRAPPER FUNCTIONS ##

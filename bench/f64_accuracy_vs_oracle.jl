@@ -81,12 +81,12 @@ for m in (64, 128)
     ihlpsa(CUDABackend(), zg, P, 4)
     ihlpsa(CUDABackend(), zg, P; nit_max=nit_deep)
 
-    # internal driver returns (σ, nit_used); public ihlpsa returns only σ
-    tadp = @elapsed ((σ_adp_t, nused) = KAPseudospectra._ihlpsa_adaptive(CUDABackend(), zg, P))  # adaptive, default rtol=1e-6
+    # internal driver returns (σ, nit_grid); public ihlpsa returns only σ
+    tadp = @elapsed ((σ_adp_t, nit_grid) = KAPseudospectra._ihlpsa_adaptive(CUDABackend(), zg, P))  # adaptive, default rtol=1e-6
     tfix = @elapsed (σ_fix_t = ihlpsa(CUDABackend(), zg, P, nit_deep))    # deep fixed reference
     σ_adp = permutedims(σ_adp_t)    # back to zg[i,j] alignment (ihlpsa returns permutedims internally)
     σ_fix = permutedims(σ_fix_t)
-    logln(@sprintf("[%s] adaptive %.2fs (nit_used=%d, rtol=1e-6)   fixed(nit=%d) %.2fs", clock(), tadp, nused, nit_deep, tfix))
+    logln(@sprintf("[%s] adaptive %.2fs (nit_used=%d, rtol=1e-6)   fixed(nit=%d) %.2fs", clock(), tadp, maximum(nit_grid), nit_deep, tfix))
 
     # masks by σ magnitude (contour-relevant vs deep tail)
     allm   = trues(size(orc))

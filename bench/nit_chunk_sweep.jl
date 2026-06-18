@@ -84,15 +84,16 @@ function reclaim_all()
 end
 
 # best-of-REPS adaptive run at a given nit_chunk. The internal _ihlpsa_adaptive
-# driver returns (σ, nit_used); the public ihlpsa returns only σ. nit_max is held
+# driver returns (σ, nit_grid) — we report maximum(nit_grid) as the depth reached;
+# the public ihlpsa returns only σ. nit_max is held
 # fixed across the chunk sweep so only the chunking granularity varies.
 function best_adaptive(zg, P, nit_chunk, nit_max)
     best = Inf; nu = 0
     for _ in 1:REPS
-        reclaim_all(); local n = 0
-        t = @elapsed ((_, n) = KAPseudospectra._ihlpsa_adaptive(
+        reclaim_all(); local ng = nothing
+        t = @elapsed ((_, ng) = KAPseudospectra._ihlpsa_adaptive(
             BACKEND, zg, P; nit_chunk=nit_chunk, nit_max=nit_max))
-        t < best && (best = t; nu = n)
+        t < best && (best = t; nu = maximum(ng))
     end
     (best, nu)
 end

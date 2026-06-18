@@ -42,7 +42,7 @@ function testihlpsa_adaptive(fname, backend, tol; kwargs...)
     P = MatrixPencil(schur(Matrix{complex(eltype(A))}(A)))
     # Public `ihlpsa(…; …)` returns only σ; call the internal driver for the
     # convergence depth we want to report alongside the error.
-    srg, nit_used = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; kwargs...)
-    println("Normed Error for ihlpsa adaptive on $(backend) is $(norm(abs.(srgref .- srg))/norm(srgref)) (nit=$nit_used)")
+    srg, nit_grid = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; kwargs...)
+    println("Normed Error for ihlpsa adaptive on $(backend) is $(norm(abs.(srgref .- srg))/norm(srgref)) (nit=$(maximum(nit_grid)))")
     return (norm(abs.(srgref .- srg)) / norm(srgref)) < tol
 end

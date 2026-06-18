@@ -32,24 +32,31 @@ tolerance), `nconfirm` (confirmation chunks), `nit_chunk`, `nit_max`, and `γ`,`
 for perturbation scaling (`γ`,`δ` are keywords in both forms). Pass `devs` to
 restrict which GPUs are used. Adaptive runs across multiple GPUs the same way the
 fixed path does. The convergence depth reached is a diagnostic — pass
-`verbose=true` to log it, or call `KAPseudospectra._ihlpsa_adaptive(...)` for the
-`(σ, nit_used)` tuple.
+`verbose=true` to log the deepest depth, or call
+`KAPseudospectra._ihlpsa_adaptive(...)` for the `(σ, nit_grid)` tuple, where
+`nit_grid[i]` is each grid point's retirement depth (`maximum(nit_grid)` is the
+deepest).
 
 # Examples
-Check out `examples/` for three scripts that showcase usage of this package.
+Check out `examples/` for scripts that showcase usage of this package. See
+`examples/README.md` for the full rundown; in brief:
 
-They are:
+- `ihlpsa_adaptive.jl` -- adaptive iteration-depth `ihlpsa`: σ contours alongside the per-grid-point Lanczos-depth maps, at two tolerances
+- `ihlpsa_adaptive_advanced.jl` -- the intricate adaptive machinery: generalized pencils (`B ≠ I`, γ/δ weights), the convergence knobs, reproducible seeds, the `nit_max` cap, `zpd` multi-batch, and multi-device fan-out
+- `loewner_pseudospectra.jl` -- reproduces Example 1 of Embree & Ioniţă, *Pseudospectra of Loewner Matrix Pencils* (2022): how interpolation-point placement controls the sensitivity of poles recovered by Loewner realization
 - `ihlpsa_backends.jl` -- a good starting point, showing how to switch between device-specific backends (`CUDA` and `AMDGPU` have been tested thusfar)
   Note, `AMDGPU` currently requires running Julia with a single thread (there is a bug in Julia when running with multiple threads, likely related to premature garbage collection)
 - `test_real_structured_psa.jl` -- compute structured/unstructured pseudospectra for a matrix using `CPU()` and plot them together
-- `test_ihlpsa_large.jl` -- compute pseudospectra for increasingly large matrices using `CUDABackend()`, writing timing information and plots to `examples/test_large_results/`
+- `test_ihlpsa_large.jl` -- timing sweep over increasingly large matrices (CPU by default; uncomment a backend for an accelerator), writing timing information and plots to `examples/test_large_results/`
 
-The `examples/` directory has its own `Project.toml` listing every dependency the
-scripts use (including PyPlot for nice colorbar formatting via `Plots.jl`'s
-PyPlot backend, plus optional `CUDA`/`AMDGPU`/`Metal`). Instantiate it once:
+The `examples/` directory has its own `Project.toml`. It is **CPU-only and
+plot-ready** out of the box: plotting uses `Plots.jl`'s default GR backend (no
+Python/matplotlib), and a `[sources]` entry resolves `KAPseudospectra` from the
+checkout, so a single instantiate suffices (no `dev` step). Add a GPU backend
+yourself to run on a device -- see `examples/README.md`.
 
 ```sh
-julia --project=examples -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+julia --project=examples -e 'using Pkg; Pkg.instantiate()'
 ```
 
 then run any example as:

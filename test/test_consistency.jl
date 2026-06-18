@@ -75,8 +75,8 @@ end
         nit_max = 8 * ceil(Int, log2(m))                  # adaptive cap (= default)
         s_fixed = ihlpsa(CPU(), zg, P, nit_max; x₀=x₀)    # over-converged control
         # Public `ihlpsa(…; …)` returns only σ; the internal driver also returns the
-        # convergence depth this testset asserts on.
-        s_adp, nit_used = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀=x₀)
+        # per-point convergence depth grid this testset asserts on.
+        s_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀=x₀)
         s_svd = ℂsvdpsa(zg, P)
 
         # Comparison tol ~10× the adaptive stopping rtol (default 1e-4 F32 /
@@ -84,7 +84,8 @@ end
         rtol = T == ComplexF32 ? 1e-3 : 1e-5
         @test isapprox(s_adp, s_svd; rtol=rtol)           # vs dense SVD oracle
         @test isapprox(s_adp, s_fixed; rtol=rtol)         # vs fixed-nit control
-        @test nit_used < nit_max                           # genuinely stopped early
+        @test size(nit_grid) == size(s_adp)               # per-point depth grid
+        @test maximum(nit_grid) < nit_max                  # genuinely stopped early
     end
 end
 
@@ -100,11 +101,11 @@ end
         γ, δ = 0.5, 0.5
 
         x₀ = _seeded_x₀(T, m, 0xFEED)
-        s_adp, nit_used = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; γ=γ, δ=δ, x₀=x₀)
+        s_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; γ=γ, δ=δ, x₀=x₀)
         s_svd = ℂsvdpsa(zg, P, γ, δ)
         rtol = T == ComplexF32 ? 1e-3 : 1e-5
         @test isapprox(s_adp, s_svd; rtol=rtol)
-        @test nit_used < 8 * ceil(Int, log2(m))
+        @test maximum(nit_grid) < 8 * ceil(Int, log2(m))
     end
 end
 
@@ -129,8 +130,8 @@ end
 @testset "ihlpsa adaptive nit_max cap" begin
     # With nconfirm=2 a point needs ≥2 real checkpoints to retire, which nit_max=3
     # (chunks at 2,3) cannot provide — so every point hits the cap. The driver must
-    # @warn, set nit_used=nit_max, and fall back to the deepest-chunk σ (≈ the
-    # fixed run at the cap), not error or return garbage.
+    # @warn, set every point's depth to nit_max, and fall back to the deepest-chunk
+    # σ (≈ the fixed run at the cap), not error or return garbage.
     Random.seed!(0xCA9F)
     for T in (ComplexF32, ComplexF64)
         m = 24
@@ -140,11 +141,11 @@ end
         x₀ = _seeded_x₀(T, m, 0xBEEF)
         nit_cap = 3
 
-        s_adp, nit_used = @test_logs (:warn,) match_mode = :any KAPseudospectra._ihlpsa_adaptive(
+        s_adp, nit_grid = @test_logs (:warn,) match_mode = :any KAPseudospectra._ihlpsa_adaptive(
             CPU(), zg, P; x₀=x₀, nit_max=nit_cap, rtol=1e-12)
         s_fix = ihlpsa(CPU(), zg, P, nit_cap; x₀=x₀)
 
-        @test nit_used == nit_cap
+        @test all(==(nit_cap), nit_grid)
         @test all(isfinite, s_adp)
         @test isapprox(s_adp, s_fix; rtol=(T == ComplexF32 ? 1e-4 : 1e-10))
     end
@@ -198,10 +199,10 @@ function test_adaptive_backend(backend; types=(ComplexF32, ComplexF64))
 
             # Adaptive (per-point hybrid) across the device fan-out: exercises the
             # on-device state gather (custom `_qv_gather!` kernel) and multi-device partition.
-            s_cpu, n_cpu = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀=x₀)
-            s_gpu, n_gpu = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀=x₀)
+            s_cpu, grid_cpu = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀=x₀)
+            s_gpu, grid_gpu = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀=x₀)
             @test isapprox(s_cpu, s_gpu; rtol=rtol)
-            @test abs(n_cpu - n_gpu) <= ceil(Int, log2(m))   # within one chunk
+            @test abs(maximum(grid_cpu) - maximum(grid_gpu)) <= ceil(Int, log2(m))   # within one chunk
         end
     end
 end

@@ -5,15 +5,19 @@
     svdpsa!(srg, zg, A::Matrix, B::Matrix, γ, δ)
     svdpsa!(srg, zg, P::AbstractMatrixPencil, γ=1, δ=0)
 
-Compute matrix of resolvent norms for `zB-A` using the SVD.
+Compute the (γ,δ)-pseudospectral value of the pencil `zB-A` at each `z ∈ zg`
+using the SVD: `σ_min(zB − A) / (γ + δ|z|)`.
 
-`z` is an element of `zg`.
-Scaling for perturbations to and `A` and `B` is given by γ, δ ∈ [0, 1], respectively.
-Resulting resolvent grid is stored in `srg`.
+This is the ε-level function of the Frayssé–Gueury–Nicoud–Toumazou (γ,δ)-
+pseudospectrum: `z ∈ σ_ε^{(γ,δ)}` iff this value is `< ε`, where `γ`,`δ ≥ 0`
+(not both zero) scale perturbations to `A` and `B` respectively (a pencil
+perturbation `zΔ − Γ` has norm `≤ ε(γ + δ|z|)`). Common choices are `(1,0)`
+(standard pseudospectrum, `= σ_min(zB − A)`, the default) and `(1,1)`. Result
+is stored in `srg`.
 """
 function ℂsvdpsa!(srg::Matrix{S}, zg::Matrix{T}, A::Matrix{T}, B::Matrix{T}, γ::Real, δ::Real) where {T<:Complex{S}} where {S<:Real}
     Threads.@threads for Mind in eachindex(zg)
-        srg[Mind] = (γ + δ * abs(zg[Mind])) * svdvals(zg[Mind] * B - A)[end]
+        srg[Mind] = svdvals(zg[Mind] * B - A)[end] / (γ + δ * abs(zg[Mind]))
     end
     return nothing
 end

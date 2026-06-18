@@ -45,10 +45,10 @@ build(m, g) = (zg = qgrid(T, REGION[1], REGION[2], (g, g))[3]; (; zg, P = Matrix
 function best_adaptive(zg, P, nmax)
     best = Inf; nu = 0
     for _ in 1:REPS
-        reclaim_all(); local n = 0
-        # internal driver returns (σ, nit_used); public ihlpsa returns only σ
-        t = @elapsed ((_, n) = KAPseudospectra._ihlpsa_adaptive(CUDABackend(), zg, P; nit_max=nmax))
-        t < best && (best = t; nu = n)
+        reclaim_all(); local ng = nothing
+        # internal driver returns (σ, nit_grid); public ihlpsa returns only σ
+        t = @elapsed ((_, ng) = KAPseudospectra._ihlpsa_adaptive(CUDABackend(), zg, P; nit_max=nmax))
+        t < best && (best = t; nu = maximum(ng))
     end
     (best, nu)
 end

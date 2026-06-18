@@ -69,10 +69,10 @@ for ndev in 1:N_GPU
     best = Inf; nused = 0
     for _ in 1:REPS
         reclaim_all()
-        local nu = 0
-        # internal driver returns (σ, nit_used); public ihlpsa returns only σ
-        t = @elapsed ((_, nu) = KAPseudospectra._ihlpsa_adaptive(CUDABackend(), zg, P; nit_max=NMAX, devs=devs))
-        if t < best; best = t; nused = nu; end
+        local ng = nothing
+        # internal driver returns (σ, nit_grid); public ihlpsa returns only σ
+        t = @elapsed ((_, ng) = KAPseudospectra._ihlpsa_adaptive(CUDABackend(), zg, P; nit_max=NMAX, devs=devs))
+        if t < best; best = t; nused = maximum(ng); end
     end
     global t1; ndev == 1 && (t1 = best)
     gpps, spd = (G*G)/best, t1/best

@@ -26,9 +26,23 @@ All notable changes to KAPseudospectra.jl are documented here.
   `nit::Integer` for the fixed-depth behaviour. Both forms return the grid-shaped
   `Matrix` of σ; the adaptive convergence depth is a diagnostic, surfaced via
   `verbose=true` logging (or from the un-exported `KAPseudospectra._ihlpsa_adaptive`
-  driver, which returns `(σ, nit_used)`).
+  driver, which returns `(σ, nit_grid)` — a same-shape map of each grid point's
+  retirement depth; `maximum(nit_grid)` is the deepest).
 - **Breaking:** perturbation scaling `γ`,`δ` are now **keyword** arguments in both
   forms (previously positional in the fixed form): `ihlpsa(b, zg, P, nit; γ, δ)`.
+
+### Fixed
+- **Breaking (δ≠0 only):** the `(γ,δ)` pseudospectral value is now
+  `σ_min(zB − A)/(γ + δ|z|)`, matching the Frayssé–Gueury–Nicoud–Toumazou
+  definition (`z ∈ σ_ε^{(γ,δ)}` iff the value is `< ε`). Previously both `ihlpsa`
+  and `ℂsvdpsa` returned the reciprocal weighting `(γ + δ|z|)·σ_min`, which does
+  not correspond to any `σ_ε^{(γ,δ)}`. The default `γ=1, δ=0` (standard
+  pseudospectrum, `= σ_min`) is unchanged; only `δ≠0` results differ.
+- The `γ`,`δ` weights are no longer required to sum to 1. Any `γ, δ ≥ 0` (not both
+  zero) is accepted — including the literature's `(1,0)` and `(1,1)` — since the
+  set is invariant to a common scaling of `(γ,δ)`. The check is now applied
+  uniformly across `ℂsvdpsa`, `ihlpsa`, and the adaptive driver (previously only
+  `ℂsvdpsa` validated, and it rejected `(1,1)`).
 
 ### Removed
 - **Breaking:** `ihlpsa_adaptive` and its tier flags (`compact`, `resumable`).
