@@ -29,10 +29,7 @@ wgs = 256                                  # 16 AMDGPU · 32 Intel · 256 CPU/CU
 ##
 
 ## ── 1. Generalized pencil B ≠ I with weights γ, δ ──────────────────────────────
-# A standard pencil is B = I (zB − A = zI − A). `MatrixPencil(A, B)` builds the
-# generalized pencil zB − A; the adaptive driver carries γ, δ through unchanged,
-# with each point's value (γ + δ|z|)·σ_min(zB − A). γ+δ ≈ 1 keeps it a structured
-# pseudospectrum.
+# A standard pencil is B = I (zB − A = zI − A). `MatrixPencil(A, B)` builds the generalized pencil zB − A
 T = ComplexF32
 m = 24
 Random.seed!(0xBEEF)
@@ -118,10 +115,10 @@ println("mean depth = ", sum(ng)/length(ng), "   (a fixed-nit run would pay max 
 ##
 
 ## ── 8. (optional) plot the census + the depth map ─────────────────────────────
-# using Plots
-# h = histogram(vec(ng); bins=minimum(ng):maximum(ng)+1, legend=false,
-#               xlabel="Lanczos depth at retirement", ylabel="grid points",
-#               title="adaptive convergence census")
-# hm = heatmap(ng; color=:viridis, title="depth per grid point", aspect_ratio=1)
-# plot(h, hm; layout=(1, 2), size=(1400, 600)) |> display
+using Plots
+h = histogram(vec(ng); bins=minimum(ng):maximum(ng)+1, legend=false,
+              xlabel="Lanczos depth at retirement", ylabel="grid points",
+              title="adaptive convergence census")
+hm = heatmap(ng; color=:viridis, title="depth per grid point", aspect_ratio=1)
+plot(h, hm; layout=(1, 2), size=(1400, 600)) |> display
 ##

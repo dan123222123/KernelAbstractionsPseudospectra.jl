@@ -12,7 +12,7 @@
 # "right" (λ) sets controls how *sensitive* those recovered poles are to
 # perturbation — and pseudospectra of the pencil make that sensitivity visible.
 #
-# We take the paper's small controllable+observable SISO system (n = 2),
+# We take the paper's small SISO system (n = 2),
 #
 #     E = I,   A = [-1.1  1; 1  -1.1],   B = [1; 0],   C = [0  1],
 #
@@ -25,14 +25,9 @@
 # entry of (sI−A)⁻¹ = (s+1.1)/((s+1.1)²−1). But its Table 2 singular values (and
 # hence Fig. 1) only reproduce with the OFF-diagonal entry H(s) = 1/((s+1.1)²−1)
 # (here B = [1;0], C = [0 1]) — the two share the poles {-0.1,-2.1} but not the
-# residues. Eq. (14) appears to be a typo; we use the off-diagonal H so this
-# matches the paper's actual figures (verified against all four Table-2 rows).
+# residues. 
 #
-# For these tiny n = 2 pencils we use the package's dense O(n³) SVD routine
-# `ℂsvdpsa`, exactly as the paper does ("For these small examples we use the
-# standard O(n³) algorithm", §4). The package's fast inverse-iteration `ihlpsa`
-# — paper §4, "Efficient Computation of Loewner Pseudospectra" — is the tool for
-# LARGE Loewner pencils; see `ihlpsa_adaptive.jl` and `test_ihlpsa_large.jl`.
+# For these tiny n = 2 pencils we use the standard dense O(n³) SVD routine
 # This script runs on CPU out of the box (see README.md).
 using LinearAlgebra
 using KAPseudospectra
@@ -112,13 +107,3 @@ plt = plot(panels..., cbar; layout=(@layout [grid(2, 2) c{0.07w}]), size=(1350, 
     plot_title="σ_ε^{(1,1)} of the Loewner pencil z𝕃 − 𝕃ₛ  (Embree & Ioniţă, Fig. 1)")
 display(plt)
 ##
-
-# ──────────────────────────────────────────────────────────────────────────────
-# NOTE — the (γ, δ) weighting convention
-# ──────────────────────────────────────────────────────────────────────────────
-# `ihlpsa`/`ℂsvdpsa` return the Frayssé–Gueury–Nicoud–Toumazou (γ,δ)-pseudospectral
-# value  σ_min(zB − A) / (γ + δ|z|):  z lies in σ_ε^{(γ,δ)} iff this value is < ε.
-# The weights γ,δ ≥ 0 (not both zero) scale the allowed perturbations to A and B
-# (= E). The set is invariant to a common scaling of (γ,δ) — it only rescales ε —
-# so (1,1) and (½,½) give identical contours up to a constant shift in the labels.
-# The default γ=1, δ=0 recovers the standard pseudospectrum value σ_min(zB − A).

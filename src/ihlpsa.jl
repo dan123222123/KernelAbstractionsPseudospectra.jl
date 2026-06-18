@@ -321,11 +321,7 @@ end
 
 # Balanced contiguous partition of 1:ncols into min(ndev, ncols) blocks whose
 # sizes differ by at most 1 (the first r blocks get the extra column). Returns
-# Vector{UnitRange{Int}} in column order; empty when ncols == 0. Replaces the
-# old ceil-based Iterators.partition in the multi-device dispatch, which could
-# yield FEWER blocks than devices (e.g. 9 cols / 4 devs → blocks of 3,3,3) and
-# BoundsError the device fan-out, which assumed one block per device — besides
-# idling devices the balanced split now uses (9/4 → 3,2,2,2 on all four).
+# Vector{UnitRange{Int}} in column order; empty when ncols == 0.
 function _device_column_partition(ncols::Integer, ndev::Integer)
     ndev ≥ 1 || throw(ArgumentError("ndev must be ≥ 1, got $ndev"))
     ncols ≥ 0 || throw(ArgumentError("ncols must be ≥ 0, got $ncols"))
@@ -336,7 +332,8 @@ function _device_column_partition(ncols::Integer, ndev::Integer)
     # points (pseudospectra hard regions) then spread evenly across devices instead
     # of piling onto one device's contiguous band — load balancing for the ADAPTIVE
     # driver, whose per-point work varies (the fixed-nit driver is count-balanced
-    # either way). Result reassembly scatters each block back to its original
+    # either way).
+    # Result reassembly scatters each block back to its original
     # columns, so output order is preserved regardless of mode. Set
     # KAPSEUDO_STRIDED=0 for the legacy contiguous bands. Both modes partition
     # 1:ncols exactly once into `nblocks` blocks whose sizes differ by ≤ 1.
@@ -458,9 +455,6 @@ function _adaptive_x₀(::Type{T}, m, seed) where {T<:Complex}
     return x ./ norm(x)
 end
 
-# eltype-branched default tolerances. The F32 relative floor ~1e-4 matches the
-# SVD-oracle tolerance in test_consistency.jl; below it, F32 Lanczos roundoff in
-# σ_min dominates and the criterion would never trip.
 _adaptive_default_rtol(::Type{T}) where {T<:Complex} = real(T) == Float32 ? 1.0f-4 : 1e-6
 _adaptive_default_atol(::Type{T}) where {T<:Complex} = eps(real(T))
 

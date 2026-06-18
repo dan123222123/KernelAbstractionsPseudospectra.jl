@@ -1,20 +1,6 @@
 name = "KAPseudospectraExamples"
-authors = ["Dan Folescu"]
 version = "0.1.0"
-
-# CPU-only by default: this environment instantiates out of the box on any
-# machine — no GPU drivers or vendor toolkits required — and the plotting deps
-# below "just work" so every example script runs as-is on `CPU()`.
-#
-# To run an example on a GPU, add the backend package you have to THIS project
-# (or, better, a copy of it — see README.md):
-#
-#     julia --project=examples
-#     julia> using Pkg; Pkg.add("CUDA")     # or "AMDGPU" / "Metal" / "oneAPI"
-#
-# then uncomment the matching `using …; backend = …Backend()` lines in the
-# script. GPU support lives in KAPseudospectra's weakdep extensions, so adding
-# the backend package is all it takes — nothing in the package itself changes.
+authors = ["Dan Folescu"]
 
 [deps]
 KAPseudospectra = "8b8afa22-3073-43c5-8823-151938199226"
@@ -23,8 +9,7 @@ LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MatrixDepot = "b51810bb-c9f3-55da-ae3c-350fc1fbce05"
 Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+UnicodePlots = "b8865327-cd53-5732-bb35-84acbb429228"
 
-# Resolve KAPseudospectra from the repo checkout one directory up, so the env
-# instantiates without the package being registered.
 [sources]
 KAPseudospectra = {path = ".."}
