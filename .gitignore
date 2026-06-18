@@ -8,3 +8,5 @@ bench/Manifest.toml
 bench/*.out
 bench/results/
 bench/results_adaptive/
+# Generated Documenter HTML output (sources live in docs/src on dev_docs)
+docs/build/
