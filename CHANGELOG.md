@@ -19,6 +19,11 @@ All notable changes to KAPseudospectra.jl are documented here.
 - Adaptive path added to every backend's precompile workload (CPU + CUDA/AMDGPU/
   oneAPI/Metal extensions), so the first adaptive GPU call no longer pays cold
   compilation latency.
+- **Precision toggle for the triangular solves.** `set_pdiv_accurate(flag)` selects how the
+  Float16/Float32 solves divide: the default (`true`) uses Base's widening division (most
+  accurate); `false` keeps the divide in the input precision — slightly less accurate, but the
+  only form FP64-less GPUs (Intel iGPUs, Apple Metal) can compile. It is a `Preferences.jl`
+  preference, so it takes effect after a Julia restart. Float64 is unaffected.
 
 ### Changed
 - **Breaking:** `ihlpsa` no longer has a default `nit`. Omitting `nit` selects the

@@ -8,6 +8,7 @@ export ℂsvdpsa, ℝsvdpsa
 
 include("ihlpsa.jl")
 export ihlpsa
+export set_pdiv_accurate   # Float16/Float32 GPU-solve precision toggle (from KATRSM)
 
 # Build a 2D grid of complex shifts. Returns (gx, gy, zg) where gx and gy are
 # real ranges along the real and imaginary axes and zg[i,j] = gx[i] + im*gy[j].
