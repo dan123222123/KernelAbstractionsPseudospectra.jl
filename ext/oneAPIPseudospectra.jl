@@ -26,7 +26,9 @@ end
 if oneAPI.functional()
     @setup_workload begin
         # Only precompile the element types the device can actually run, or the
-        # F64 workload would throw at precompile time on an FP64-less iGPU.
+        # F64 workload would throw at precompile time on an FP64-less iGPU. Such iGPUs
+        # also need `KAPseudospectra.set_pdiv_accurate(false)` so the F32 solves don't
+        # emit uncompilable `double` (see KATRSM).
         Ts = KAPseudospectra.supports_fp64(oneAPIBackend()) ? [ComplexF32, ComplexF64] : [ComplexF32]
         @compile_workload begin
             KAPseudospectra._precompile_ihlpsa(oneAPIBackend(), collect(oneAPI.devices())[1], Ts)
