@@ -27,15 +27,9 @@ srg = ihlpsa(CUDABackend(), zg, P)           # same call, multi-GPU
 srg = ihlpsa(CPU(), zg, P; verbose=true)     # also logs the convergence depth reached
 ```
 
-Adaptive knobs are keywords on the no-`nit` form: `rtol`/`atol` (convergence
-tolerance), `nconfirm` (confirmation chunks), `nit_chunk`, `nit_max`, and `γ`,`δ`
-for perturbation scaling (`γ`,`δ` are keywords in both forms). Pass `devs` to
-restrict which GPUs are used. Adaptive runs across multiple GPUs the same way the
-fixed path does. The convergence depth reached is a diagnostic — pass
-`verbose=true` to log the deepest depth, or call
-`KAPseudospectra._ihlpsa_adaptive(...)` for the `(σ, nit_grid)` tuple, where
-`nit_grid[i]` is each grid point's retirement depth (`maximum(nit_grid)` is the
-deepest).
+Adaptive convergence is tunable with keyword arguments (`rtol`, `atol`, `nit_chunk`,
+`nit_max`, …) and `γ`,`δ` for perturbation scaling — see the `ihlpsa` docstring for
+the full list. Pass `devs` to restrict which GPUs are used.
 
 # Examples
 Check out `examples/` for scripts that showcase usage of this package. See

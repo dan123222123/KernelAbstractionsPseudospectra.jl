@@ -2,16 +2,9 @@ module CUDAPseudospectra
 
 using KAPseudospectra, CUDA, PrecompileTools
 
-# Device-interface overrides for the CUDA backend.
-#
-# These are defined UNCONDITIONALLY (not under `if CUDA.functional()`). They only
-# dispatch on the backend type and never touch hardware at definition time, so they
-# are safe to bake into the precompiled image even on a machine with no usable
-# device. Guarding the *definitions* on `CUDA.functional()` is a trap: the
-# precompile worker process frequently cannot probe the GPU, so functional()
-# returns false there, an empty image is baked, and the methods are then missing at
-# runtime even though the device works interactively. Only the GPU workload below
-# (which actually runs kernels) needs the functional() guard.
+# Device-interface overrides for the CUDA backend. Defined unconditionally (not under
+# `if CUDA.functional()`) so precompile bakes them even when the worker can't probe
+# the GPU; only the workload below needs the functional() guard.
 KAPseudospectra.device(B::CUDA.CUDABackend) = CUDA.device()
 KAPseudospectra.device!(B::CUDA.CUDABackend, dev) = CUDA.device!(dev)
 KAPseudospectra.devices(B::CUDA.CUDABackend) = CUDA.devices()

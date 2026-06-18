@@ -10,11 +10,8 @@ using .KATRSM
 ## KERNELS ##
 
 # Copy a (g × m) 2D source V into a g-vector-of-m-vectors destination W.
-# Note: V here is a 2D SubArray (e.g. view(Qv[2], 1:g, :)), NOT a
-# VectorOfSimilarVectors — so we must use size(V) for the dimensions.
-# (Earlier versions used length(V) and length(V[1]), which gave g*m and 1
-# respectively; the kernel still ran and Lanczos converged anyway, but only
-# the first element of each destination vector was being seeded.)
+# V is a 2D SubArray (e.g. view(Qv[2], 1:g, :)), not a VectorOfSimilarVectors,
+# so the dimensions come from size(V).
 @kernel function _v2v(V, W)
     I = @index(Global, Linear)
     g, m = size(V)
@@ -147,13 +144,8 @@ KernelAbstractions.get_backend(x::IHLworkspace{T,B}) where {T,B} = B
 
 ## DEVICE FUNCTIONS ##
 
-# Auto-tune workgroup size for the column-oriented trsm kernels.
-# Empirically wgs=32 (one RDNA wavefront / one CUDA warp) wins by 2-3x across
-# m∈{64,128,256} vs the prior wgs=256 default. The kernel's per-column
-# `@synchronize()` is cheap when the workgroup is one wavefront and gets
-# expensive across multiple wavefronts; smaller wgs also lets more workgroups
-# co-reside per CU. CDNA users (wavefront=64) may find wgs=64 slightly better;
-# override via the wgs kwarg to ihlpsa.
+# Workgroup size for the column-oriented trsm kernels: 32 (one CUDA warp / RDNA
+# wavefront) on GPU, 1 on CPU. Override via the `wgs` kwarg to ihlpsa.
 default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, 32) : 1
 
 # non-cpu solve step in lockstep_ihl!
@@ -164,11 +156,8 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     @views _batched_column_oriented_backward_solve_pencil(backend, wgs)(bV, zv, P.A, P.B; ndrange=(wgs, g))
 end
 
-# cpu solve step in lockstep_ihl!
-# wgs is accepted (and ignored) so this method isn't shadowed by the generic
-# trsmIHL when called from lockstep_ihl! with `; wgs`. Without the kwarg,
-# Julia's dispatch falls back to the generic (column-oriented) method even
-# on CPU, silently bypassing the naive per-workitem CPU kernel.
+# cpu solve step in lockstep_ihl!. `wgs` is accepted and ignored so this CPU method
+# isn't shadowed by the generic (column-oriented) trsmIHL when called with `; wgs`.
 function trsmIHL(backend::CPU, bV, zv, P::SchurMatrixPencil; wgs=missing)
     g = length(zv)
     _batched_forward_solve_pencil(backend)(bV, conj(zv), P.A', P.B', ndrange=g)
@@ -198,20 +187,9 @@ function lockstep_ihl!(α, β, ihl::IHLworkspace, nit, g; wgs=missing, start::In
     synchronize(backend)
 end
 
-# device operations "interface" for kernel abstractions.
-#
-# Why a package-local interface and not KA's own device functions: KernelAbstractions
-# 0.9 does expose `device(::Backend)::Int` / `device!(::Backend, ::Int)` / `ndevices`,
-# but those address devices by *ordinal* and KA has no equivalent of `devices`
-# (an iterable of concrete device handles), `get_bgarray`, `device_bytes_available`,
-# or `device_reclaim` — all of which the multi-GPU fan-out (`_ihlpsa_fanout`) and the
-# VRAM-budget batch sizing (`findmaxbatchihl`) need. So we keep a small handle-based
-# interface (CPU defaults here; each GPU extension overrides the six methods) rather
-# than bolt the missing pieces onto KA's ordinal model. `supports_fp64` below is the
-# one method that *does* delegate to KA (see its note).
-# (Re-checked through KA 0.10.0-dev / `main`: still ordinal-only — no device-memory
-# query, and only a per-array `unsafe_free!`, not a backend-wide reclaim — so the gap
-# stands. Revisit delegating `device!`/`ndevices` if KA adds memory + handle pieces.)
+# Device-operations interface: CPU defaults here; each GPU extension overrides these
+# six methods (array type, device handle access, free-memory query, reclaim).
+# `supports_fp64` below delegates to KA.
 get_bgarray(B::CPU) = Array
 device(B::CPU) = CPU()
 devices(B::CPU) = CPU()
@@ -219,16 +197,9 @@ device!(B::CPU, dev) = CPU()
 device_bytes_available(B::CPU) = (Sys.free_memory() |> Int)
 device_reclaim(B::CPU) = GC.gc()
 
-# Whether `backend`'s device can run Float64/ComplexF64 kernels. This IS the KA
-# interface — the default just forwards to `KernelAbstractions.supports_float64`
-# (`true` for CPU/CUDA/AMDGPU, declared `false` by Metal, which has no `double`
-# type). The thin `supports_fp64` wrapper exists for exactly one reason: it gives
-# the oneAPI extension a method to override *without* committing type piracy on
-# `supports_float64` (oneAPI.jl owns that method for its backend and statically
-# declares `false`, even on FP64-capable Arc/Max parts). The oneAPI override does a
-# device-accurate Level-Zero query so F64 auto-enables where the hardware really
-# supports it. The F64 grid/test/precompile paths consult this and skip unsupported
-# devices.
+# Whether `backend`'s device can run Float64/ComplexF64 kernels. Default defers to
+# `KernelAbstractions.supports_float64`; overridable so the oneAPI extension can
+# substitute a device-accurate FP64 query (see its note). F64 paths skip unsupported devices.
 supports_fp64(B) = KernelAbstractions.supports_float64(B)
 
 ## END DEVICE FUNCTIONS ##
@@ -268,15 +239,19 @@ end
 ## WRAPPER FUNCTIONS ##
 
 # Flatten the grid to a point vector and split 1:n into contiguous zpd-sized
-# batches. Shared by the fixed (`sdihlpsa`) and adaptive (`_sdihlpsa_adaptive`)
+# batches. Shared by the fixed (`_sdihlpsa`) and adaptive (`_sdihlpsa_adaptive`)
 # single-device workers.
 function _grid_batches(zg, zpd)
     zv = collect(Iterators.flatten(zg))
     return zv, collect(Iterators.partition(1:length(zv), min(length(zv), zpd)))
 end
 
-# single-device batched inverse lanczos pseudospectra
-function sdihlpsa(
+# Single-device batched inverse-Lanczos worker (fixed depth) — the per-device unit of
+# work. The multi-device drivers fan grid columns out across devices via
+# `_ihlpsa_fanout`, which calls one worker per device; `_sdihlpsa` (fixed) and
+# `_sdihlpsa_adaptive` (adaptive) are those workers. Neither is exported — the sole
+# public entry point is `ihlpsa`.
+function _sdihlpsa(
     backend,
     zg::AbstractArray{T,2},
     P::AbstractMatrixPencil{T},
@@ -319,24 +294,18 @@ function findmaxbatchihl(backend, T, m, nit; moe=0.1)
     floor(Integer, (device_bytes_available(backend) * (1 - moe) - (sizeof(T) * (4 * m * m + 1))) / (sizeof(T) * (1 + 4 * m + 2 * nit + 1)))
 end
 
-# Balanced contiguous partition of 1:ncols into min(ndev, ncols) blocks whose
-# sizes differ by at most 1 (the first r blocks get the extra column). Returns
-# Vector{UnitRange{Int}} in column order; empty when ncols == 0.
+# Partition 1:ncols into min(ndev, ncols) balanced blocks (sizes differ by ≤ 1),
+# one per device; empty when ncols == 0.
 function _device_column_partition(ncols::Integer, ndev::Integer)
     ndev ≥ 1 || throw(ArgumentError("ndev must be ≥ 1, got $ndev"))
     ncols ≥ 0 || throw(ArgumentError("ncols must be ≥ 0, got $ncols"))
     nblocks = min(Int(ndev), Int(ncols))
     nblocks == 0 && return StepRange{Int,Int}[]
-    # Round-robin (strided) column→device assignment: device b takes columns
-    # b, b+nblocks, b+2·nblocks, …  Spatially-clustered hard / deep-iteration grid
-    # points (pseudospectra hard regions) then spread evenly across devices instead
-    # of piling onto one device's contiguous band — load balancing for the ADAPTIVE
-    # driver, whose per-point work varies (the fixed-nit driver is count-balanced
-    # either way).
-    # Result reassembly scatters each block back to its original
-    # columns, so output order is preserved regardless of mode. Set
-    # KAPSEUDO_STRIDED=0 for the legacy contiguous bands. Both modes partition
-    # 1:ncols exactly once into `nblocks` blocks whose sizes differ by ≤ 1.
+    # Round-robin (strided) assignment: device b takes columns b, b+nblocks, …, so
+    # clustered hard/deep-iteration regions spread across devices (load-balances the
+    # adaptive driver, whose per-point work varies). Results are scattered back to
+    # original columns afterward, so output order is preserved. KAPSEUDO_STRIDED=0
+    # selects the legacy contiguous bands.
     if get(ENV, "KAPSEUDO_STRIDED", "1") == "0"
         blocks = Vector{StepRange{Int,Int}}(undef, nblocks)
         q, r = divrem(Int(ncols), nblocks)
@@ -351,16 +320,12 @@ function _device_column_partition(ncols::Integer, ndev::Integer)
     return [b:nblocks:Int(ncols) for b in 1:nblocks]
 end
 
-# Multi-device GPU fan-out shared by the fixed and adaptive drivers. Partitions
-# zg's columns across `devs`, resolves a per-device zpd (device-memory budget
-# sized by `budget_nit`), then spawns `worker(zgb, zpd_dev)` on each device with
-# that device active; returns the per-device results in column order. zpd is
-# resolved sequentially BEFORE the parallel fan-out because device! is
-# process-global on CUDA/AMDGPU and findmaxbatchihl queries the *current* device's
-# free memory — racing it across spawns can read the wrong device's budget. `zip`
-# pairs blocks with devices and truncates to the shorter side, so when ncols < ndev
-# the surplus devices are simply never touched (devs need only be iterable; only
-# the blocks are indexed). Pass `pbar` to label a progress bar with the block count.
+# Multi-device GPU fan-out shared by the fixed and adaptive drivers. Partitions zg's
+# columns across `devs`, resolves a per-device zpd, then spawns one `worker(zgb,
+# zpd_dev)` per device. zpd is resolved sequentially BEFORE the parallel fan-out:
+# device! is process-global on CUDA/AMDGPU and findmaxbatchihl queries the *current*
+# device, so racing it across spawns could read the wrong device's budget. `zip`
+# truncates to the shorter side, so surplus devices (ncols < ndev) go untouched.
 function _ihlpsa_fanout(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T},
     budget_nit, zpd, devs, worker; pbar=nothing) where {T<:Complex}
     m = size(P, 1)
@@ -415,7 +380,7 @@ function _ihlpsa_fixed(
     end
     if KernelAbstractions.isgpu(backend)
         results, blocks = _ihlpsa_fanout(backend, zg, P, nit, zpd, devs,
-            (zgb, zpd_dev) -> sdihlpsa(backend, zgb, P, γ, δ, zpd_dev, nit, x₀,
+            (zgb, zpd_dev) -> _sdihlpsa(backend, zgb, P, γ, δ, zpd_dev, nit, x₀,
                 progress ? pchnl : missing, wgs); pbar)
         # Scatter each device's columns back to their original grid positions
         # (strided partition ⇒ device results are not in column order).
@@ -424,31 +389,22 @@ function _ihlpsa_fixed(
             @inbounds result[:, blk] = r
         end
     else
-        # CPU runs the whole grid as one batch (zpd = length(zg)). It can't split
-        # the grid the way the GPU path does: the single preallocated IHLworkspace
-        # (Qv/v/zv) is shared, and `ThreadsX.foreach` inside `sdihlpsa` already
-        # parallelizes that one batch across threads — a second level of batching
-        # would need a per-batch (or per-thread) workspace to avoid racing on those
-        # buffers. That's the GPU's memory-budget concern, not the CPU's: on CPU the
-        # workspace is cheap and threading already saturates the cores, so batching
-        # would add allocation churn for no throughput. If a grid is too large to
-        # hold in host RAM at once, use the GPU path. (The adaptive driver DOES batch
-        # on CPU — its resident workers run batches sequentially, no shared-state race.)
+        # CPU runs the whole grid as one batch: `ThreadsX.foreach` inside `_sdihlpsa`
+        # already parallelizes across threads, and the single shared IHLworkspace
+        # can't be split without per-batch buffers. (The adaptive driver does batch on
+        # CPU — its resident workers run batches sequentially, no shared-state race.)
         progress && set_description(pbar, "CPU device, grid points * nit:")
-        result = sdihlpsa(backend, zg, P, γ, δ, length(zg), nit, x₀, progress ? pchnl : missing, wgs)
+        result = _sdihlpsa(backend, zg, P, γ, δ, length(zg), nit, x₀, progress ? pchnl : missing, wgs)
     end
     progress && close(pchnl)
     return permutedims(result)
 end
 
-# Deterministic unit-norm complex start vector for the adaptive driver. The
-# SAME vector is reused for every chunk so that eigmax(T_k) vs eigmax(T_{k+chunk})
-# compares one Lanczos run at two depths (a principled convergence monitor). If
-# instead x₀ were `missing`, the IHLworkspace constructor would draw a FRESH randn
-# per chunk and consecutive chunks would be independent runs, making
-# the convergence test meaningless. The test suite reuses this exact routine (as
-# `_seeded_x₀`, aliased in test_consistency.jl) so the seeded x₀ the tests pass and
-# the driver's own default x₀ can never drift apart.
+# Deterministic unit-norm complex start vector for the adaptive driver. The SAME
+# vector is reused across chunks so successive σ are one Lanczos run sampled at
+# increasing depth — a fresh x₀ per chunk would compare independent runs and make
+# the convergence test meaningless. Aliased as `_seeded_x₀` in the tests so the
+# tests' x₀ and the driver's default can't drift apart.
 function _adaptive_x₀(::Type{T}, m, seed) where {T<:Complex}
     rng = MersenneTwister(seed)
     x = randn(rng, T, m)
@@ -587,7 +543,7 @@ function _ihlpsa_adaptive(
         end
         unconverged = any(r[3] for r in results)
     else
-        # Unlike sdihlpsa (whose batches run under ThreadsX and would race on the
+        # Unlike _sdihlpsa (whose batches run under ThreadsX and would race on the
         # shared workspace), the resident workers process batches sequentially,
         # so honoring a user-supplied zpd is safe on CPU too — useful for
         # memory-capping and for exercising the multi-batch path in tests.
@@ -613,20 +569,13 @@ function _gather_rows(backend, A, keep)
     return dst
 end
 
-# Single-device adaptive worker — per-point retirement with resident state. Each
-# batch starts with its own workspace and full-budget α/β; after each chunk the
-# converged points retire and the survivors' per-point state — workspace rows
-# (Qv batch-major, v/x₀ batch-minor, zv) plus α/β columns — is GATHERED into a
-# packed prefix via array indexing (GPUArrays fancy indexing; no custom
-# kernels; the 3-D Qv gather goes through `_gather_rows`, see its note).
-# Subsequent chunks therefore run kernels over live points only,
-# continuing each point's own Lanczos recurrence uninterrupted: per-point work
-# ≈ its converged depth + one confirm chunk, instead of the batch-worst depth.
-# The gather traffic is O(m·survivors) per chunk — negligible against the
-# O(nit_chunk·m²·survivors) solve work it avoids re-running.
-# `idx_glob` maps packed position → original flat grid index throughout.
-# Returns (sr_matrix, nit_grid, unconverged::Bool), where nit_grid[i] is the
-# depth at which grid point i retired (or nit_max for points that never did).
+# Single-device adaptive worker — per-point retirement with resident state. After
+# each chunk the converged points retire and the survivors' per-point state
+# (workspace rows + α/β columns) is gathered into a packed prefix via array indexing
+# (the 3-D Qv gather goes through `_gather_rows`, see its note), so subsequent chunks
+# run kernels over live points only. `idx_glob` maps packed position → original flat
+# grid index. Returns (sr_matrix, nit_grid, unconverged::Bool); nit_grid[i] is the
+# depth at which grid point i retired (or nit_max if it never did).
 function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T},
     γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, wgs) where {T<:Complex}
     R = real(T)

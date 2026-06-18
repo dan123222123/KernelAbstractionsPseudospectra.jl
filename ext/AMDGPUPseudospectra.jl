@@ -2,16 +2,9 @@ module AMDGPUPseudospectra
 
 using KAPseudospectra, AMDGPU, PrecompileTools
 
-# Device-interface overrides for the AMDGPU/ROCm backend.
-#
-# These are defined UNCONDITIONALLY (not under `if AMDGPU.functional()`). They only
-# dispatch on the backend type and never touch hardware at definition time, so they
-# are safe to bake into the precompiled image even on a machine with no usable
-# device. Guarding the *definitions* on `AMDGPU.functional()` is a trap: the
-# precompile worker process frequently cannot probe the GPU, so functional()
-# returns false there, an empty image is baked, and the methods are then missing at
-# runtime even though the device works interactively. Only the GPU workload below
-# (which actually runs kernels) needs the functional() guard.
+# Device-interface overrides for the AMDGPU/ROCm backend. Defined unconditionally (not
+# under `if AMDGPU.functional()`) so precompile bakes them even when the worker can't
+# probe the GPU; only the workload below needs the functional() guard.
 KAPseudospectra.device(B::AMDGPU.ROCBackend) = AMDGPU.device()
 KAPseudospectra.device!(B::AMDGPU.ROCBackend, dev) = AMDGPU.device!(dev)
 KAPseudospectra.devices(B::AMDGPU.ROCBackend) = AMDGPU.devices()

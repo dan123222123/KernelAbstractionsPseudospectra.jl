@@ -21,16 +21,20 @@ end
 export qgrid
 
 # Shared precompile body for the GPU extensions. Builds a small problem for each
-# element type in `Ts` and exercises the fixed and adaptive `ihlpsa` paths on one
-# device. Called from inside each extension's `@compile_workload` so the
-# backend-specialized method instances are traced and cached. `LinearAlgebra`
-# (for `schur`) is in module scope via `svdpsa.jl`.
+# element type in `Ts` and exercises the fixed and adaptive `ihlpsa` paths (both the
+# B=I and a true B≠I pencil) on one device. Called from inside each extension's
+# `@compile_workload` so the backend-specialized method instances are traced and
+# cached. `LinearAlgebra` (for `schur`) is in module scope via `svdpsa.jl`.
 function _precompile_ihlpsa(backend, dev, Ts)
     for T in Ts
         _, _, zg = qgrid(T, (-4, 4), (-4, 4), (100, 100))
-        P = MatrixPencil(schur(randn(T, 32, 32)))
+        P = MatrixPencil(schur(randn(T, 32, 32)))   # B = I (single matrix)
         ihlpsa(backend, zg, P, 5; devs=[dev])   # fixed-nit path
         ihlpsa(backend, zg, P; devs=[dev])      # adaptive (per-point hybrid)
+        # True matrix pencil (B ≠ I): also trace the generalized-Schur construction
+        # path so a first MatrixPencil(A, B) call isn't a cold compile.
+        Pg = MatrixPencil(randn(T, 32, 32), randn(T, 32, 32) + T(5) * I)
+        ihlpsa(backend, zg, Pg, 5; devs=[dev])
     end
     return nothing
 end

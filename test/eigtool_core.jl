@@ -24,7 +24,9 @@ function testsvdpsa(fname, tol)
     return (norm(abs.(srgref .- srg)) / norm(srgref)) < tol
 end
 
-# test ihlpsa against eigtool
+# test ihlpsa against eigtool. Fixed-nit runs to full depth (nit = size(A, 1)), so it
+# reproduces the eigtool reference to the same tight tol as ℂsvdpsa (1e-6 F32 /
+# 1e-14 F64) — the looser tol below is only the rtol-bounded adaptive test, by design.
 function testihlpsa(fname, backend, tol)
     srgref, A, zg = readvars(fname)
     P = MatrixPencil(schur(Matrix{complex(eltype(A))}(A)))
@@ -33,10 +35,10 @@ function testihlpsa(fname, backend, tol)
     return (norm(abs.(srgref .- srg)) / norm(srgref)) < tol
 end
 
-# test adaptive ihlpsa against eigtool. Stops at the adaptive rtol rather than
-# running to full convergence like testihlpsa, so `tol` is looser (≈ stopping
-# rtol) than the fixed-nit reference tolerances. kwargs forward adaptive options
-# (rtol, nit_chunk, nit_max, …).
+# test adaptive ihlpsa against eigtool. Stops at the adaptive rtol rather than running
+# to full convergence, so `tol` here is the rtol-bounded accuracy (≈ stopping rtol) —
+# looser than the fixed-nit/eigtool reference, by design. kwargs forward adaptive
+# options (rtol, nit_chunk, nit_max, …).
 function testihlpsa_adaptive(fname, backend, tol; kwargs...)
     srgref, A, zg = readvars(fname)
     P = MatrixPencil(schur(Matrix{complex(eltype(A))}(A)))

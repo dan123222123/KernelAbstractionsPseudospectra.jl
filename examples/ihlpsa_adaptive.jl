@@ -14,12 +14,12 @@ using KAPseudospectra
 ##
 
 ## choose your backend
-#backend = CPU()
+backend = CPU()
 #
 #using CUDA;   backend = CUDABackend()
 #using AMDGPU; backend = ROCBackend()
 #using Metal;  backend = MetalBackend()    # Apple GPUs (Float32 only — no FP64)
-using oneAPI; backend = oneAPIBackend()   # Intel GPUs (Float32 only on FP64-less iGPUs)
+#using oneAPI; backend = oneAPIBackend()   # Intel GPUs (Float32 only on FP64-less iGPUs)
 
 # trsm kernel workgroup size: 256 for CPU/CUDA, 16 for AMDGPU, 32 for Intel (one subgroup)
 wgs = 32

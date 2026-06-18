@@ -2,18 +2,10 @@ module MetalPseudospectra
 
 using KAPseudospectra, Metal, PrecompileTools
 
-# Device-interface overrides for the Apple/Metal backend.
-#
-# Implemented against Metal.jl's `MetalBackend` (KernelAbstractions). Apple
-# M-series systems expose a single GPU with unified memory, so the multi-device
-# plumbing collapses to one device.
-#
-# Defined UNCONDITIONALLY (not under `if Metal.functional()`/`if Sys.isapple()`):
-# they only dispatch on the backend type and never touch hardware at definition
-# time, so they are safe to bake into the precompiled image even off-device.
-# Guarding the *definitions* is a trap — the precompile worker may evaluate the
-# guard as false, bake an empty image, and leave the overrides missing at runtime.
-# Only the GPU workload below needs the functional() guard.
+# Device-interface overrides for the Apple/Metal backend (single GPU, unified memory,
+# so the multi-device plumbing collapses to one device). Defined unconditionally (not
+# under `if Metal.functional()`) so precompile bakes them even off-device; only the
+# workload below needs the functional() guard.
 #
 # NOTE: untested on hardware (developed without an Apple machine). The API is
 # pinned to Metal.jl ≥ 1.x: `MetalBackend`, `MtlArray`, `Metal.device()`,
@@ -32,10 +24,8 @@ function KAPseudospectra.device_bytes_available(B::Metal.MetalBackend)
 end
 # Metal has no explicit memory-pool reclaim; fall back to GC.
 KAPseudospectra.device_reclaim(B::Metal.MetalBackend) = GC.gc()
-# No `supports_fp64` override needed: the KAPseudospectra default defers to
-# `KernelAbstractions.supports_float64`, which Metal declares `false` (no `double`
-# in Metal Shading Language). So the F64 grid/test/precompile paths skip Metal and
-# only ComplexF32 runs — same gating as the FP64-less Intel path.
+# No `supports_fp64` override needed: the default defers to `supports_float64`, which
+# Metal declares `false` (no `double` in MSL), so F64 paths skip Metal — F32 only.
 
 ## precompile gpu code (only when a device is actually usable)
 if Metal.functional()
