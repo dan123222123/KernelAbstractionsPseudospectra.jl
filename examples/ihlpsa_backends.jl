@@ -1,8 +1,6 @@
 ##
 using LinearAlgebra, MatrixDepot
-using Plots, LaTeXStrings
-# GR has some issues with colorbar ticks/lables -- use pyplot to get a nicer figure (needs PyPlot.jl)
-pyplot()
+using Plots, LaTeXStrings   # GR backend (Plots' default — no extra deps)
 ##
 
 ## choose your backend
@@ -15,12 +13,16 @@ backend = CPU()
 #using AMDGPU
 #backend = ROCBackend()
 #
-#using Metal
-#backend = MtlBackend()
+#using Metal             # Apple GPUs (Float32 only — Metal has no FP64)
+#backend = MetalBackend()
+#
+#using oneAPI            # Intel GPUs (Float32 only on FP64-less iGPUs)
+#backend = oneAPIBackend()
 using KAPseudospectra
 # workgroup size of the trsm kernels -- will bake this into the package extensions at some point TODO
 wgs = 256 # good for multi-threaded CPU and CUDA
 #wgs = 16 # good for AMDGPU
+#wgs = 32 # good for Intel (one subgroup); try 16 if slower
 ##
 
 ##
@@ -32,6 +34,10 @@ A = MatrixDepot.parter(T, n)
 gx, gy, zg = qgrid(T, (-2, 5), (-4.5, 4.5), (g, g))
 P = MatrixPencil(schur(A))
 srg = ihlpsa(backend, zg, P, nit; wgs)
+# Adaptive nit (omit the positional `nit`): retires each grid point at its own
+# converged depth. Returns σ just like the line above; pass `verbose=true` to log
+# the depth reached. Drop-in for the line above:
+#srg = ihlpsa(backend, zg, P; wgs)
 #
 tv = -3:0.25:0
 tl = [L"10^{%$i}" for i in tv]

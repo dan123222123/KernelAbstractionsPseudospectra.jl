@@ -1,5 +1,12 @@
 Manifest.toml
 test/Manifest.toml
 
+# benchmark scratch: generated outputs only. bench/Project.toml IS tracked so the
+# GPU backends used for cross-backend perf comparison are reproducible (the
+# resolved bench/Manifest.toml stays local, like the others above).
+bench/Manifest.toml
+bench/*.out
+bench/results/
+bench/results_adaptive/
 # Generated Documenter HTML output (sources live in docs/src on dev_docs)
 docs/build/

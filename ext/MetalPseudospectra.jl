@@ -1,33 +1,41 @@
-# TODO: Metal extension is INCOMPLETE and currently UNREGISTERED in Project.toml.
-#
-# To enable the Metal backend, this file needs to dispatch the full set of
-# device-interface methods that ihlpsa expects (see ext/AMDGPUPseudospectra.jl
-# or ext/CUDAPseudospectra.jl for the reference shape):
-#
-#   KAPseudospectra.device(::Metal.MtlBackend)
-#   KAPseudospectra.device!(::Metal.MtlBackend, dev)
-#   KAPseudospectra.devices(::Metal.MtlBackend)            ← present below
-#   KAPseudospectra.get_bgarray(::Metal.MtlBackend)        ← present below
-#   KAPseudospectra.device_bytes_available(::Metal.MtlBackend)
-#   KAPseudospectra.device_reclaim(::Metal.MtlBackend)
-#
-# Only the last two require non-obvious Metal.jl API calls (recommended
-# working set size; manual GC.gc() since Metal has no explicit reclaim).
-#
-# Until those are added (and tested on Apple silicon), this file is dead and
-# Project.toml does NOT register it as an extension. Re-add the
-#   Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
-# line under [weakdeps] and
-#   MetalPseudospectra = "Metal"
-# under [extensions] when the dispatch is complete.
-
 module MetalPseudospectra
 
-using KAPseudospectra, Sys, Metal
+using KAPseudospectra, Metal, PrecompileTools
 
-if Sys.isapple()
-    @eval KAPseudospectra.devices(B::Metal.MtlBackend) = Metal.devices()
-    @eval KAPseudospectra.get_bgarray(B::Metal.MtlBackend) = Metal.MtlArray
+# Device-interface overrides for the Apple/Metal backend (single GPU, unified memory,
+# so the multi-device plumbing collapses to one device). Defined unconditionally (not
+# under `if Metal.functional()`) so precompile bakes them even off-device; only the
+# workload below needs the functional() guard.
+#
+# NOTE: untested on hardware (developed without an Apple machine). The API is
+# pinned to Metal.jl ≥ 1.x: `MetalBackend`, `MtlArray`, `Metal.device()`,
+# `Metal.device!(::MTLDevice)`, and the `MTLDevice` properties
+# `recommendedMaxWorkingSetSize`/`currentAllocatedSize`.
+KAPseudospectra.device(B::Metal.MetalBackend) = Metal.device()
+KAPseudospectra.device!(B::Metal.MetalBackend, dev) = Metal.device!(dev)
+# Metal has no `devices()` enumerator — Apple Silicon shows a single GPU.
+KAPseudospectra.devices(B::Metal.MetalBackend) = [Metal.device()]
+KAPseudospectra.get_bgarray(B::Metal.MetalBackend) = Metal.MtlArray
+# Free working-set bytes ≈ recommended max working set − currently allocated.
+# Apple GPUs use unified memory, so this is effectively a slice of system RAM.
+function KAPseudospectra.device_bytes_available(B::Metal.MetalBackend)
+    dev = Metal.device()
+    Int(dev.recommendedMaxWorkingSetSize) - Int(dev.currentAllocatedSize)
+end
+# Metal has no explicit memory-pool reclaim; fall back to GC.
+KAPseudospectra.device_reclaim(B::Metal.MetalBackend) = GC.gc()
+# No `supports_fp64` override needed: the default defers to `supports_float64`, which
+# Metal declares `false` (no `double` in MSL), so F64 paths skip Metal — F32 only. Metal
+# also needs `KAPseudospectra.set_pdiv_accurate(false)` so the F32 solves compile (see KATRSM).
+
+## precompile gpu code (only when a device is actually usable)
+if Metal.functional()
+    @setup_workload begin
+        # Apple GPUs have no FP64 — ComplexF32 only.
+        @compile_workload begin
+            KAPseudospectra._precompile_ihlpsa(MetalBackend(), Metal.device(), [ComplexF32])
+        end
+    end
 end
 
 end

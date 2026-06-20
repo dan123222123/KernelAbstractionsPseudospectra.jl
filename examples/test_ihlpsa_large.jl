@@ -1,8 +1,17 @@
 ##
 using KAPseudospectra
-using CUDA # accelerator needed unless you want to wait forever...
-using LinearAlgebra, MatrixDepot, Plots, LaTeXStrings
-pyplot()
+using KernelAbstractions
+using LinearAlgebra, MatrixDepot, Plots, LaTeXStrings   # GR backend (Plots' default)
+
+# Large-scale timing demo. Runs on CPU out of the box, but the sizes below
+# (n up to 2^12) really want an accelerator — add a backend to the examples
+# project (see README.md) and uncomment one of the lines below.
+backend = CPU()
+#using CUDA;   backend = CUDABackend()
+#using AMDGPU; backend = ROCBackend()
+#using Metal;  backend = MetalBackend()    # Apple GPUs (Float32 only — no FP64)
+#using oneAPI; backend = oneAPIBackend()   # Intel GPUs (Float32 only on FP64-less iGPUs)
+
 pltdir = (@__DIR__) * "/test_large_results/"
 mkpath(pltdir)
 ##
@@ -18,7 +27,10 @@ open(pltdir * "timing", "w") do f
         A = MatrixDepot.golub(T, n)
         # note the first run takes longer to run than subsequent ones -- likely an issue with precompilation
         timschur = @elapsed P = MatrixPencil(schur(A))
-        timsrg = CUDA.@elapsed srg = ihlpsa(CUDABackend(), zg, P, maxnit)
+        timsrg = @elapsed begin
+            srg = ihlpsa(backend, zg, P, maxnit)
+            KernelAbstractions.synchronize(backend)   # so GPU timing isn't just launch latency
+        end
         write(f, "$(n),$(timschur),$(timsrg)\n")
         flush(f)
         tv = -6:0.2:-1

@@ -58,7 +58,7 @@ Adapt.@adapt_structure SchurMatrixPencil
 Checks the following:
 - the grid of shifts (zg) is not empty
 - A and B are of the same size (if B!=UniformScaling)
-- γ + δ == 1 -- normalization for the matrix-pencil pseudospectra (if given)
+- γ, δ are valid (γ, δ ≥ 0 and not both zero) -- see [`_validate_weights`](@ref)
 """
 function validate(zg, A::AbstractMatrix, B, γ=missing, δ=missing)
     @assert !isempty(zg)
@@ -66,9 +66,23 @@ function validate(zg, A::AbstractMatrix, B, γ=missing, δ=missing)
         @assert size(A) == size(B)
     end
     if !(ismissing(γ) && ismissing(δ))
-        @assert isapprox(γ + δ, 1) "γ + δ must sum to 1 (got $(γ + δ))"
+        _validate_weights(γ, δ)
     end
 end
 function validate(zg, P::AbstractMatrixPencil, γ=missing, δ=missing)
     validate(zg, P.A, P.B, γ, δ)
+end
+
+"""
+    _validate_weights(γ, δ)
+
+Validate the (γ,δ) perturbation weights of the Frayssé et al. pseudospectrum
+(value `σ_min(zB − A)/(γ + δ|z|)`). The set is invariant to a common scaling of
+`(γ,δ)` (it only rescales `ε`), so any `γ, δ ≥ 0` not both zero is admissible —
+e.g. the literature's `(1,0)` (standard) and `(1,1)`. Shared by `ℂsvdpsa`,
+`ihlpsa`, and the adaptive driver so all paths accept the same inputs.
+"""
+function _validate_weights(γ, δ)
+    @assert γ ≥ 0 && δ ≥ 0 "perturbation weights must be ≥ 0 (got γ=$γ, δ=$δ)"
+    @assert γ + δ > 0 "perturbation weights γ, δ must not both be zero"
 end
