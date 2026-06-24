@@ -20,6 +20,14 @@
 
 using KernelIntrinsics: @shfl, Idx
 
+# Warp-shuffle broadcast used by the register-warp and tiled panel solves. For IEEE hardware
+# floats (ComplexF32/F64) this is a single `@shfl`. Multi-limb float types (MultiFloats) are
+# miscompiled when shuffled as one wide composite inside the register solve loop and silently
+# return garbage; the KAPseudospectraMultiFloatsExt extension overrides this with a per-limb
+# shuffle (each underlying hardware float shuffled separately, then reconstructed) — verified
+# exact, whereas the whole-value shuffle is not.
+@inline _trsm_shfl(v, src) = @shfl(Idx, v, src)
+
 _blsym(s) = Symbol("bl_", s)
 
 # Forward (lower-triangular): panels ascend p = 1…R; within a panel columns ascend; each
@@ -42,7 +50,7 @@ _blsym(s) = Symbol("bl_", s)
                 local j = $(p - 1) * ws + jj
                 if j <= m                                   # warp-uniform → shuffle safe
                     local piv = (lane == jj) ? _pdiv($blp, @inline zBAij(j, j, z, A, B)) : zero(ET)
-                    local xj = @shfl(Idx, piv, jj)          # broadcast pivot from lane jj
+                    local xj = _trsm_shfl(piv, jj)          # broadcast pivot from lane jj
                     if lane == jj
                         $blp = xj
                     elseif lane > jj
@@ -61,7 +69,7 @@ _blsym(s) = Symbol("bl_", s)
                 for jj = 1:ws
                     local j = $(p - 1) * ws + jj
                     if j <= m
-                        local xj = @shfl(Idx, $blp, jj)
+                        local xj = _trsm_shfl($blp, jj)
                         local i = $(q - 1) * ws + lane
                         if i <= m
                             $blq = $blq - xj * @inline zBAij(i, j, z, A, B)
@@ -104,7 +112,7 @@ end
                 local j = $(p - 1) * ws + jj
                 if j <= m
                     local piv = (lane == jj) ? _pdiv($blp, @inline zBAij(j, j, z, A, B)) : zero(ET)
-                    local xj = @shfl(Idx, piv, jj)
+                    local xj = _trsm_shfl(piv, jj)
                     if lane == jj
                         $blp = xj
                     elseif lane < jj
@@ -123,7 +131,7 @@ end
                 for jj = ws:-1:1
                     local j = $(p - 1) * ws + jj
                     if j <= m
-                        local xj = @shfl(Idx, $blp, jj)
+                        local xj = _trsm_shfl($blp, jj)
                         local i = $(q - 1) * ws + lane
                         if i <= m
                             $blq = $blq - xj * @inline zBAij(i, j, z, A, B)

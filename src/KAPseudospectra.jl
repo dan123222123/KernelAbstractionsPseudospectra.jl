@@ -10,8 +10,10 @@ using Preferences
 #   "warp"   – always the register-warp (per-warp shuffle) solve.
 #   "tiled"  – always the tiled (shared-memory A,B reuse) solve.
 #   "column" – the original column-oriented solve: barrier-based, shuffle-free, no per-warp
-#              register semantics. The safe fallback for higher-precision element types
-#              whose per-warp behavior is untested/unsupported.
+#              register semantics. Correct for every element type. Non-hardware-float types
+#              (MultiFloats / BigFloat / …) are routed here AUTOMATICALLY by `trsmIHL`,
+#              overriding any of the above, because the warp/tiled shuffle solves miscompile
+#              for them; this value forces it explicitly for the IEEE-float types too.
 const _VALID_TRSM = ("auto", "warp", "tiled", "column")
 
 function trsm_strategy()

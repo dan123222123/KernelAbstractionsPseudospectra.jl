@@ -33,7 +33,7 @@ using KernelIntrinsics: @shfl, Idx
     for jj = 1:plen
         j = koff + jj
         piv = (lane == jj) ? _pdiv(bl, @inline zBAij(j, j, z, A, B)) : zero(ET)
-        xj = @shfl(Idx, piv, jj)
+        xj = _trsm_shfl(piv, jj)
         if lane == jj
             bl = xj
         elseif (lane > jj) & valid
@@ -55,7 +55,7 @@ end
     for jj = plen:-1:1
         j = koff + jj
         piv = (lane == jj) ? _pdiv(bl, @inline zBAij(j, j, z, A, B)) : zero(ET)
-        xj = @shfl(Idx, piv, jj)
+        xj = _trsm_shfl(piv, jj)
         if lane == jj
             bl = xj
         elseif (lane < jj) & valid

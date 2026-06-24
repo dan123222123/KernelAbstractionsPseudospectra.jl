@@ -160,18 +160,32 @@ default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, 32) : 1
 function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
     strat = trsm_strategy()
+    # Element-type + size routing for the GPU inner solve.
+    #  * Wide (non-IEEE-float) elements (MultiFloats / BigFloat) can't use the tiled solve —
+    #    its trailing-update `@localmem` tile (2·32²·sizeof(T)) overflows GPU shared memory
+    #    (64 KB > 48 KB for Complex{Float64x2}). They run the warp solve via the per-limb
+    #    `_trsm_shfl` override (KAPseudospectraMultiFloatsExt).
+    #  * The warp solve is `@generated` on R = ⌈m/32⌉: excellent at small m, but its compile
+    #    time and register pressure blow up with R (≈26 s compile at R=16, register-bound
+    #    occupancy collapse for wide elements). So large problems avoid warp — IEEE types fall
+    #    back to tiled (shared-memory A,B reuse), wide types to the shuffle-free column solve
+    #    (compile-free, no R-cliff). Threshold = `trsm_crossover()`.
+    wide = !(real(eltype(P.A)) <: Base.IEEEFloat)
+    big = size(P, 1) >= trsm_crossover()
     if strat == "column"
         _column_trsm!(backend, bV, zv, P, wgs)
-    elseif strat == "tiled"
-        _tiled_trsm!(backend, bV, zv, P, wgs)
     elseif strat == "warp"
         _warp_trsm!(backend, bV, zv, P, wgs)
-    else  # "auto": register-warp for small m, tiled for large m
-        if size(P, 1) >= trsm_crossover()
-            _tiled_trsm!(backend, bV, zv, P, wgs)
-        else
-            _warp_trsm!(backend, bV, zv, P, wgs)
-        end
+    elseif strat == "tiled"
+        # tiled is unavailable for wide elements → column (large) / warp (small)
+        wide ? (big ? _column_trsm!(backend, bV, zv, P, wgs) : _warp_trsm!(backend, bV, zv, P, wgs)) :
+               _tiled_trsm!(backend, bV, zv, P, wgs)
+    elseif wide
+        big ? _column_trsm!(backend, bV, zv, P, wgs) : _warp_trsm!(backend, bV, zv, P, wgs)
+    elseif big                                          # "auto", IEEE, large m
+        _tiled_trsm!(backend, bV, zv, P, wgs)
+    else                                                # "auto", IEEE, small m
+        _warp_trsm!(backend, bV, zv, P, wgs)
     end
 end
 
