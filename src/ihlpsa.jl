@@ -206,28 +206,52 @@ supports_fp64(B) = KernelAbstractions.supports_float64(B)
 
 ## HOST FUNCTIONS ##
 
+# Largest eigenvalue of the small Lanczos tridiagonal `SymTridiagonal(d, e)`, computed in
+# the eltype's own precision. Float64 uses the LAPACK `eigmax` (fast, well-tested);
+# extended-precision element types (MultiFloats / BigFloat) use GenericLinearAlgebra's
+# `eigen` and take the top value. `ihlsrg!` only ever calls this with `d`/`e` of the work
+# type `R` it selected, so the result follows the input precision.
+#
+# `eigen` rather than `eigmax`/`eigvals` for the generic path: near a true eigenvalue
+# σ_min → 0, so λmax = 1/σ_min² is large and the tridiagonal spans a wide dynamic range.
+# GenericLinearAlgebra's `eigen` (plain QL) resolves the extreme eigenvalue to ~machine-eps
+# on such matrices; its square-root-free `eigvals` (which `eigmax` calls) is less reliable
+# there, so we go through `eigen`. Using it means extended precision needs
+# `GenericLinearAlgebra` loaded — the same generic-linear-algebra stack the dense Schur
+# factorization already requires. The tridiagonal is tiny (nit per grid point), so the
+# eigenvectors `eigen` also returns cost nothing here.
+_eigmax_tridiag(d::AbstractVector{Float64}, e::AbstractVector{Float64}) = eigmax(SymTridiagonal(d, e))
+_eigmax_tridiag(d::AbstractVector{<:AbstractFloat}, e::AbstractVector{<:AbstractFloat}) =
+    maximum(eigen(SymTridiagonal(d, e)).values)
+
 # separate srg computations
 #
-# Two robustness measures vs the naive `eigmax(SymTridiagonal(real.(α), real.(β)))`:
+# Two notes on the σ extraction:
 #
-#  1. Promote α/β to Float64 before forming the SymTridiagonal. F32 Lanczos at
-#     a grid point near a true eigenvalue produces a tridiagonal whose largest
-#     eigenvalue exceeds F32 dynamic range (~1e38), and LAPACK's `stegr!`
-#     errors out with code 11. The α/β arrays are tiny (nit per grid point),
-#     so the promotion is essentially free.
+#  1. Work type `R = promote_type(Float64, real(eltype(α)))` — a Float64 *floor* on the
+#     eigmax precision. It is a no-op (`R == real(eltype(α))`) for Float64 and for every
+#     extended-precision type (MultiFloats/BigFloat), so those follow the input precision
+#     and the returned σ is as accurate as the resolvent solves that produced α/β. The
+#     floor only lifts the sub-Float64 types: an F32 tridiagonal near a true eigenvalue has
+#     a largest eigenvalue past F32's ~1e38 range, so its eigmax is taken in Float64.
+#     `_eigmax_tridiag` then dispatches LAPACK `eigmax` for Float64 and `eigen` otherwise;
+#     α/β are tiny (nit per grid point) so the cost is negligible either way.
 #  2. isfinite guard: even in F64, pathological Lanczos can produce NaN/Inf
 #     entries (e.g. at z exactly at an eigenvalue). When that happens we set
 #     sr[i] = eps(real(eltype(zv))) — the resolvent norm is effectively
 #     infinity at this point, so the structured stability radius is zero;
 #     using `eps` as a sentinel keeps `log10(sr)` well-defined for plotting.
 function ihlsrg!(sr, zv, γ, δ, α, β)
+    R = promote_type(Float64, real(eltype(α)))
     Threads.@threads for i in eachindex(zv)
-        αi = Float64.(real.(α[:, i]))
-        βi = Float64.(real.(β[2:end-1, i]))
+        αi = R.(real.(α[:, i]))
+        βi = R.(real.(β[2:end-1, i]))
         if all(isfinite, αi) && all(isfinite, βi)
             # σ_min = 1/√(eigmax) of [(zB−A)(zB−A)ᴴ]⁻¹; the (γ,δ)-pseudospectral
             # value is σ_min/(γ+δ|z|) (Frayssé et al.) = 1/((γ+δ|z|)·√eigmax).
-            sr[i] = 1 / ((γ + δ * abs(zv[i])) * sqrt(eigmax(SymTridiagonal(αi, βi))))
+            # `_eigmax_tridiag` follows the input eltype's precision (LAPACK for
+            # Float64, GenericLinearAlgebra `eigen` for extended-precision types).
+            sr[i] = 1 / ((γ + δ * abs(zv[i])) * sqrt(_eigmax_tridiag(αi, βi)))
         else
             sr[i] = eps(real(eltype(zv)))
         end
