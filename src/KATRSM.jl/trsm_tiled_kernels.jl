@@ -136,3 +136,67 @@ end
         end
     end
 end
+
+# ---- B = I trailing updates (one tile, no z) ----
+# For a standard pencil (B = I) the trailing rows i are strictly off the panel columns j, so
+# B[i,j] = 0 and the pencil reduces to M[i,j] = -A[i,j]: `acc -= M[i,j]·b[j]` ⇒ `acc += A[i,j]·b[j]`.
+# Dropping the B tile halves shared memory (better occupancy; a wide element type's single 32-KB
+# tile now fits 48 KB) and removes z from the trailing update.
+
+@kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles)
+    t = @index(Local)
+    grp = @index(Group)
+    @uniform ET = eltype(A)
+    bi = (grp - 1) % rtiles + 1
+    bg = (grp - 1) ÷ rtiles + 1
+    sA = @localmem ET (32, 32)
+    i = rbase + (bi - 1) * 32 + t
+    for jj = 1:plen
+        sA[t, jj] = i <= m ? A[i, koff + jj] : zero(ET)
+    end
+    @synchronize()
+    if i <= m
+        g = length(bv)
+        gp0 = (bg - 1) * gt
+        for gg = 1:gt
+            gp = gp0 + gg
+            if gp <= g
+                b = bv[gp]
+                acc = b[i]
+                for jj = 1:plen
+                    acc += sA[t, jj] * b[koff + jj]
+                end
+                b[i] = acc
+            end
+        end
+    end
+end
+
+@kernel function _tiled_trailing_backward_eye(bv, @Const(A), koff, plen, gt, rtiles)
+    t = @index(Local)
+    grp = @index(Group)
+    @uniform ET = eltype(A)
+    bi = (grp - 1) % rtiles + 1
+    bg = (grp - 1) ÷ rtiles + 1
+    sA = @localmem ET (32, 32)
+    i = (bi - 1) * 32 + t
+    for jj = 1:plen
+        sA[t, jj] = i <= koff ? A[i, koff + jj] : zero(ET)
+    end
+    @synchronize()
+    if i <= koff
+        g = length(bv)
+        gp0 = (bg - 1) * gt
+        for gg = 1:gt
+            gp = gp0 + gg
+            if gp <= g
+                b = bv[gp]
+                acc = b[i]
+                for jj = 1:plen
+                    acc += sA[t, jj] * b[koff + jj]
+                end
+                b[i] = acc
+            end
+        end
+    end
+end

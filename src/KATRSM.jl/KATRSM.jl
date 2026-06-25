@@ -46,5 +46,6 @@ export set_pdiv_accurate
 export _batched_warp_forward_solve_pencil, _batched_warp_backward_solve_pencil
 export _tiled_panel_forward, _tiled_panel_backward
 export _tiled_trailing_forward, _tiled_trailing_backward
+export _tiled_trailing_forward_eye, _tiled_trailing_backward_eye
 
 end

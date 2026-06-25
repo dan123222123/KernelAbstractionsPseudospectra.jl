@@ -29,7 +29,15 @@ struct SchurMatrixPencil{T} <: AbstractMatrixPencil{T}
     # iterates match textbook Lanczos applied to the original problem with the
     # same x₀. Lazy adjoint by default to avoid duplicating m×m bytes.
     Z::AbstractMatrix{T}
+    # True when B is the identity (standard, non-generalized pencil). Lets the tiled GPU
+    # solve skip the B tile in its trailing update — off-diagonal B[i,j]=0, so the z·B term
+    # vanishes — halving its shared memory (better occupancy, and a wide element type's single
+    # tile now fits the 48 KB limit). Conservatively false for direct/backward-compat builds.
+    b_is_identity::Bool
 end
+# 5-arg (no flag): conservative b_is_identity=false.
+SchurMatrixPencil{T}(A, Ac, B, Bc, Z) where {T<:Complex} =
+    SchurMatrixPencil{T}(A, Ac, B, Bc, Z, false)
 # Backward-compat constructor for direct use (no Schur transform known).
 # Stores a typed Diagonal of ones (O(m) memory) so x₀-transform via Z'*x is a no-op
 # and Adapt-to-GPU is essentially free.
@@ -38,10 +46,10 @@ SchurMatrixPencil{T}(A, Ac, B, Bc) where {T<:Complex} =
 
 function MatrixPencil(F::Schur{T}) where {T<:Complex}
     Iₘ = Matrix{T}(I, size(F.T))
-    SchurMatrixPencil{T}(F.T, F.T', Iₘ, Iₘ, F.Z)
+    SchurMatrixPencil{T}(F.T, F.T', Iₘ, Iₘ, F.Z, true)   # B = I (standard pencil)
 end
 function MatrixPencil(F::GeneralizedSchur{T}) where {T<:Complex}
-    SchurMatrixPencil{T}(F.S, F.S', F.T, F.T', F.Z)
+    SchurMatrixPencil{T}(F.S, F.S', F.T, F.T', F.Z, false)
 end
 
 Base.size(x::AbstractMatrixPencil) = size(x.A)

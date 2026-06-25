@@ -161,30 +161,30 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
     strat = trsm_strategy()
     # Element-type + size routing for the GPU inner solve.
-    #  * Wide (non-IEEE-float) elements (MultiFloats / BigFloat) can't use the tiled solve —
-    #    its trailing-update `@localmem` tile (2·32²·sizeof(T)) overflows GPU shared memory
-    #    (64 KB > 48 KB for Complex{Float64x2}). They run the warp solve via the per-limb
-    #    `_trsm_shfl` override (KAPseudospectraMultiFloatsExt).
     #  * The warp solve is `@generated` on R = ⌈m/32⌉: excellent at small m, but its compile
     #    time and register pressure blow up with R (≈26 s compile at R=16, register-bound
-    #    occupancy collapse for wide elements). So large problems avoid warp — IEEE types fall
-    #    back to tiled (shared-memory A,B reuse), wide types to the shuffle-free column solve
-    #    (compile-free, no R-cliff). Threshold = `trsm_crossover()`.
+    #    occupancy collapse for wide elements). So large problems avoid warp.
+    #  * The tiled solve's trailing-update `@localmem` tiles must fit GPU shared memory (48 KB).
+    #    IEEE floats always fit (≤2·32²·sizeof ≤ 32 KB). Wide (non-IEEE: MultiFloats/BigFloat)
+    #    elements only fit when B = I, where the sB-free trailing kernels use a single tile
+    #    (e.g. 32 KB for Complex{Float64x2}); a wide generalized pencil (B ≠ I) needs two tiles
+    #    (64 KB, overflow) and falls back to the shuffle-free column solve. Wide warp/tiled use
+    #    the per-limb `_trsm_shfl` override (KAPseudospectraMultiFloatsExt). Threshold = `trsm_crossover()`.
     wide = !(real(eltype(P.A)) <: Base.IEEEFloat)
     big = size(P, 1) >= trsm_crossover()
+    tiled_ok = !wide || P.b_is_identity            # tiled's tiles fit shared memory
     if strat == "column"
         _column_trsm!(backend, bV, zv, P, wgs)
     elseif strat == "warp"
         _warp_trsm!(backend, bV, zv, P, wgs)
     elseif strat == "tiled"
-        # tiled is unavailable for wide elements → column (large) / warp (small)
-        wide ? (big ? _column_trsm!(backend, bV, zv, P, wgs) : _warp_trsm!(backend, bV, zv, P, wgs)) :
-               _tiled_trsm!(backend, bV, zv, P, wgs)
-    elseif wide
-        big ? _column_trsm!(backend, bV, zv, P, wgs) : _warp_trsm!(backend, bV, zv, P, wgs)
-    elseif big                                          # "auto", IEEE, large m
+        tiled_ok ? _tiled_trsm!(backend, bV, zv, P, wgs) :
+                   (big ? _column_trsm!(backend, bV, zv, P, wgs) : _warp_trsm!(backend, bV, zv, P, wgs))
+    elseif big && tiled_ok                          # "auto", large m, tiles fit (IEEE, or wide B=I)
         _tiled_trsm!(backend, bV, zv, P, wgs)
-    else                                                # "auto", IEEE, small m
+    elseif big                                      # "auto", large m, wide B≠I → no tiled
+        _column_trsm!(backend, bV, zv, P, wgs)
+    else                                            # "auto", small m
         _warp_trsm!(backend, bV, zv, P, wgs)
     end
 end
@@ -205,6 +205,7 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
     gt = parse(Int, get(ENV, "KAPSEUDO_TRSM_GT", "32"))
     nblk = cld(m, 32)
     zc = conj(zv)
+    eye = P.b_is_identity   # B = I ⇒ sB-free trailing kernels (half the shared memory)
     # forward (lower-triangular), panels ascending
     for k in 1:nblk
         koff = (k - 1) * 32
@@ -215,7 +216,11 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
         if ntrail > 0
             rtiles = cld(ntrail, 32)
             ggrid = cld(g, gt)
-            @views _tiled_trailing_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt, rtiles; ndrange=32 * rtiles * ggrid)
+            if eye
+                @views _tiled_trailing_forward_eye(backend, 32)(bV, P.Ac, koff, plen, rbase, m, gt, rtiles; ndrange=32 * rtiles * ggrid)
+            else
+                @views _tiled_trailing_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt, rtiles; ndrange=32 * rtiles * ggrid)
+            end
         end
     end
     # backward (upper-triangular), panels descending
@@ -226,7 +231,11 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
         if koff > 0
             rtiles = cld(koff, 32)
             ggrid = cld(g, gt)
-            @views _tiled_trailing_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen, gt, rtiles; ndrange=32 * rtiles * ggrid)
+            if eye
+                @views _tiled_trailing_backward_eye(backend, 32)(bV, P.A, koff, plen, gt, rtiles; ndrange=32 * rtiles * ggrid)
+            else
+                @views _tiled_trailing_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen, gt, rtiles; ndrange=32 * rtiles * ggrid)
+            end
         end
     end
 end
