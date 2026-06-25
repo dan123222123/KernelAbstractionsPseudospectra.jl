@@ -56,7 +56,12 @@ if all_tests || "cpu" in ARGS
     test_katrsm_kernels(CPU())
 end
 
-if all_tests || "cuda" in ARGS
+# CUDA is opt-in ("cuda" only — NOT part of `all`): CI runs CPU-only, so pulling in the whole
+# CUDA/GPUCompiler/LLVM stack there is pure precompile overhead and the GPU tests can't run on a
+# CPU runner anyway (the core kernels are still compiled by the CPU run). Add it on a CUDA machine
+# (`julia --project=test -e 'using Pkg; Pkg.add("CUDA")'`) and run `test/runtests.jl cuda`, or use
+# a GPU CI runner. Same opt-in pattern as AMDGPU / oneAPI / Metal.
+if "cuda" in ARGS
     using CUDA
     if CUDA.functional()
         test_ihlpsa_parter16(CUDABackend())
