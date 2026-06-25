@@ -67,7 +67,11 @@ if all_tests || "cuda" in ARGS
     end
 end
 
-if all_tests || "amdgpu" in ARGS
+# AMDGPU is opt-in ("amdgpu" only — NOT part of `all`): current AMDGPU releases require
+# KernelIntrinsics 1.x, which is incompatible with the CUDA stack's 0.1.x in a shared test
+# environment, so it can't be a default test dep. Add it on AMD hardware first
+# (`julia --project=test -e 'using Pkg; Pkg.add("AMDGPU")'`) and run `test/runtests.jl amdgpu`.
+if "amdgpu" in ARGS
     using AMDGPU
     if AMDGPU.functional()
         test_ihlpsa_parter16(ROCBackend())
