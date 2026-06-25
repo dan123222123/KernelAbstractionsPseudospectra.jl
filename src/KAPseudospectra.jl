@@ -36,6 +36,36 @@ function set_trsm_strategy!(s::AbstractString)
 end
 export set_trsm_strategy!
 
+# ─── opt-in GPU-kernel precompilation + on-disk caching ──────────────────────────────
+# The warp/tiled GPU triangular-solve kernels are @generated / warp-shuffle kernels with a
+# substantial first-call compile cost (seconds, growing with R = ⌈m/32⌉). On Julia versions
+# that serialize foreign (GPUCompiler) CodeInstances into pkgimages (JuliaLang/julia#60747,
+# milestone 1.13), exercising those kernels in the GPU precompile workload together with
+# GPUCompiler's on-disk cache makes that compile persist ACROSS sessions, eliminating their
+# TTFP. Off by default: it lengthens precompilation, and the cross-session payoff needs the
+# #60747 fix (on older Julia the workload still runs but the GPU code isn't retained yet).
+const PRECOMPILE_GPU_KERNELS = @load_preference("precompile_gpu_kernels", false)
+const _GPUCOMPILER_UUID = Base.UUID("61eb1bfa-7361-4325-ad38-22787b887f55")
+
+"""
+    enable_gpu_kernel_cache!(state=true)
+
+Opt into precompiling the warp/tiled GPU triangular-solve kernels and caching their compiled
+code on disk, so their first-call compile is paid once (at package precompile) instead of on
+the first solve of every session. Sets the `precompile_gpu_kernels` preference and enables
+GPUCompiler's `disk_cache`; **restart Julia** to take effect (re-precompiles, slower once).
+Full cross-session persistence needs Julia ≥ the release containing JuliaLang/julia#60747
+(milestone 1.13); on older Julia the workload still runs but the compiled GPU code is not
+retained across sessions yet (harmless — it just won't cut TTFP there).
+"""
+function enable_gpu_kernel_cache!(state::Bool=true)
+    @set_preferences!("precompile_gpu_kernels" => state)
+    Preferences.set_preferences!(_GPUCOMPILER_UUID, "disk_cache" => string(state); force=true)
+    @info "GPU kernel cache $(state ? "enabled" : "disabled") (precompile_gpu_kernels + GPUCompiler disk_cache). Restart Julia to take effect; cross-session reuse needs Julia ≥ 1.13 (JuliaLang/julia#60747)."
+    return nothing
+end
+export enable_gpu_kernel_cache!
+
 include("core.jl")
 export MatrixPencil
 
@@ -72,6 +102,39 @@ function _precompile_ihlpsa(backend, dev, Ts)
         # path so a first MatrixPencil(A, B) call isn't a cold compile.
         Pg = MatrixPencil(randn(T, 32, 32), randn(T, 32, 32) + T(5) * I)
         ihlpsa(backend, zg, Pg, 5; devs=[dev])
+    end
+    return nothing
+end
+
+# Opt-in (PRECOMPILE_GPU_KERNELS) extension of the GPU precompile workload: compile the warp
+# solve for every R up to the crossover (R = ⌈m/32⌉ — i.e. every m the auto/warp paths use it
+# for) and the tiled solve once, so their CodeInstances are created during precompilation. With
+# JuliaLang/julia#60747 + GPUCompiler's disk cache these persist across sessions. Each launch is
+# guarded: a flaky precompile-worker GPU *execution* is tolerated — the kernel still *compiles*
+# (the CI is what we need cached), so a failure degrades gracefully instead of breaking precompile.
+function _precompile_gpu_kernels(backend, dev, Ts)
+    cross = trsm_crossover()
+    for T in Ts
+        for m in 32:32:cross               # R = 1 … ⌈cross/32⌉, covering every m below the crossover
+            try
+                _, _, zg = qgrid(T, (-4, 4), (-4, 4), (4, 4))
+                P = MatrixPencil(schur(randn(T, m, m)))
+                withenv("KAPSEUDO_TRSM" => "warp") do
+                    ihlpsa(backend, zg, P, 3; devs=[dev])
+                end
+            catch err
+                @debug "warp precompile skipped" T m exception = err
+            end
+        end
+        try                                # tiled: one size at/above the crossover
+            _, _, zg = qgrid(T, (-4, 4), (-4, 4), (4, 4))
+            P = MatrixPencil(schur(randn(T, cross, cross)))
+            withenv("KAPSEUDO_TRSM" => "tiled") do
+                ihlpsa(backend, zg, P, 3; devs=[dev])
+            end
+        catch err
+            @debug "tiled precompile skipped" T exception = err
+        end
     end
     return nothing
 end
