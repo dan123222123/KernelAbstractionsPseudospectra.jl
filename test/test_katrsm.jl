@@ -347,7 +347,10 @@ end
 function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
     KernelAbstractions.isgpu(backend) || return
     @testset "trsm strategy consistency -- $(backend)" begin
-        for T in types, m in (32, 100, 128, 300)
+        # Sizes span power-of-two panels and partial last panels (m not a multiple of 32). 64/256
+        # were folded in from the former bench/tiled_check.jl so its coverage isn't lost. 512 (the
+        # R=16 warp-compile cliff) is left to bench/warp_trsm_bench.jl to keep CI compile time sane.
+        for T in types, m in (32, 64, 100, 128, 256, 300)
             rng = Random.seed!(2024)
             P = MatrixPencil(schur(randn(rng, T, m, m)))
             _, _, zg = qgrid(T, (-3, 3), (-3, 3), (40, 40))

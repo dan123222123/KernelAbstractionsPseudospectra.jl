@@ -83,6 +83,7 @@ if "amdgpu" in ARGS
         test_cross_backend(ROCBackend())
         test_adaptive_backend(ROCBackend())
         test_katrsm_kernels(ROCBackend())
+        test_trsm_strategies(ROCBackend())
     end
 end
 
@@ -100,6 +101,7 @@ if "oneapi" in ARGS
         test_cross_backend(oneAPIBackend(); types=Ts)
         test_adaptive_backend(oneAPIBackend(); types=Ts)
         test_katrsm_kernels(oneAPIBackend(); types=Ts)
+        test_trsm_strategies(oneAPIBackend(); types=Ts)
     end
 end
 
@@ -115,5 +117,6 @@ if "metal" in ARGS
         test_cross_backend(MetalBackend(); types=Ts)
         test_adaptive_backend(MetalBackend(); types=Ts)
         test_katrsm_kernels(MetalBackend(); types=Ts)
+        test_trsm_strategies(MetalBackend(); types=Ts)
     end
 end
