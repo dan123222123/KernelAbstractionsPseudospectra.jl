@@ -1,6 +1,7 @@
-# Device-function hooks (warp width, shared-memory budget, the per-backend device interface,
-# FP64 query), the `trsm_strategy` routing (`trsmIHL`) + the three solve drivers, and the
-# `lockstep_ihl!` inner Lanczos loop. Split out of ihlpsa.jl; included after ihlpsa_workspace.jl.
+# Trsm-specific device hooks (warp width, shared-memory budget, warp-shuffle safety), the
+# `trsm_strategy` routing (`trsmIHL`) + the three solve drivers, and the `lockstep_ihl!` inner
+# Lanczos loop. The general per-backend device interface lives in src/backend.jl. Split out of
+# ihlpsa.jl; included after ihlpsa_workspace.jl.
 
 ## DEVICE FUNCTIONS ##
 
@@ -70,7 +71,7 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     #    `device_smem_bytes`). IEEE floats fit on any GPU; a wide (non-IEEE: MultiFloats/BigFloat)
     #    generalized pencil needs two tiles and typically overflows, falling back to the shuffle-
     #    free column solve, while a wide B=I pencil uses the single-tile sB-free kernels and fits.
-    #    Wide warp/tiled use the per-limb `_trsm_shfl` override (KAPseudospectraMultiFloatsExt).
+    #    Wide warp/tiled use the per-limb `_trsm_shfl` override (MultiFloatsPseudospectra).
     #    Size threshold for warp→tiled = `trsm_crossover()`.
     wide = !(real(eltype(P.A)) <: Base.IEEEFloat)
     big = size(P, 1) >= trsm_crossover()
@@ -182,19 +183,9 @@ function lockstep_ihl!(α, β, ihl::IHLworkspace, nit, g; wgs=missing, start::In
     synchronize(backend)
 end
 
-# Device-operations interface: CPU defaults here; each GPU extension overrides these
-# six methods (array type, device handle access, free-memory query, reclaim).
-# `supports_fp64` below delegates to KA.
-get_bgarray(B::CPU) = Array
-device(B::CPU) = CPU()
-devices(B::CPU) = CPU()
-device!(B::CPU, dev) = CPU()
-device_bytes_available(B::CPU) = (Sys.free_memory() |> Int)
-device_reclaim(B::CPU) = GC.gc()
-
-# Whether `backend`'s device can run Float64/ComplexF64 kernels. Default defers to
-# `KernelAbstractions.supports_float64`; overridable so the oneAPI extension can
-# substitute a device-accurate FP64 query (see its note). F64 paths skip unsupported devices.
-supports_fp64(B) = KernelAbstractions.supports_float64(B)
+# The general per-backend device interface (get_bgarray / device / devices / device! /
+# device_bytes_available / device_reclaim / supports_fp64) lives at module level in
+# `src/backend.jl` — it's the broad backend abstraction, not trsm-specific. Only the
+# trsm-specific device hooks above (warp_width, device_smem_bytes, warp_trsm_safe) stay here.
 
 ## END DEVICE FUNCTIONS ##

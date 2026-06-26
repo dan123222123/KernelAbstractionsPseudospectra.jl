@@ -23,7 +23,7 @@ using KernelIntrinsics: @shfl, Idx
 # Warp-shuffle broadcast used by the register-warp and tiled panel solves. For IEEE hardware
 # floats (ComplexF32/F64) this is a single `@shfl`. Multi-limb float types (MultiFloats) are
 # miscompiled when shuffled as one wide composite inside the register solve loop and silently
-# return garbage; the KAPseudospectraMultiFloatsExt extension overrides this with a per-limb
+# return garbage; the MultiFloatsPseudospectra extension overrides this with a per-limb
 # shuffle (each underlying hardware float shuffled separately, then reconstructed) — verified
 # exact, whereas the whole-value shuffle is not.
 @inline _trsm_shfl(v, src) = @shfl(Idx, v, src)

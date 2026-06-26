@@ -107,6 +107,8 @@ export MatrixPencil
 include("svdpsa.jl")
 export ℂsvdpsa, ℝsvdpsa
 
+include("backend.jl")   # general per-backend device interface (CPU defaults; GPU exts override)
+
 include("ihlpsa.jl")
 export ihlpsa
 

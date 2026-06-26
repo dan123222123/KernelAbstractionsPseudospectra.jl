@@ -1,4 +1,4 @@
-module KAPseudospectraMultiFloatsExt
+module MultiFloatsPseudospectra
 
 # Per-limb warp-shuffle broadcast for MultiFloats. The register-warp and tiled panel solves
 # broadcast pivots with `KATRSM._trsm_shfl`. The core fallback shuffles the whole value with a

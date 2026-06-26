@@ -8,7 +8,7 @@
 #     CPU-runnable (the extended-precision path goes through the shuffle-free column solve).
 #
 #  2. test_multifloats_warp_shuffle(backend) — GPU-only (where warp_trsm_safe): the per-limb
-#     `_trsm_shfl` override (KAPseudospectraMultiFloatsExt) must make the warp solve BITWISE-match
+#     `_trsm_shfl` override (MultiFloatsPseudospectra) must make the warp solve BITWISE-match
 #     the column solve for Complex{Float64x2}. Skipped on CPU / stock oneAPI (no usable shuffle).
 
 using MultiFloats, GenericSchur, GenericLinearAlgebra

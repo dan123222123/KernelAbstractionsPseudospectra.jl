@@ -48,10 +48,14 @@ include("test_realsvdpsa.jl")
 include("test_edge_cases.jl")
 include("test_katrsm.jl")
 
-# Extended-precision (MultiFloats) tests are opt-in ("multifloats" in ARGS — NOT part of `all`):
-# they pull MultiFloats/GenericSchur/GenericLinearAlgebra and a slow BigFloat-SVD oracle. The
-# accuracy oracle runs on CPU here; the per-limb warp-shuffle kernel test is invoked from the GPU
-# backend blocks below (it self-gates to backends where the wide-type shuffle is usable).
+# Extended-precision (MultiFloats) tests are opt-in ("multifloats" in ARGS — NOT part of `all`).
+# Like the GPU backends, the extended-precision stack is "bring your own" rather than a default
+# test dep — add it to the test env first, then run `test/runtests.jl multifloats`:
+#   julia --project=test -e 'using Pkg; Pkg.add(["MultiFloats","GenericSchur","GenericLinearAlgebra"])'
+# (MultiFloats is a weak dep of the package, via the MultiFloatsPseudospectra extension; GenericSchur
+# and GenericLinearAlgebra supply the generic Schur + tridiagonal eigen the extended path needs and
+# are not package deps.) The accuracy oracle runs on CPU; the per-limb warp-shuffle kernel test is
+# invoked from the GPU backend blocks below (it self-gates to backends where the shuffle is usable).
 if "multifloats" in ARGS
     include("test_multifloats.jl")
     test_multifloats_accuracy()
