@@ -214,7 +214,11 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
             # backends only. They must agree with LAPACK and be BITWISE-identical to the
             # column-oriented kernel (same pencil/_pdiv/update order). wgs is fixed at the
             # warp width 32; R = cld(m, 32) is the per-lane register-slot count.
-            if KernelAbstractions.isgpu(backend)
+            # Skipped where the backend's warp shuffle isn't usable for these solves: on
+            # oneAPI that needs the KernelIntrinsics shuffle backend + a pinned SIMD32 width
+            # (see `warp_trsm_safe`) — stock oneAPI routes ihlpsa to the column solve, so the
+            # warp kernels aren't part of its supported path and would just `## TODO`-stub out.
+            if KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, false)
                 wgs = 32
                 for T in types, m in (8, 16, 31, 32, 33, 64, 96)
                     rtol = _tol(T)
