@@ -5,7 +5,8 @@ strategy preference to pick between them. For the adaptive-depth driver that
 calls these solves see [`DESIGN.md`](DESIGN.md); for usage see the `ihlpsa`
 docstring and README. The exploration (warp-register → CUDA-native diagnosis →
 tiled) and its intermediate benchmarks live in `git log` and the `bench/`
-scripts (`warp_smoke.jl`, `warp_trsm_bench.jl`, `tiled_check.jl`).
+timing script `warp_trsm_bench.jl` (the earlier `warp_smoke.jl` / `tiled_check.jl`
+correctness scripts were folded into the test suite — see `test/test_katrsm.jl`).
 
 ## Why the solve is the thing to optimize
 
@@ -153,7 +154,7 @@ kernel here.
 
 ## Benchmarks (6× GTX 1080 Ti, ComplexF32)
 
-Solve-only, single GPU, full 90k-point grid, forward solve (`warp_smoke.jl` /
+Solve-only, single GPU, full 90k-point grid, forward solve (solve-only
 microbench): `warp` is 1.39–1.56× the column kernel for m≤256; the R=16 cliff
 shows at m=512 (KA+KI 0.87×, CUDA-native 1.24×); 1.37× at m=1024.
 

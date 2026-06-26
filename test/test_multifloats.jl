@@ -38,8 +38,12 @@ function test_multifloats_accuracy()
         s64 = run_ihl(ComplexF64)
         smf = Float64.(run_ihl(HP))
 
-        e64 = abs.(s64 .- s_oracle) ./ s_oracle
-        emf = abs.(smf .- s_oracle) ./ s_oracle
+        # Relative error, but floor the denominator: near an eigenvalue σ_min(z) → 0, so a bare
+        # |Δ|/σ would blow up for any solver — guard it so the test can't flake on a grid point that
+        # lands in the ill-conditioned band.
+        denom = max.(s_oracle, eps(Float64))
+        e64 = abs.(s64 .- s_oracle) ./ denom
+        emf = abs.(smf .- s_oracle) ./ denom
 
         # Extended precision tracks the independent oracle far better than Float64, which loses
         # accuracy in the ill-conditioned band near the spectrum.
@@ -75,6 +79,16 @@ function test_multifloats_warp_shuffle(backend)
             KernelAbstractions.synchronize(backend)
             bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
             KATRSM._batched_column_oriented_forward_solve_pencil(backend, wgs, (wgs, g))(bc, _to(backend, zv), _to(backend, Al), _to(backend, Bl))
+            KernelAbstractions.synchronize(backend)
+            @test _from(bw.data) == _from(bc.data)
+
+            # backward (upper-tri): the backward warp solve also goes through the per-limb _trsm_shfl,
+            # so exercise it too — bitwise identical to the column-oriented backward kernel.
+            bw = VectorOfSimilarVectors(_to(backend, copy(b0)))
+            KATRSM._batched_warp_backward_solve_pencil(backend, wgs, (wgs, g))(bw, _to(backend, zv), _to(backend, Au), _to(backend, Bu), Val(R))
+            KernelAbstractions.synchronize(backend)
+            bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
+            KATRSM._batched_column_oriented_backward_solve_pencil(backend, wgs, (wgs, g))(bc, _to(backend, zv), _to(backend, Au), _to(backend, Bu))
             KernelAbstractions.synchronize(backend)
             @test _from(bw.data) == _from(bc.data)
         end

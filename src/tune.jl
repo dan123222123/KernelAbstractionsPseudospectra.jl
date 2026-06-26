@@ -29,10 +29,12 @@ function tune_trsm_crossover!(backend, dev=missing;
         ms=(64, 128, 256, 512, 1024), g=2048, T=ComplexF32, reps=3, persist=true)
     KernelAbstractions.isgpu(backend) ||
         error("tune_trsm_crossover! needs a GPU backend (warp/tiled are GPU-only); got $(backend).")
-    warp_trsm_safe(backend, false) ||
-        error("warp/tiled solves are not usable on $(backend) (warp_trsm_safe == false), so there is " *
-              "nothing to tune. Enable them first: on oneAPI via set_intel_force_simd32!(true) + a " *
-              "KernelIntrinsics oneAPI shuffle backend; on Metal via set_metal_warp_trsm!(true).")
+    wide = !(real(T) <: Base.IEEEFloat)   # MultiFloats/BigFloat need the per-limb shuffle backend
+    warp_trsm_safe(backend, wide) ||
+        error("warp/tiled solves are not usable on $(backend) for element type $(T) " *
+              "(warp_trsm_safe == false), so there is nothing to tune. Enable them first: on oneAPI via " *
+              "set_intel_force_simd32!(true) + a KernelIntrinsics oneAPI shuffle backend; on Metal via " *
+              "set_metal_warp_trsm!(true); wide (non-IEEE) types also need the per-limb shuffle extension.")
     ismissing(dev) || device!(backend, dev)
     bg = get_bgarray(backend)
     # Default: tiled never overtook warp in the probed range → keep warp throughout (crossover past it).
@@ -43,7 +45,12 @@ function tune_trsm_crossover!(backend, dev=missing;
         zv = adapt(bg, T(2) .+ T(3 // 10) .* randn(T, g))
         bV = VectorOfSimilarVectors(adapt(bg, reduce(hcat, [randn(T, m) for _ in 1:g])))
         wgs = default_wgs(backend, m)
+        # Each solve mutates bV in place. Snapshot the RHS and restore it before the tiled timing so
+        # the two runs measure on the same input (timing is data-independent for a triangular solve,
+        # but this keeps the measurements independently valid and robust to future data-dependent work).
+        bV0 = copy(flatview(bV))
         tw = _bestof_solve(() -> _warp_trsm!(backend, bV, zv, P, wgs), backend, reps)
+        flatview(bV) .= bV0
         tt = _bestof_solve(() -> _tiled_trsm!(backend, bV, zv, P, wgs), backend, reps)
         @info "  m=$m" warp_s=tw tiled_s=tt ratio=tw / tt
         if tt < tw
