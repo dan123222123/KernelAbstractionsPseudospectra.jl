@@ -347,22 +347,52 @@ end
 function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
     KernelAbstractions.isgpu(backend) || return
     @testset "trsm strategy consistency -- $(backend)" begin
-        # Sizes span power-of-two panels and partial last panels (m not a multiple of 32). 64/256
-        # were folded in from the former bench/tiled_check.jl so its coverage isn't lost. 512 (the
-        # R=16 warp-compile cliff) is left to bench/warp_trsm_bench.jl to keep CI compile time sane.
-        for T in types, m in (32, 64, 100, 128, 256, 300)
-            rng = Random.seed!(2024)
-            P = MatrixPencil(schur(randn(rng, T, m, m)))
+        # `auto` is always safe (it routes warp/tiled→column on backends where the shuffle isn't
+        # usable, e.g. stock oneAPI). Only force explicit `warp`/`tiled` where they're actually
+        # correct (warp_trsm_safe) — otherwise they'd run the stub shuffle and fail.
+        strategies = KAPseudospectra.warp_trsm_safe(backend, false) ? ("warp", "tiled", "auto") : ("auto",)
+
+        # Run every strategy on pencil `P` and require it to match the shuffle-free `column`
+        # baseline to element-type tolerance. `extraenv` injects extra ENV pairs (e.g. a forced
+        # crossover) for the duration of each run.
+        function check(P, T; extraenv=())
             _, _, zg = qgrid(T, (-3, 3), (-3, 3), (40, 40))
-            σc = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "column")
             tol = real(T) === Float32 ? 1e-4 : 1e-10
-            # `auto` is always safe (it routes warp/tiled→column on backends where the shuffle
-            # isn't usable, e.g. stock oneAPI). Only force explicit `warp`/`tiled` where they're
-            # actually correct (warp_trsm_safe) — otherwise they'd run the stub shuffle and fail.
-            strategies = KAPseudospectra.warp_trsm_safe(backend, false) ? ("warp", "tiled", "auto") : ("auto",)
+            σc = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "column", extraenv...)
             for strat in strategies
-                σ = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => strat)
+                σ = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => strat, extraenv...)
                 @test maximum(abs.(σ .- σc)) / maximum(abs.(σc)) < tol
+            end
+        end
+
+        for T in types
+            # Standard (B=I) pencil. Sizes span power-of-two panels and partial last panels (m not a
+            # multiple of 32), AND small m < 32: there the production warp launch is still a full
+            # `warp_width` warp (regression guard for the partial-warp shuffle fix), exercised here
+            # end-to-end via `auto`/`warp`. 64/256 were folded in from the former bench/tiled_check.jl;
+            # 512 (the R=16 warp-compile cliff) is left to bench/warp_trsm_bench.jl to keep CI sane.
+            for m in (8, 16, 31, 32, 64, 100, 128, 256, 300)
+                rng = Random.seed!(2024)
+                check(MatrixPencil(schur(randn(rng, T, m, m))), T)
+            end
+            # Generalized (B≠I) pencil: the ONLY coverage of the two-tile generic tiled trailing
+            # kernels (_tiled_trailing_{forward,backward}) and the B≠I warp/column paths — every
+            # other case here is B=I, so `b_is_identity` selects the sB-free `*_eye` kernels. m>32 so
+            # the trailing update actually runs; 100 adds a partial last panel. B is diagonally
+            # dominant so z*B−A stays well-conditioned across the grid.
+            for m in (64, 100)
+                rng = Random.seed!(2025)
+                A = randn(rng, T, m, m)
+                B = randn(rng, T, m, m) + T(5) * I
+                check(MatrixPencil(A, B), T)
+            end
+            # `auto` crossover into the tiled solve: the default crossover (512) is above every size
+            # here, so without a forced crossover `auto` is identical to `warp` and the auto→tiled
+            # branch is never taken. Force it low so `auto` routes m≥64 to tiled.
+            for m in (64, 128)
+                rng = Random.seed!(2026)
+                check(MatrixPencil(schur(randn(rng, T, m, m))), T;
+                      extraenv=("KAPSEUDO_TRSM_CROSSOVER" => "64",))
             end
         end
     end
