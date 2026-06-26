@@ -36,6 +36,39 @@ function set_trsm_strategy!(s::AbstractString)
 end
 export set_trsm_strategy!
 
+# ── Intel/oneAPI: force a fixed SIMD32 subgroup so warp/tiled trsm work at all m ──────
+# The register-warp and tiled solves assume a fixed 32-lane warp. Intel's IGC instead
+# picks the SIMD width (8/16/32) PER KERNEL by register pressure, so a 32-lane workgroup
+# can span several subgroups and the warp shuffles silently return garbage past the first
+# subgroup. Setting IGC's SIMD32 override makes every kernel one 32-lane subgroup, so the
+# shuffles are correct for all m. These env vars are read when the Level-Zero/IGC driver
+# initializes, so they must be set BEFORE `using oneAPI`; `__init__` (which runs at
+# `using KAPseudospectra`) does that when the opt-in preference is set. Opt-in because it
+# forces SIMD32 process-wide (lowering occupancy for kernels that would prefer SIMD16).
+# Also requires the oneAPI warp-shuffle backend in KernelIntrinsics.
+intel_force_simd32() = @load_preference("intel_force_simd32", false)
+function _apply_intel_simd32!()
+    get!(ENV, "NEOReadDebugKeys", "1")          # enable Intel NEO debug keys
+    get!(ENV, "IGC_ForceOCLSIMDWidth", "32")    # force every kernel to SIMD32
+    return nothing
+end
+"""
+    set_intel_force_simd32!(flag::Bool)
+
+Persist whether KAPseudospectra forces Intel GPUs to SIMD32, so the `warp`/`tiled` trsm
+strategies are correct at every `m` (otherwise IGC may narrow the SIMD width and the warp
+shuffles break past the subgroup boundary). Stored in LocalPreferences.toml and applied
+from `__init__`; for full effect start a fresh session with `using KAPseudospectra`
+**before** `using oneAPI`. Without it, use `KAPSEUDO_TRSM=column` on Intel.
+"""
+function set_intel_force_simd32!(flag::Bool)
+    @set_preferences!("intel_force_simd32" => flag)
+    flag && _apply_intel_simd32!()
+    @info "intel_force_simd32 = $flag (LocalPreferences.toml). For full effect, restart Julia and load KAPseudospectra before oneAPI."
+    return flag
+end
+export set_intel_force_simd32!
+
 include("core.jl")
 export MatrixPencil
 
@@ -74,6 +107,12 @@ function _precompile_ihlpsa(backend, dev, Ts)
         ihlpsa(backend, zg, Pg, 5; devs=[dev])
     end
     return nothing
+end
+
+function __init__()
+    # Apply the Intel SIMD32 override early (before the oneAPI driver initializes) when
+    # opted in. Harmless on non-Intel setups — the env vars are Intel-specific.
+    intel_force_simd32() && _apply_intel_simd32!()
 end
 
 ## precompile gpu code

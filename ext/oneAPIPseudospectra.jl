@@ -1,6 +1,7 @@
 module oneAPIPseudospectra
 
 using KAPseudospectra, oneAPI, PrecompileTools
+import KernelIntrinsics
 
 # Device-interface overrides for the Intel/oneAPI backend. Defined unconditionally (not
 # under `if oneAPI.functional()`) so precompile bakes them even when the worker can't
@@ -21,6 +22,30 @@ function KAPseudospectra.supports_fp64(B::oneAPI.oneAPIBackend)
     f = oneAPI.oneL0.module_properties(oneAPI.device()).fp64flags
     return (f & oneAPI.oneL0.ZE_DEVICE_MODULE_FLAG_FP64) != 0
 end
+
+# The `auto` strategy may use the warp/tiled (shuffle) solves on oneAPI ONLY when they are
+# actually correct, which needs BOTH: (1) the KernelIntrinsics oneAPI shuffle backend — the
+# standard 0.1.8 ships only a `## TODO` stub, so `@shfl` silently miscompiles there; and
+# (2) a SIMD width pinned to the warp width (else a 32-lane workgroup spans several Intel
+# subgroups). Both arrive together via the opt-in `set_intel_force_simd32!` + the patched
+# KernelIntrinsics. Otherwise `auto` stays on the shuffle-free `column` solve — correct on
+# stock releases, just without the warp/tiled speedup. (Explicit KAPSEUDO_TRSM=warp/tiled
+# is opt-in and remains the user's responsibility.)
+# MultiFloats (`wide`) always stay on `column`: their warp/tiled path crashes the SPIR-V
+# translator on oneAPI (the per-limb shuffle kernel + reqd-sub-group-size); column is correct
+# (and only ~1.2x slower) for extended precision here.
+KAPseudospectra.warp_trsm_safe(::oneAPI.oneAPIBackend, wide::Bool) =
+    !wide &&
+    KAPseudospectra.intel_force_simd32() &&
+    Base.get_extension(KernelIntrinsics, :KernelIntrinsicsoneAPIExt) !== nothing
+
+# The SIMD-width pin for the warp/tiled fast path comes from the main-module `__init__`
+# setting `IGC_ForceOCLSIMDWidth` (when `set_intel_force_simd32!` is enabled). We deliberately
+# do NOT use oneAPI's `reqd_subgroup_size!` (the per-kernel `intel_reqd_sub_group_size`
+# execution mode) here: applied globally it crashes the SPIR-V translator on the MultiFloat
+# kernels (whereas the env var, a driver-level flag with no per-kernel metadata, pins both the
+# IEEE warp/tiled kernels and the MultiFloat column kernels fine). reqd-sub-group-size is the
+# cleaner long-term mechanism but needs per-kernel application (IEEE-warp kernels only) first.
 
 ## precompile gpu code (only when a device is actually usable)
 if oneAPI.functional()

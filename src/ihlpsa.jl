@@ -144,9 +144,23 @@ KernelAbstractions.get_backend(x::IHLworkspace{T,B}) where {T,B} = B
 
 ## DEVICE FUNCTIONS ##
 
-# Workgroup size for the column-oriented trsm kernels: 32 (one CUDA warp / RDNA
-# wavefront) on GPU, 1 on CPU. Override via the `wgs` kwarg to ihlpsa.
-default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, 32) : 1
+# Warp width assumed by the register-warp / tiled solves (one shuffle domain): the
+# subgroup/warp size, capped at the matrix size. 32 on CUDA / Metal / AMDGPU (≤ wavefront)
+# / Intel with the SIMD32 pin (see `set_intel_force_simd32!`). Overridable per backend.
+warp_width(backend) = 32
+# Workgroup size for the trsm kernels: the warp width on GPU, 1 on CPU. Override via the
+# `wgs` kwarg to ihlpsa.
+default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, warp_width(backend)) : 1
+
+# Whether the register-warp / tiled solves (which broadcast pivots with warp shuffles) are
+# correct under the "auto" strategy on this backend. True for CUDA / AMDGPU / Metal: fixed
+# warp/wavefront/SIMD width + a hardware shuffle. On oneAPI it requires BOTH the
+# KernelIntrinsics oneAPI shuffle backend AND a pinned SIMD width, so the oneAPI extension
+# overrides this; without them, `auto` stays on the shuffle-free `column` solve — correct,
+# just not the fast path. (Explicit KAPSEUDO_TRSM=warp/tiled is opt-in and not gated.)
+# `wide` is true for non-IEEE element types (MultiFloats / BigFloat); the oneAPI override
+# keeps those on `column` regardless (their warp/tiled SPIR-V codegen is not yet functional).
+warp_trsm_safe(backend, wide) = true
 
 # non-cpu solve step in lockstep_ihl!
 #
@@ -180,6 +194,8 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     elseif strat == "tiled"
         tiled_ok ? _tiled_trsm!(backend, bV, zv, P, wgs) :
                    (big ? _column_trsm!(backend, bV, zv, P, wgs) : _warp_trsm!(backend, bV, zv, P, wgs))
+    elseif !warp_trsm_safe(backend, wide)           # "auto" where shuffle isn't safe (stock oneAPI) / unsupported (oneAPI MultiFloats) → column
+        _column_trsm!(backend, bV, zv, P, wgs)
     elseif big && tiled_ok                          # "auto", large m, tiles fit (IEEE, or wide B=I)
         _tiled_trsm!(backend, bV, zv, P, wgs)
     elseif big                                      # "auto", large m, wide B≠I → no tiled
