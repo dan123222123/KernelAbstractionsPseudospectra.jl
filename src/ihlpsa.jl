@@ -205,10 +205,10 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     end
 end
 
-# Warp-register solve. The generic implementation uses the portable KA + KernelIntrinsics
-# kernels; the CUDA extension can override `_warp_trsm!` with hand-rolled `@cuda` kernels
-# (opt-in via KAPSEUDO_CUDA_NATIVE=1) that avoid a KA+KI codegen regression at R=16.
-# `_warp_trsm_ka!` is the portable default and is kept callable for that override to fall back to.
+# Warp-register solve. Uses the portable KA + KernelIntrinsics kernels on every backend.
+# `_warp_trsm!` stays a separate dispatch hook (rather than calling `_warp_trsm_ka!` directly at
+# the call site) so a backend extension could specialize it later, but no extension overrides it
+# today — the earlier opt-in CUDA-native (`@cuda` + `CUDA.shfl_sync`) override was removed.
 _warp_trsm!(backend, bV, zv, P, wgs) = _warp_trsm_ka!(backend, bV, zv, P, wgs)
 
 # Tiled / blocked solve: right-looking panel sweep with shared-memory A,B-tile reuse across
