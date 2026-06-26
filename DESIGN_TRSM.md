@@ -73,10 +73,13 @@ points. While `A,B` fit in L2 (small m) this is free; once they don't (m ≳ 512
 each grid point pays full DRAM bandwidth for `A,B`. This is why large `A,B` are
 the worst case.
 
-The tiled solve is a right-looking blocked algorithm, panel width = warp size:
+The tiled solve is a right-looking blocked algorithm, panel width = warp size
+(kernel-level implementation: `src/KATRSM.jl/trsm_tiled_kernels.jl`, which has an
+ASCII block-layout diagram in its header):
 
-1. **Panel solve** — solve the ≤32×32 diagonal block for every grid point (one
-   warp per grid point, pivots by `@shfl`).
+1. **Panel solve** — solve the ≤32×32 *triangular* diagonal tile for every grid
+   point (lower-triangular for the forward sweep, upper-triangular for the
+   backward; one warp per grid point, pivots by `@shfl`).
 2. **Trailing update** — a tiled GEMM that subtracts the panel's contribution
    from the trailing rows. Each workgroup loads the `A,B[row-tile, panel]` tile
    into `@localmem` **once** and reuses it across `gt` grid points (tunable via
@@ -88,6 +91,15 @@ The tiled solve is a right-looking blocked algorithm, panel width = warp size:
 This loses to `warp` at small m (per-panel launch overhead) and wins
 increasingly at large m.
 
+**The "dead" zero triangle of `A,B` is never touched.** The right-looking
+blocking keeps every trailing-tile index in the *filled* part of the triangle:
+the forward sweep loads rows `i > koff+plen` against panel columns `j ≤ koff+plen`
+(so `i > j`, the filled subdiagonal), and the backward sweep loads rows
+`i ≤ koff` against columns `j > koff` (so `i < j`, the filled superdiagonal). The
+structurally-zero entries exist as device storage but are never loaded into the
+shared tiles or multiplied — dead storage, not dead computation (and no wasted
+no-op flops).
+
 ## Choosing a solve: the `trsm_strategy` local preference
 
 The choice is a **local preference** (Preferences.jl → `LocalPreferences.toml`)
@@ -97,24 +109,31 @@ Values:
 
 | value    | behaviour |
 |----------|-----------|
-| `auto` (default) | register-`warp` for `m < trsm_crossover()` (default 512), `tiled` for `m ≥` it |
+| `column` (**default**) | the column-oriented solve — **shuffle-free, no per-warp register semantics**, correct for every element type and backend |
+| `auto`   | register-`warp` for `m < trsm_crossover()` (default 512), `tiled` for `m ≥` it |
 | `warp`   | always the register-warp solve |
 | `tiled`  | always the tiled solve |
-| `column` | the original column-oriented solve — **shuffle-free, no per-warp register semantics** |
 
-**Why `column` exists as an escape hatch.** The `warp`/`tiled` solves rely on
-warp shuffles and per-lane register residency. Higher-precision element types
-(e.g. `ComplexF64`-and-beyond, MultiFloats) can blow the register budget or have
-untested per-warp behaviour; `column` is the conservative path that always works.
-Making the switch a local preference means such a case is one setting away,
-without touching code.
+**`column` is the shipped default; `auto`/`warp`/`tiled` are opt-in performance
+modes.** The fast solves rely on warp shuffles and per-lane register residency,
+which are only correct on a backend with a fixed, hardware-shuffled 32-lane warp
+(CUDA / AMDGPU / Metal, and Intel only with the SIMD32 pin). Stock oneAPI and
+non-IEEE element types (MultiFloats / BigFloat) are routed back to `column`
+automatically *inside* the `auto` branch — but an explicit `warp`/`tiled` bypasses
+that gate, so making `column` the default means a user can't silently get garbage
+by setting the strategy without knowing their setup is safe. `ComplexF32` and
+`ComplexF64` are the tested fast-path types (`test_katrsm.jl`'s
+`test_katrsm_kernels` and `test_trsm_strategies` both default to both); the
+genuinely untested/risky cases are MultiFloats and very large `m` (register
+budget), which is what the conservative default protects against. Switching to a
+fast mode is one `set_trsm_strategy!("auto")` / `KAPSEUDO_TRSM=auto` away.
 
-The `auto` crossover at 512 is also what keeps the default path entirely within
+The `auto` crossover at 512 also keeps that opt-in path entirely within
 KernelAbstractions + KernelIntrinsics: the KA+KI register-warp kernel has a
 codegen regression at `R = 16` (m ≈ 512, see below), and routing `m ≥ 512` to the
 tiled solve sidesteps it.
 
-## The R=16 codegen regression and the CUDA-native option
+## The R=16 codegen regression (and the retired CUDA-native diagnosis)
 
 While benchmarking, the KA+KI `warp` solve was found to run *slower than the
 baseline* at exactly m=512 (R=16) — non-monotonic (fine again at R=32). Compiling
@@ -122,11 +141,15 @@ the identical algorithm straight through `@cuda` + `CUDA.shfl_sync` showed smoot
 register use (71→224 for R=4→32, only 32 B spill at every R) and no regression, so
 the cliff is a **KA+KI lowering artifact, not inherent register pressure**.
 
-A CUDA-native warp solve (`_warp_cuda_{fwd,bwd}!` in
-`ext/CUDAPseudospectra.jl`) is kept as an **opt-in** override
-(`KAPSEUDO_CUDA_NATIVE=1`); the portable KA+KI path is the default. In practice
-`auto` avoids the cliff anyway by using `tiled` at m≥512, so the native override
-mainly matters if `warp` is forced at large m.
+This diagnosis was prototyped as a CUDA-native warp solve (`_warp_cuda_{fwd,bwd}!`
+through `@cuda` + `CUDA.shfl_sync`), kept for a while as an opt-in override. It has
+since been **removed** (see `git log` for the implementation): the whole point of
+the package is the minimal portable KA+KI interface, and `auto` already sidesteps
+the R=16 cliff by routing `m ≥ 512` to the `tiled` solve — so the native path was
+only reachable under the unusual combination of `KAPSEUDO_TRSM=warp` *and* a forced
+large `m`, which no default user hits. If the cliff ever needs to be addressed
+head-on, the right fix is upstream in KA/KI lowering, not a hand-rolled per-backend
+kernel here.
 
 ## Benchmarks (6× GTX 1080 Ti, ComplexF32)
 
@@ -159,7 +182,7 @@ is benign FMA-contraction difference accumulated over the iterations.
   `_column_trsm!` drivers; `default_wgs`.
 - `src/KAPseudospectra.jl` — `trsm_strategy()`, `trsm_crossover()`,
   `set_trsm_strategy!()`.
-- `ext/CUDAPseudospectra.jl` — opt-in CUDA-native warp override; GPU precompile
+- `ext/CUDAPseudospectra.jl` — CUDA device-interface overrides + GPU precompile
   workload (runs via `column` so the headless precompile worker never executes the
   shuffle kernels — they JIT at runtime, and CUDA PTX would not survive the
   precompile→runtime boundary anyway).
