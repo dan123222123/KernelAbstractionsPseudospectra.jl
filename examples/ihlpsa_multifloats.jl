@@ -13,7 +13,8 @@
 # ill-conditioned near the spectrum, so a Float64 inverse-Lanczos solve loses accuracy and
 # reports the wrong σ_min there. Running the solve in double-double keeps the recurrence
 # accurate and recovers the correct pseudospectral levels — verified against an independent
-# high-precision oracle in the sibling script `ihlpsa_multifloats_accuracy.jl`.
+# BigFloat high-precision oracle in `test/test_multifloats.jl` (`test_multifloats_accuracy`,
+# run via `julia --project=test test/runtests.jl multifloats`).
 # =============================================================================
 
 using KernelAbstractions

@@ -356,7 +356,11 @@ function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
             _, _, zg = qgrid(T, (-3, 3), (-3, 3), (40, 40))
             σc = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "column")
             tol = real(T) === Float32 ? 1e-4 : 1e-10
-            for strat in ("warp", "tiled", "auto")
+            # `auto` is always safe (it routes warp/tiled→column on backends where the shuffle
+            # isn't usable, e.g. stock oneAPI). Only force explicit `warp`/`tiled` where they're
+            # actually correct (warp_trsm_safe) — otherwise they'd run the stub shuffle and fail.
+            strategies = KAPseudospectra.warp_trsm_safe(backend, false) ? ("warp", "tiled", "auto") : ("auto",)
+            for strat in strategies
                 σ = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => strat)
                 @test maximum(abs.(σ .- σc)) / maximum(abs.(σc)) < tol
             end

@@ -48,6 +48,15 @@ include("test_realsvdpsa.jl")
 include("test_edge_cases.jl")
 include("test_katrsm.jl")
 
+# Extended-precision (MultiFloats) tests are opt-in ("multifloats" in ARGS — NOT part of `all`):
+# they pull MultiFloats/GenericSchur/GenericLinearAlgebra and a slow BigFloat-SVD oracle. The
+# accuracy oracle runs on CPU here; the per-limb warp-shuffle kernel test is invoked from the GPU
+# backend blocks below (it self-gates to backends where the wide-type shuffle is usable).
+if "multifloats" in ARGS
+    include("test_multifloats.jl")
+    test_multifloats_accuracy()
+end
+
 # --- backend dispatch ---
 
 if all_tests || "cpu" in ARGS
@@ -69,6 +78,7 @@ if "cuda" in ARGS
         test_adaptive_backend(CUDABackend())
         test_katrsm_kernels(CUDABackend())
         test_trsm_strategies(CUDABackend())
+        ("multifloats" in ARGS) && test_multifloats_warp_shuffle(CUDABackend())
     end
 end
 
@@ -84,6 +94,7 @@ if "amdgpu" in ARGS
         test_adaptive_backend(ROCBackend())
         test_katrsm_kernels(ROCBackend())
         test_trsm_strategies(ROCBackend())
+        ("multifloats" in ARGS) && test_multifloats_warp_shuffle(ROCBackend())
     end
 end
 
@@ -102,6 +113,7 @@ if "oneapi" in ARGS
         test_adaptive_backend(oneAPIBackend(); types=Ts)
         test_katrsm_kernels(oneAPIBackend(); types=Ts)
         test_trsm_strategies(oneAPIBackend(); types=Ts)
+        ("multifloats" in ARGS) && test_multifloats_warp_shuffle(oneAPIBackend())
     end
 end
 
@@ -118,5 +130,6 @@ if "metal" in ARGS
         test_adaptive_backend(MetalBackend(); types=Ts)
         test_katrsm_kernels(MetalBackend(); types=Ts)
         test_trsm_strategies(MetalBackend(); types=Ts)
+        ("multifloats" in ARGS) && test_multifloats_warp_shuffle(MetalBackend())
     end
 end
