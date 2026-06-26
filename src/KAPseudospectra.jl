@@ -4,27 +4,37 @@ using Preferences
 
 # Triangular-solve strategy for the GPU ihlpsa inner solve. This is a LOCAL PREFERENCE
 # (stored in LocalPreferences.toml via Preferences.jl) so it can be set per-checkout, with
-# the env var KAPSEUDO_TRSM as a runtime override that needs no recompile. Values:
-#   "auto"   – size-based: register-warp solve for small m, tiled solve for large m
-#              (crossover `trsm_crossover()`); the performant default for ComplexF32/F64.
+# the env var KAPSEUDO_TRSM as a runtime override that needs no recompile.
+#
+# The DEFAULT is "column": correct for every element type and every backend, no warp/shuffle
+# assumptions. The warp/tiled fast paths are OPT-IN — they assume a fixed hardware-shuffled
+# 32-lane warp (CUDA/AMDGPU/Metal, or Intel only with the SIMD32 pin) and IEEE element types,
+# and an explicit "warp"/"tiled" bypasses the per-backend safety gate, so they ship off-by-
+# default to avoid surprising the unaware user. Opt in with `set_trsm_strategy!("auto")` (or
+# `KAPSEUDO_TRSM=auto`) once you know your setup is in the supported set. Values:
+#   "column" (default) – column-oriented solve: barrier-based, shuffle-free, no per-warp
+#              register semantics. Correct for every element type / backend. Non-hardware-float
+#              types (MultiFloats / BigFloat / …) are routed here AUTOMATICALLY by `trsmIHL`
+#              regardless of the setting, because the warp/tiled shuffle solves miscompile for them.
+#   "auto"   – size-based opt-in: register-warp solve for small m, tiled solve for large m
+#              (crossover `trsm_crossover()`); the performant choice for ComplexF32/F64 on a
+#              supported backend.
 #   "warp"   – always the register-warp (per-warp shuffle) solve.
 #   "tiled"  – always the tiled (shared-memory A,B reuse) solve.
-#   "column" – the original column-oriented solve: barrier-based, shuffle-free, no per-warp
-#              register semantics. Correct for every element type. Non-hardware-float types
-#              (MultiFloats / BigFloat / …) are routed here AUTOMATICALLY by `trsmIHL`,
-#              overriding any of the above, because the warp/tiled shuffle solves miscompile
-#              for them; this value forces it explicitly for the IEEE-float types too.
-const _VALID_TRSM = ("auto", "warp", "tiled", "column")
+const _VALID_TRSM = ("column", "auto", "warp", "tiled")
 
 function trsm_strategy()
-    s = get(ENV, "KAPSEUDO_TRSM", @load_preference("trsm_strategy", "auto"))
+    s = get(ENV, "KAPSEUDO_TRSM", @load_preference("trsm_strategy", "column"))
     s in _VALID_TRSM || error("invalid trsm strategy $(repr(s)); valid: $(_VALID_TRSM)")
     return s
 end
 
 # m at/above which "auto" switches register-warp → tiled (overridable via KAPSEUDO_TRSM_CROSSOVER).
 # Default 512: tiled overtakes the warp solve there, and routing m≥512 to tiled also avoids the
-# KA+KI register-warp codegen regression at R=16 (m≈512).
+# KA+KI register-warp codegen regression at R=16 (m≈512). NOTE: 512 is calibrated on the 6× GTX
+# 1080 Ti dev node; the true crossover is device-specific. The env var gives per-checkout
+# tuning today; a `tune_trsm_crossover!(backend, dev)` probe that benchmarks warp-vs-tiled and
+# writes the winner into LocalPreferences is a planned follow-up (see PR discussion).
 trsm_crossover() = parse(Int, get(ENV, "KAPSEUDO_TRSM_CROSSOVER", "512"))
 
 # Persist the default strategy into LocalPreferences.toml. Changing it triggers a recompile;
