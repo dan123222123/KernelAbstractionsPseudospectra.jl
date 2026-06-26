@@ -3,8 +3,10 @@
 # `warp_width` / `device_smem_bytes` / `warp_trsm_safe` — all live in src/backend.jl (overridden by
 # the GPU extensions). Split out of ihlpsa.jl; included after ihlpsa_workspace.jl.
 
-# Workgroup size for the trsm kernels: the warp width (capped at m) on GPU, 1 on CPU. Override via
-# the `wgs` kwarg to ihlpsa. (`warp_width` is a per-backend hook in src/backend.jl.)
+# Workgroup size for the column trsm kernel: the warp width (capped at m) on GPU, 1 on CPU. Override
+# via the `wgs` kwarg to ihlpsa. (`warp_width` is a per-backend hook in src/backend.jl.) NOTE: the
+# warp/tiled SHUFFLE solves do NOT use this — they always launch a full `warp_width` warp because a
+# partial-warp `@shfl` is UB (see `_warp_trsm_ka!`), and the tiled kernels are intrinsically 32-wide.
 default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, warp_width(backend)) : 1
 
 # Whether the tiled solve's `@localmem` tiles fit this device's shared memory for pencil `P`.
@@ -79,6 +81,7 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
     m = size(P, 1)
     g = length(zv)
     gt = parse(Int, get(ENV, "KAPSEUDO_TRSM_GT", "32"))
+    gt >= 1 || error("KAPSEUDO_TRSM_GT must be a positive integer (got $gt)")
     nblk = cld(m, 32)
     zc = conj(zv)
     eye = b_is_identity(P)   # B = I ⇒ sB-free trailing kernels (half the shared memory)
@@ -117,9 +120,18 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
 end
 function _warp_trsm_ka!(backend, bV, zv, P, wgs)
     g = length(zv)
-    R = cld(size(P, 1), wgs)
-    @views _batched_warp_forward_solve_pencil(backend, wgs)(bV, conj(zv), P.Ac, P.Bc, Val(R); ndrange=(wgs, g))
-    @views _batched_warp_backward_solve_pencil(backend, wgs)(bV, zv, P.A, P.B, Val(R); ndrange=(wgs, g))
+    # The register-warp shuffle kernels require the workgroup to BE one full hardware warp: each
+    # pivot is broadcast across all `ws` lanes with `@shfl`, whose default membermask names every
+    # lane of the warp. A partial-warp launch (which `default_wgs = min(m, warp_width)` produces for
+    # m < warp_width) would shuffle over lanes that were never launched — UB per the shfl.sync
+    # contract (benign on Pascal, but a portability hazard on Volta+). The kernels already pad rows
+    # past m via their `ir<=m`/`j<=m` guards — exactly the wgs=32 / m=8,16,31 config the unit tests
+    # exercise — so always launch a full warp regardless of m (and of the passed `wgs`, which stays
+    # meaningful only for the shuffle-free column solve).
+    ws = warp_width(backend)
+    R = cld(size(P, 1), ws)
+    @views _batched_warp_forward_solve_pencil(backend, ws)(bV, conj(zv), P.Ac, P.Bc, Val(R); ndrange=(ws, g))
+    @views _batched_warp_backward_solve_pencil(backend, ws)(bV, zv, P.A, P.B, Val(R); ndrange=(ws, g))
 end
 function _column_trsm!(backend, bV, zv, P, wgs)
     g = length(zv)

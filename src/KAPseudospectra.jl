@@ -13,9 +13,11 @@ using Preferences
 # default to avoid surprising the unaware user. Opt in with `set_trsm_strategy!("auto")` (or
 # `KAPSEUDO_TRSM=auto`) once you know your setup is in the supported set. Values:
 #   "column" (default) – column-oriented solve: barrier-based, shuffle-free, no per-warp
-#              register semantics. Correct for every element type / backend. Non-hardware-float
-#              types (MultiFloats / BigFloat / …) are routed here AUTOMATICALLY by `trsmIHL`
-#              regardless of the setting, because the warp/tiled shuffle solves miscompile for them.
+#              register semantics. Correct for every element type / backend. Under "auto", a
+#              non-hardware-float pencil (MultiFloats / BigFloat / …) is routed here only where
+#              `warp_trsm_safe(backend, wide)` is false (stock oneAPI; Metal unless opted in); on
+#              CUDA/AMDGPU a wide pencil instead runs warp/tiled via the per-limb `_trsm_shfl`
+#              override (MultiFloatsPseudospectra). An explicit "warp"/"tiled" bypasses this gate.
 #   "auto"   – size-based opt-in: register-warp solve for small m, tiled solve for large m
 #              (crossover `trsm_crossover()`); the performant choice for ComplexF32/F64 on a
 #              supported backend.

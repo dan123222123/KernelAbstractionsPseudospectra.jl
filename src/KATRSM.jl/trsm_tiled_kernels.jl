@@ -183,7 +183,7 @@ end
 # that conditionally touches `sB` would still reserve both tiles regardless of the flag —
 # defeating the entire point of the eye path (the halved shared-memory footprint). The B=I-vs-
 # pencil choice is therefore made by dispatch at the host call site (see the `eye` branch in
-# `_tiled_trsm!`, src/ihlpsa.jl), which picks the right kernel symbol; a `Val{eye}` tag would
+# `_tiled_trsm!`, src/ihlpsa_trsm.jl), which picks the right kernel symbol; a `Val{eye}` tag would
 # compile to these same two bodies and save no lines.
 
 @kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles)

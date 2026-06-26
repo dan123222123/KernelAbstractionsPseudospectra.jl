@@ -12,16 +12,6 @@ function forward_solve(b::AbstractVector{T}, M) where {T<:Number}
     forward_solve!(x, M)
     return x
 end
-function back_solve(b::AbstractVector{T}, M) where {T<:Number}
-    @assert m == n
-    for k = 1:m
-        @assert !iszero(M[k, k])
-    end
-    x = deepcopy(b)
-    back_solve!(x, M)
-    return x
-end
-
 function batched_back_solve!(bV, MV)
     backend = get_backend(bV.data)
     @assert get_backend(MV.data) == backend
@@ -79,18 +69,5 @@ function blkco_forward_solve!(b, M; nblkcols=32, blkfsk=_blk_forward_solve_sm3)
         if !isempty(mvrows)
             @views b[mvrows] .-= (M[mvrows, cols] * b[cols])
         end
-    end
-end
-
-function batched_blkco_backward_solve!(bv, Mv; nblkcols=32, blkbsk=_blk_backward_solve_sm3v1)
-    @assert length(Mv) == length(bv)
-    for i in eachindex(Mv)
-        @views blkcol_backward_solve!(bv[i], Mv[i]; nblkcols, blkbsk)
-    end
-end
-function batched_blkco_forward_solve!(bv, Mv; nblkcols=32, blkfsk=_blk_forward_solve_sm3)
-    @assert length(Mv) == length(bv)
-    for i in eachindex(Mv)
-        @views blkcol_forward_solve!(bv[i], Mv[i]; nblkcols, blkfsk)
     end
 end

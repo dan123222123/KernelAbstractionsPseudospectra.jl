@@ -40,8 +40,12 @@ fallback (see the preference section).
 ### 2. Warp-register (`warp`)
 
 `_batched_warp_{forward,backward}_solve_pencil` (`trsm_warp_kernels.jl`). The
-workgroup is already one warp (`default_wgs = min(m,32) = 32`), so the block
-barriers are wildly overpriced. This version keeps the RHS **in registers** —
+workgroup is one full hardware warp — `_warp_trsm_ka!` always launches
+`warp_width(backend)` lanes (32 on CUDA), padding rows past `m` with the kernels'
+`ir<=m`/`j<=m` guards, even when `m < 32` (so the `@shfl` membermask never names an
+unlaunched lane; `default_wgs = min(m, warp_width)` governs only the column solve).
+The block barriers of the column kernel are therefore wildly overpriced here. This
+version keeps the RHS **in registers** —
 lane ℓ owns rows ℓ, ℓ+32, … → `R = cld(m,32)` register slots — and broadcasts each
 pivot lane-to-lane with a warp shuffle (`KernelIntrinsics.@shfl`), which *also*
 synchronises the warp. Result: **no block barriers, no global round-trips on `b`**.
@@ -118,15 +122,19 @@ Values:
 **`column` is the shipped default; `auto`/`warp`/`tiled` are opt-in performance
 modes.** The fast solves rely on warp shuffles and per-lane register residency,
 which are only correct on a backend with a fixed, hardware-shuffled 32-lane warp
-(CUDA / AMDGPU / Metal, and Intel only with the SIMD32 pin). Stock oneAPI and
-non-IEEE element types (MultiFloats / BigFloat) are routed back to `column`
-automatically *inside* the `auto` branch — but an explicit `warp`/`tiled` bypasses
-that gate, so making `column` the default means a user can't silently get garbage
-by setting the strategy without knowing their setup is safe. `ComplexF32` and
-`ComplexF64` are the tested fast-path types (`test_katrsm.jl`'s
-`test_katrsm_kernels` and `test_trsm_strategies` both default to both); the
-genuinely untested/risky cases are MultiFloats and very large `m` (register
-budget), which is what the conservative default protects against. Switching to a
+(CUDA / AMDGPU / Metal, and Intel only with the SIMD32 pin). The `auto` branch
+routes back to `column` exactly where `warp_trsm_safe(backend, wide)` is false —
+stock oneAPI (no shuffle backend / no SIMD pin) and Metal unless opted in — so on
+those a non-IEEE element type (MultiFloats / BigFloat) also lands on `column`. On
+CUDA / AMDGPU, where `warp_trsm_safe` is `true` regardless of the element type, a
+wide pencil under `auto` instead runs warp/tiled through the per-limb `_trsm_shfl`
+override (`MultiFloatsPseudospectra`), not `column`. An explicit `warp`/`tiled`
+bypasses the gate entirely — so making `column` the default means a user can't
+silently get garbage by setting the strategy without knowing their setup is safe.
+`ComplexF32` and `ComplexF64` are the tested fast-path types (`test_katrsm.jl`'s
+`test_katrsm_kernels` and `test_trsm_strategies`, the latter over both standard and
+generalized `B≠I` pencils); the genuinely untested/risky cases are MultiFloats and
+very large `m` (register budget), which is what the conservative default protects against. Switching to a
 fast mode is one `set_trsm_strategy!("auto")` / `KAPSEUDO_TRSM=auto` away.
 
 The `auto` crossover at 512 also keeps that opt-in path entirely within
