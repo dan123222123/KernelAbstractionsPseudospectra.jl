@@ -29,13 +29,13 @@ function trsm_strategy()
     return s
 end
 
-# m at/above which "auto" switches register-warp → tiled (overridable via KAPSEUDO_TRSM_CROSSOVER).
-# Default 512: tiled overtakes the warp solve there, and routing m≥512 to tiled also avoids the
-# KA+KI register-warp codegen regression at R=16 (m≈512). NOTE: 512 is calibrated on the 6× GTX
-# 1080 Ti dev node; the true crossover is device-specific. The env var gives per-checkout
-# tuning today; a `tune_trsm_crossover!(backend, dev)` probe that benchmarks warp-vs-tiled and
-# writes the winner into LocalPreferences is a planned follow-up (see PR discussion).
-trsm_crossover() = parse(Int, get(ENV, "KAPSEUDO_TRSM_CROSSOVER", "512"))
+# m at/above which "auto" switches register-warp → tiled. Resolution order: the
+# KAPSEUDO_TRSM_CROSSOVER env var > the `trsm_crossover` LOCAL PREFERENCE > the 512 default.
+# 512: tiled overtakes the warp solve there, and routing m≥512 to tiled also avoids the KA+KI
+# register-warp codegen regression at R=16 (m≈512). NOTE: 512 is calibrated on the 6× GTX 1080 Ti
+# dev node; the true crossover is device-specific — run `tune_trsm_crossover!(backend, dev)` (see
+# tune.jl) on the target hardware to benchmark warp-vs-tiled and persist the measured crossover.
+trsm_crossover() = parse(Int, get(ENV, "KAPSEUDO_TRSM_CROSSOVER", @load_preference("trsm_crossover", "512")))
 
 # Persist the default strategy into LocalPreferences.toml. Changing it triggers a recompile;
 # the change takes effect on the next Julia session (use the KAPSEUDO_TRSM env var to switch live).
@@ -79,6 +79,28 @@ function set_intel_force_simd32!(flag::Bool)
 end
 export set_intel_force_simd32!
 
+# ── Metal: opt-in for the warp/tiled fast path under `auto` ────────────────────────────
+# Unlike oneAPI (where the stock KernelIntrinsics shuffle is a stub), Metal's warp shuffles are
+# correct, so this is a policy gate, not a correctness one: it keeps the always-correct `column`
+# solve as Metal's `auto` choice by default, matching how oneAPI requires an explicit opt-in, so
+# the fast path isn't silently on for a modest speedup. The Metal extension's `warp_trsm_safe`
+# reads this. (Explicit KAPSEUDO_TRSM=warp/tiled still bypasses the gate, as on every backend.)
+metal_warp_trsm() = @load_preference("metal_warp_trsm", false)
+"""
+    set_metal_warp_trsm!(flag::Bool)
+
+Persist whether the `auto` trsm strategy may use the warp/tiled fast path on Metal (default
+`false` → `auto` uses the always-correct `column` solve on Metal). Metal's shuffles are correct,
+so this is an opt-in for a modest speedup, mirroring oneAPI's `set_intel_force_simd32!`. Stored
+in LocalPreferences.toml; restart Julia (or set `KAPSEUDO_TRSM=warp`/`tiled`) for it to take effect.
+"""
+function set_metal_warp_trsm!(flag::Bool)
+    @set_preferences!("metal_warp_trsm" => flag)
+    @info "metal_warp_trsm = $flag (LocalPreferences.toml); restart Julia or set KAPSEUDO_TRSM=warp/tiled to switch now"
+    return flag
+end
+export set_metal_warp_trsm!
+
 include("core.jl")
 export MatrixPencil
 
@@ -87,6 +109,8 @@ export ℂsvdpsa, ℝsvdpsa
 
 include("ihlpsa.jl")
 export ihlpsa
+
+include("tune.jl")   # tune_trsm_crossover!: per-device warp↔tiled crossover benchmark probe
 export set_pdiv_accurate   # Float16/Float32 GPU-solve precision toggle (from KATRSM)
 
 # Build a 2D grid of complex shifts. Returns (gx, gy, zg) where gx and gy are

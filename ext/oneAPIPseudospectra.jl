@@ -14,6 +14,12 @@ KAPseudospectra.get_bgarray(B::oneAPI.oneAPIBackend) = oneAPI.oneArray
 KAPseudospectra.device_bytes_available(B::oneAPI.oneAPIBackend) = (Sys.free_memory() |> Int)
 # No memory-pool reclaim on oneAPI; fall back to GC.
 KAPseudospectra.device_reclaim(B::oneAPI.oneAPIBackend) = GC.gc()
+# Per-device queries for the trsm routing. Warp width is pinned to 32 by the SIMD32 override
+# (set_intel_force_simd32!); the @localmem budget is the device's max shared-local-memory (queried
+# via Level Zero — e.g. 64 KB on Intel UHD Graphics, vs the conservative 48 KB default).
+KAPseudospectra.warp_width(B::oneAPI.oneAPIBackend) = 32
+KAPseudospectra.device_smem_bytes(B::oneAPI.oneAPIBackend) =
+    Int(oneAPI.oneL0.compute_properties(oneAPI.device()).maxSharedLocalMemory)
 # oneAPI.jl statically declares `supports_float64` false for every backend, even
 # FP64-capable Arc/Max parts. Override the package's `supports_fp64` hook with a
 # device-accurate Level-Zero query so F64 auto-enables exactly where the hardware

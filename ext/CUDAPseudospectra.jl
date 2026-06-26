@@ -18,6 +18,10 @@ KAPseudospectra.devices(B::CUDA.CUDABackend) = CUDA.devices()
 KAPseudospectra.get_bgarray(B::CUDA.CUDABackend) = CUDA.CuArray
 KAPseudospectra.device_bytes_available(B::CUDA.CUDABackend) = CUDA.free_memory()
 KAPseudospectra.device_reclaim(B::CUDA.CUDABackend) = CUDA.reclaim()
+# Per-device queries for the trsm routing (replace the hardcoded warp width / 48 KB smem proxy).
+KAPseudospectra.warp_width(B::CUDA.CUDABackend) = Int(CUDA.warpsize(CUDA.device()))   # 32 on all current NVIDIA HW
+KAPseudospectra.device_smem_bytes(B::CUDA.CUDABackend) =
+    Int(CUDA.attribute(CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK))
 
 ## precompile gpu code (only when a device is actually usable)
 if CUDA.functional()

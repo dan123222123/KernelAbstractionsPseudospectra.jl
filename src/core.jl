@@ -7,9 +7,10 @@ struct MatrixPencil{T} <: AbstractMatrixPencil{T}
     B::AbstractMatrix{T}
 end
 
-# User-facing constructor: always returns a SchurMatrixPencil so the GPU trsm
-# path (which dispatches on SchurMatrixPencil) just works. Direct access to the
-# raw, non-factored MatrixPencil struct is still possible via MatrixPencil{T}(A, B).
+# User-facing constructor: always returns a `SchurMatrixPencil` (a `StandardSchurMatrixPencil`
+# for B = I, a `GeneralizedSchurMatrixPencil` for B ≠ I) so the GPU trsm path (which dispatches
+# on `SchurMatrixPencil`) just works. Direct access to the raw, non-factored MatrixPencil struct
+# is still possible via MatrixPencil{T}(A, B).
 function MatrixPencil(A::AbstractMatrix{T}, B::Union{AbstractMatrix{T},UniformScaling}=I) where {T<:Complex}
     if B isa UniformScaling
         return MatrixPencil(schur(A))
@@ -18,38 +19,45 @@ function MatrixPencil(A::AbstractMatrix{T}, B::Union{AbstractMatrix{T},UniformSc
     return MatrixPencil(schur(A, B))
 end
 
-struct SchurMatrixPencil{T} <: AbstractMatrixPencil{T}
+# Schur-factored pencils used by the GPU trsm path. `SchurMatrixPencil` is the abstract umbrella
+# (so `::SchurMatrixPencil` dispatch and `isa` checks cover both); the concrete subtype encodes
+# whether B = I, so the tiled solve's B-tile skip (and the pencil arithmetic) is chosen by
+# DISPATCH on the type rather than a runtime `b_is_identity` flag. Both carry the same fields.
+#
+# Z is the right Schur transform: A_orig = Z * A * Z' (standard) or A_orig = Q * A * Z',
+# B_orig = Q * B * Z' (generalized). Used by ihlpsa to bring a user-supplied x₀ from the
+# original-A basis into the Schur basis so ihlpsa's Lanczos iterates match textbook Lanczos on
+# the original problem with the same x₀. Lazy adjoint by default to avoid duplicating m×m bytes.
+abstract type SchurMatrixPencil{T} <: AbstractMatrixPencil{T} end
+
+struct StandardSchurMatrixPencil{T} <: SchurMatrixPencil{T}     # B = I (standard, non-generalized)
     A::AbstractMatrix{T}
     Ac::AbstractMatrix{T}
     B::AbstractMatrix{T}
     Bc::AbstractMatrix{T}
-    # Right Schur transform: A_orig = Z * A * Z' (standard) or A_orig = Q * A * Z',
-    # B_orig = Q * B * Z' (generalized). Used by ihlpsa to bring a user-supplied
-    # x₀ from the original-A basis into the Schur basis so that ihlpsa's Lanczos
-    # iterates match textbook Lanczos applied to the original problem with the
-    # same x₀. Lazy adjoint by default to avoid duplicating m×m bytes.
     Z::AbstractMatrix{T}
-    # True when B is the identity (standard, non-generalized pencil). Lets the tiled GPU
-    # solve skip the B tile in its trailing update — off-diagonal B[i,j]=0, so the z·B term
-    # vanishes — halving its shared memory (better occupancy, and a wide element type's single
-    # tile now fits the 48 KB limit). Conservatively false for direct/backward-compat builds.
-    b_is_identity::Bool
 end
-# 5-arg (no flag): conservative b_is_identity=false.
-SchurMatrixPencil{T}(A, Ac, B, Bc, Z) where {T<:Complex} =
-    SchurMatrixPencil{T}(A, Ac, B, Bc, Z, false)
-# Backward-compat constructor for direct use (no Schur transform known).
-# Stores a typed Diagonal of ones (O(m) memory) so x₀-transform via Z'*x is a no-op
-# and Adapt-to-GPU is essentially free.
-SchurMatrixPencil{T}(A, Ac, B, Bc) where {T<:Complex} =
-    SchurMatrixPencil{T}(A, Ac, B, Bc, Diagonal(ones(T, size(A, 1))))
+struct GeneralizedSchurMatrixPencil{T} <: SchurMatrixPencil{T}  # B ≠ I (generalized pencil)
+    A::AbstractMatrix{T}
+    Ac::AbstractMatrix{T}
+    B::AbstractMatrix{T}
+    Bc::AbstractMatrix{T}
+    Z::AbstractMatrix{T}
+end
+
+# Whether B = I — resolved by type, replacing the former runtime `b_is_identity` field. Lets the
+# tiled GPU trailing update skip the B tile (off-diagonal B[i,j]=0 ⇒ the z·B term vanishes),
+# halving its shared memory (better occupancy; a wide element type's single tile fits the 48 KB
+# limit). The non-`eye` solver paths still read B/Bc (they hold the actual identity matrix).
+b_is_identity(::StandardSchurMatrixPencil) = true
+b_is_identity(::GeneralizedSchurMatrixPencil) = false
 
 function MatrixPencil(F::Schur{T}) where {T<:Complex}
     Iₘ = Matrix{T}(I, size(F.T))
-    SchurMatrixPencil{T}(F.T, F.T', Iₘ, Iₘ, F.Z, true)   # B = I (standard pencil)
+    StandardSchurMatrixPencil{T}(F.T, F.T', Iₘ, Iₘ, F.Z)   # B = I (standard pencil)
 end
 function MatrixPencil(F::GeneralizedSchur{T}) where {T<:Complex}
-    SchurMatrixPencil{T}(F.S, F.S', F.T, F.T', F.Z, false)
+    GeneralizedSchurMatrixPencil{T}(F.S, F.S', F.T, F.T', F.Z)
 end
 
 Base.size(x::AbstractMatrixPencil) = size(x.A)
@@ -57,7 +65,8 @@ Base.size(x::AbstractMatrixPencil, i) = size(x.A, i)
 KernelAbstractions.get_backend(x::AbstractMatrixPencil) = get_backend(x.A)
 
 Adapt.@adapt_structure MatrixPencil
-Adapt.@adapt_structure SchurMatrixPencil
+Adapt.@adapt_structure StandardSchurMatrixPencil
+Adapt.@adapt_structure GeneralizedSchurMatrixPencil
 
 """
     validate(zg, A, B, γ=missing, δ=missing)

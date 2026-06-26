@@ -24,6 +24,15 @@ function KAPseudospectra.device_bytes_available(B::Metal.MetalBackend)
 end
 # Metal has no explicit memory-pool reclaim; fall back to GC.
 KAPseudospectra.device_reclaim(B::Metal.MetalBackend) = GC.gc()
+# Per-device queries for the trsm routing. Apple SIMD-groups are 32-wide; threadgroup memory is
+# the @localmem budget for the tiled solve. NOTE: untested on hardware.
+KAPseudospectra.warp_width(B::Metal.MetalBackend) = 32
+KAPseudospectra.device_smem_bytes(B::Metal.MetalBackend) = Int(Metal.device().maxThreadgroupMemoryLength)
+# Make the warp/tiled fast path opt-in on Metal (like oneAPI), defaulting to the always-correct
+# column solve under `auto`. Metal's shuffles ARE correct, so this is a policy gate (modest
+# speedup vs the column default) rather than a correctness one — flip it with set_metal_warp_trsm!.
+KAPseudospectra.warp_trsm_safe(::Metal.MetalBackend, wide::Bool) =
+    !wide && KAPseudospectra.metal_warp_trsm()
 # No `supports_fp64` override needed: the default defers to `supports_float64`, which
 # Metal declares `false` (no `double` in MSL), so F64 paths skip Metal — F32 only. Metal
 # also needs `KAPseudospectra.set_pdiv_accurate(false)` so the F32 solves compile (see KATRSM).
