@@ -24,7 +24,7 @@ their own precision instead of widening to F64 — see `src/KATRSM.jl/KATRSM.jl`
 All three produce numerically equivalent results (same `_pdiv`, same `zBAij`,
 same per-column/per-row update order); they differ only in how the warp is mapped
 onto the work. They live in `src/KATRSM.jl/` and are selected at runtime by
-`trsmIHL` (`src/ihlpsa.jl`).
+`trsmIHL` (`src/ihlpsa_trsm.jl`).
 
 ### 1. Column-oriented (`column`) — the baseline
 
@@ -65,7 +65,7 @@ kernel level for small/medium m.
 ### 3. Tiled (`tiled`)
 
 `_tiled_panel_{forward,backward}` + `_tiled_trailing_{forward,backward}`
-(`trsm_tiled_kernels.jl`), driven by `_tiled_trsm!` (`src/ihlpsa.jl`).
+(`trsm_tiled_kernels.jl`), driven by `_tiled_trsm!` (`src/ihlpsa_trsm.jl`).
 
 For large `m` the per-grid-point solves become **bandwidth-bound**: every warp
 re-streams the whole `m×m` `A,B` pencil from DRAM with zero reuse across grid
@@ -178,8 +178,11 @@ is benign FMA-contraction difference accumulated over the iterations.
 - `src/KATRSM.jl/trsm_pencil_kernels.jl` — column-oriented baseline kernels.
 - `src/KATRSM.jl/trsm_warp_kernels.jl` — `@generated` register-warp kernels.
 - `src/KATRSM.jl/trsm_tiled_kernels.jl` — KA/KI tiled panel + trailing kernels.
-- `src/ihlpsa.jl` — `trsmIHL` strategy dispatch; `_warp_trsm_ka!`, `_tiled_trsm!`,
-  `_column_trsm!` drivers; `default_wgs`.
+- `src/ihlpsa_trsm.jl` — `trsmIHL` strategy dispatch; `_warp_trsm_ka!`, `_tiled_trsm!`,
+  `_column_trsm!` drivers; `default_wgs`, `tiled_tiles_fit`; `lockstep_ihl!`.
+- `src/backend.jl` — per-backend device interface (CPU defaults; GPU extensions override):
+  `warp_width`, `device_smem_bytes`, `warp_trsm_safe`, the device/array/memory ops, `supports_fp64`.
+- `src/tune.jl` — `tune_trsm_crossover!(backend, dev)`: per-device warp↔tiled crossover probe.
 - `src/KAPseudospectra.jl` — `trsm_strategy()`, `trsm_crossover()`,
   `set_trsm_strategy!()`.
 - `ext/CUDAPseudospectra.jl` — CUDA device-interface overrides + GPU precompile

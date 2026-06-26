@@ -13,6 +13,14 @@ backend = select_backend(ARGS)
 gpu = KernelAbstractions.isgpu(backend)
 devs = gpu ? KAPseudospectra.devices(backend) : missing   # devices(::CPU) is scalar → use missing
 
+# This bench FORCES KAPSEUDO_TRSM=warp/tiled, which run a warp-shuffle kernel. On a GPU where the
+# shuffle isn't usable (stock oneAPI's KernelIntrinsics @shfl is a TODO stub; Metal without the
+# opt-in) that would miscompile/crash, so fail fast with guidance. (On CPU the strategy is a no-op.)
+if gpu && !KAPseudospectra.warp_trsm_safe(backend, false)
+    error("warp/tiled solves aren't usable on $(backend) (warp_trsm_safe == false) — use a backend " *
+          "where they run (CUDA/AMDGPU, or oneAPI/Metal with the opt-in enabled), or run on cpu.")
+end
+
 const T = ComplexF32
 const NIT = 20            # fixed-driver depth; also the adaptive nit_max ceiling (apples-to-apples)
 const REPS = 3
