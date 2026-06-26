@@ -1,13 +1,11 @@
-# General per-backend device interface: where arrays live, the device handle, free memory,
-# reclaim, and the FP64-capability query. CPU defaults here; each GPU extension
-# (ext/*Pseudospectra.jl) overrides these for its backend. This is the broad backend abstraction
-# shared by the ihlpsa fixed/adaptive drivers and the bench scripts — it is NOT specific to the
-# triangular solves, so it lives at module level rather than inside ihlpsa. (The trsm-specific
-# device-routing hooks — warp_width, device_smem_bytes, warp_trsm_safe — stay with the trsm logic
-# in ihlpsa_trsm.jl.)
+# Per-backend device interface: the hooks the GPU extensions (ext/*Pseudospectra.jl) specialize for
+# their backend, with CPU/default implementations here. This is the single place the backend
+# abstraction lives — array type, device handle, free memory, reclaim, FP64 capability, and the
+# device-property queries the trsm solves route on (warp width, shared-memory budget, warp-shuffle
+# safety). The trsm LOGIC that consumes these (default_wgs, tiled_tiles_fit, trsmIHL, the solve
+# drivers) stays in ihlpsa_trsm.jl.
 
-# Device-operations interface: CPU defaults here; each GPU extension overrides these
-# (array type, device handle access, free-memory query, reclaim).
+# ── device / array / memory operations (CPU defaults; each GPU extension overrides) ──
 get_bgarray(B::CPU) = Array
 device(B::CPU) = CPU()
 devices(B::CPU) = CPU()
@@ -19,3 +17,27 @@ device_reclaim(B::CPU) = GC.gc()
 # `KernelAbstractions.supports_float64`; overridable so the oneAPI extension can substitute a
 # device-accurate FP64 query (see its note). F64 paths skip unsupported devices.
 supports_fp64(B) = KernelAbstractions.supports_float64(B)
+
+# ── device-property queries the trsm solves route on (defaults here; extensions query hardware) ──
+
+# Warp/subgroup width used by the register-warp / tiled solves (one shuffle domain). The default is
+# 32, but this is a per-backend QUERY hook, not a baked constant: each GPU extension overrides it
+# with the actual hardware value — `CUDA.warpsize` (32), `AMDGPU` warpSize (32 on RDNA, 64 on CDNA),
+# 32 for Metal SIMD-groups, 32 for Intel under the SIMD32 pin (`set_intel_force_simd32!`).
+# KernelAbstractions has no portable pre-launch query, so the value comes from each backend's API.
+warp_width(backend) = 32
+
+# Shared-memory bytes per workgroup available to the tiled solve's `@localmem` tiles. Default a
+# conservative 48 KB (the static-shared-memory limit on Volta/Turing/early-Ampere); each GPU
+# extension overrides it with the real device query so the tiled-vs-column routing uses the actual
+# per-device budget instead of an assumed constant.
+device_smem_bytes(backend) = 48 * 1024
+
+# Whether the register-warp / tiled solves (which broadcast pivots with warp shuffles) are correct
+# under the "auto" strategy on this backend. True for CUDA / AMDGPU / Metal: fixed warp/wavefront/
+# SIMD width + a hardware shuffle. On oneAPI it needs BOTH the KernelIntrinsics oneAPI shuffle
+# backend AND a pinned SIMD width, so that extension overrides this; without them `auto` stays on
+# the shuffle-free `column` solve — correct, just not the fast path. Metal also gates it behind an
+# opt-in preference. (Explicit KAPSEUDO_TRSM=warp/tiled is opt-in and not gated.) `wide` is true for
+# non-IEEE element types (MultiFloats / BigFloat); the oneAPI override keeps those on `column`.
+warp_trsm_safe(backend, wide) = true

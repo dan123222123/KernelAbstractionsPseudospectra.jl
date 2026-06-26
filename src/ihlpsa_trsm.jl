@@ -1,47 +1,22 @@
-# Trsm-specific device hooks (warp width, shared-memory budget, warp-shuffle safety), the
-# `trsm_strategy` routing (`trsmIHL`) + the three solve drivers, and the `lockstep_ihl!` inner
-# Lanczos loop. The general per-backend device interface lives in src/backend.jl. Split out of
-# ihlpsa.jl; included after ihlpsa_workspace.jl.
+# Trsm strategy routing (`trsmIHL`) + the three solve drivers + the `lockstep_ihl!` inner Lanczos
+# loop. The per-backend device hooks these consume — the device/array/memory interface plus
+# `warp_width` / `device_smem_bytes` / `warp_trsm_safe` — all live in src/backend.jl (overridden by
+# the GPU extensions). Split out of ihlpsa.jl; included after ihlpsa_workspace.jl.
 
-## DEVICE FUNCTIONS ##
-
-# Warp/subgroup width used by the register-warp / tiled solves (one shuffle domain). The default
-# is 32, but this is a per-backend QUERY hook, not a baked constant: each GPU extension overrides
-# it with the actual hardware value — `CUDA.warpsize` (32), `AMDGPU.wavefront_size()` (32 on RDNA,
-# 64 on CDNA), 32 for Metal SIMD-groups, and 32 for Intel under the SIMD32 pin
-# (`set_intel_force_simd32!`). KernelAbstractions has no portable pre-launch query, so the value
-# comes from each backend's own API in its extension.
-warp_width(backend) = 32
 # Workgroup size for the trsm kernels: the warp width (capped at m) on GPU, 1 on CPU. Override via
-# the `wgs` kwarg to ihlpsa.
+# the `wgs` kwarg to ihlpsa. (`warp_width` is a per-backend hook in src/backend.jl.)
 default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, warp_width(backend)) : 1
-
-# Shared-memory bytes per workgroup available to the tiled solve's `@localmem` tiles. Default a
-# conservative 48 KB (the static-shared-memory limit on Volta/Turing/early-Ampere); each GPU
-# extension overrides it with the real device query so the tiled-vs-column routing uses the
-# actual per-device budget instead of an assumed constant.
-device_smem_bytes(backend) = 48 * 1024
 
 # Whether the tiled solve's `@localmem` tiles fit this device's shared memory for pencil `P`.
 # Each trailing tile is 32×32×sizeof(ET); the generic (B≠I) kernels use two tiles (sA+sB), the
-# B=I kernels one. This replaces the former `!wide || b_is_identity` type-proxy with the actual
-# computed footprint vs the queried per-device limit — so a wide B≠I pencil can still tile on a
-# large-shared-memory device, and a normally-fitting type is correctly rejected on a tiny one.
+# B=I kernels one — compared against the queried `device_smem_bytes` (src/backend.jl). Replaces the
+# former `!wide || b_is_identity` type-proxy, so a wide B≠I pencil can still tile on a large-shared-
+# memory device and a normally-fitting type is correctly rejected on a tiny one.
 function tiled_tiles_fit(backend, P)
     tile = sizeof(eltype(P.A)) * 32 * 32
     ntiles = b_is_identity(P) ? 1 : 2
     return ntiles * tile <= device_smem_bytes(backend)
 end
-
-# Whether the register-warp / tiled solves (which broadcast pivots with warp shuffles) are
-# correct under the "auto" strategy on this backend. True for CUDA / AMDGPU / Metal: fixed
-# warp/wavefront/SIMD width + a hardware shuffle. On oneAPI it requires BOTH the
-# KernelIntrinsics oneAPI shuffle backend AND a pinned SIMD width, so the oneAPI extension
-# overrides this; without them, `auto` stays on the shuffle-free `column` solve — correct,
-# just not the fast path. (Explicit KAPSEUDO_TRSM=warp/tiled is opt-in and not gated.)
-# `wide` is true for non-IEEE element types (MultiFloats / BigFloat); the oneAPI override
-# keeps those on `column` regardless (their warp/tiled SPIR-V codegen is not yet functional).
-warp_trsm_safe(backend, wide) = true
 
 # non-cpu solve step in lockstep_ihl!
 #
@@ -183,9 +158,5 @@ function lockstep_ihl!(α, β, ihl::IHLworkspace, nit, g; wgs=missing, start::In
     synchronize(backend)
 end
 
-# The general per-backend device interface (get_bgarray / device / devices / device! /
-# device_bytes_available / device_reclaim / supports_fp64) lives at module level in
-# `src/backend.jl` — it's the broad backend abstraction, not trsm-specific. Only the
-# trsm-specific device hooks above (warp_width, device_smem_bytes, warp_trsm_safe) stay here.
-
-## END DEVICE FUNCTIONS ##
+# (All per-backend device hooks — the device/array/memory interface, supports_fp64, warp_width,
+# device_smem_bytes, warp_trsm_safe — live in src/backend.jl, overridden by the GPU extensions.)
