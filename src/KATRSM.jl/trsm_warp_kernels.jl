@@ -167,3 +167,135 @@ end
     gi = @index(Group)
     @inline _warp_reg_backward_solve_pencil!(bv[gi], zv[gi], A, B, lane, ws, Val(R))
 end
+
+# ── B = I ("eye") register-warp solves ──
+# For a standard pencil M = zI − A the pivot is (z − A[j,j]) and every off-diagonal update is
+# (−A[i,j]) — the z·B term vanishes (every update touches a strictly off-diagonal entry, where
+# B[i,j]=0). These drop the B argument and skip its reads (~half the matrix-data DRAM traffic for
+# B=I). Numerically equivalent to the generic warp kernels for B=I and backward-stable vs LAPACK;
+# they match to round-off (~1 ULP, not bit-for-bit — the shorter z−A / −A expressions let NVPTX
+# contract FMAs differently). Dispatched from `_warp_trsm_ka!` when `b_is_identity(P)`.
+@inline @generated function _warp_reg_forward_solve_eye!(bg, z, A, lane, ws, ::Val{R}) where {R}
+    body = Expr(:block, :(m = size(A, 1)), :(ET = eltype(bg)))
+    for r in 1:R
+        bl = _blsym(r)
+        push!(body.args, quote
+            local ir = lane + $(r - 1) * ws
+            $bl = ir <= m ? bg[ir] : zero(ET)
+        end)
+    end
+    for p in 1:R
+        blp = _blsym(p)
+        push!(body.args, quote
+            for jj = 1:ws
+                local j = $(p - 1) * ws + jj
+                if j <= m
+                    local piv = (lane == jj) ? _pdiv($blp, z - A[j, j]) : zero(ET)
+                    local xj = _trsm_shfl(piv, jj)
+                    if lane == jj
+                        $blp = xj
+                    elseif lane > jj
+                        local i = $(p - 1) * ws + lane
+                        if i <= m
+                            $blp = $blp - xj * (-A[i, j])
+                        end
+                    end
+                end
+            end
+        end)
+        for q in (p+1):R
+            blq = _blsym(q)
+            push!(body.args, quote
+                for jj = 1:ws
+                    local j = $(p - 1) * ws + jj
+                    if j <= m
+                        local xj = _trsm_shfl($blp, jj)
+                        local i = $(q - 1) * ws + lane
+                        if i <= m
+                            $blq = $blq - xj * (-A[i, j])
+                        end
+                    end
+                end
+            end)
+        end
+    end
+    for r in 1:R
+        bl = _blsym(r)
+        push!(body.args, quote
+            local ir = lane + $(r - 1) * ws
+            if ir <= m
+                bg[ir] = $bl
+            end
+        end)
+    end
+    push!(body.args, :(return nothing))
+    body
+end
+@inline @generated function _warp_reg_backward_solve_eye!(bg, z, A, lane, ws, ::Val{R}) where {R}
+    body = Expr(:block, :(m = size(A, 1)), :(ET = eltype(bg)))
+    for r in 1:R
+        bl = _blsym(r)
+        push!(body.args, quote
+            local ir = lane + $(r - 1) * ws
+            $bl = ir <= m ? bg[ir] : zero(ET)
+        end)
+    end
+    for p in R:-1:1
+        blp = _blsym(p)
+        push!(body.args, quote
+            for jj = ws:-1:1
+                local j = $(p - 1) * ws + jj
+                if j <= m
+                    local piv = (lane == jj) ? _pdiv($blp, z - A[j, j]) : zero(ET)
+                    local xj = _trsm_shfl(piv, jj)
+                    if lane == jj
+                        $blp = xj
+                    elseif lane < jj
+                        local i = $(p - 1) * ws + lane
+                        if i <= m
+                            $blp = $blp - xj * (-A[i, j])
+                        end
+                    end
+                end
+            end
+        end)
+        for q in 1:(p-1)
+            blq = _blsym(q)
+            push!(body.args, quote
+                for jj = ws:-1:1
+                    local j = $(p - 1) * ws + jj
+                    if j <= m
+                        local xj = _trsm_shfl($blp, jj)
+                        local i = $(q - 1) * ws + lane
+                        if i <= m
+                            $blq = $blq - xj * (-A[i, j])
+                        end
+                    end
+                end
+            end)
+        end
+    end
+    for r in 1:R
+        bl = _blsym(r)
+        push!(body.args, quote
+            local ir = lane + $(r - 1) * ws
+            if ir <= m
+                bg[ir] = $bl
+            end
+        end)
+    end
+    push!(body.args, :(return nothing))
+    body
+end
+@kernel function _batched_warp_forward_solve_eye(bv, zv, @Const(A), ::Val{R}) where {R}
+    @uniform ws = @groupsize()[1]
+    lane = @index(Local)
+    gi = @index(Group)
+    @inline _warp_reg_forward_solve_eye!(bv[gi], zv[gi], A, lane, ws, Val(R))
+end
+@kernel function _batched_warp_backward_solve_eye(bv, zv, @Const(A), ::Val{R}) where {R}
+    @uniform ws = @groupsize()[1]
+    lane = @index(Local)
+    gi = @index(Group)
+    @inline _warp_reg_backward_solve_eye!(bv[gi], zv[gi], A, lane, ws, Val(R))
+end

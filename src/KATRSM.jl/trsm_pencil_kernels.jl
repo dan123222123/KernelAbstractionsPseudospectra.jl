@@ -83,6 +83,57 @@ end
     end
 end
 
+# B = I ("eye") column-oriented solves. For a standard pencil M = zI − A the pivot is (z − A[j,j])
+# and the off-diagonal update is (−A[i,j]): the z·B term vanishes (B[i,j]=0 off the diagonal, =1 on
+# it). These skip the Bc/B read entirely — ~half the matrix-data DRAM traffic for B=I, the dominant
+# bandwidth cost. Numerically equivalent to the generic kernels for B=I and backward-stable vs
+# LAPACK; they match to round-off (~1 ULP, not bit-for-bit: computing the shorter z−A / −A
+# expressions lets NVPTX contract FMAs differently). Dispatched from `_column_trsm!` when `b_is_identity(P)`.
+@kernel function _batched_column_oriented_forward_solve_eye(bv, zv, @Const(A))
+    @uniform begin
+        BLKSIZE = @groupsize()[1]
+        m = size(A, 1)
+    end
+    sbj = @localmem eltype(A) 1
+    i = @index(Local)
+    gi = @index(Group)
+    for j = 1:1:m
+        if i == 1
+            sbj[1] = _pdiv(bv[gi][j], zv[gi] - A[j, j])
+            bv[gi][j] = sbj[1]
+        end
+        @synchronize()
+        I = j + i
+        while I <= m
+            bv[gi][I] -= sbj[1] * (-A[I, j])
+            I += BLKSIZE
+        end
+        @synchronize()
+    end
+end
+@kernel function _batched_column_oriented_backward_solve_eye(bv, zv, @Const(A))
+    @uniform begin
+        BLKSIZE = @groupsize()[1]
+        m = size(A, 1)
+    end
+    sbj = @localmem eltype(A) 1
+    i = @index(Local)
+    gi = @index(Group)
+    for j = m:-1:1
+        if i == 1
+            sbj[1] = _pdiv(bv[gi][j], zv[gi] - A[j, j])
+            bv[gi][j] = sbj[1]
+        end
+        @synchronize()
+        I = j - i
+        while I >= 1
+            bv[gi][I] -= sbj[1] * (-A[I, j])
+            I -= BLKSIZE
+        end
+        @synchronize()
+    end
+end
+
 # put pencil versions of sm3 blkco kernels
 # will end up using twice the shared memory to store A and B, and compute zB - A in shared memory
 # computing this outside of the kernel might make sense to limit sm usage, but would likely need higher-order matrix pencils to see a performance improvement...

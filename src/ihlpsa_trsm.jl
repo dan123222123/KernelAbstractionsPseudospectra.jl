@@ -130,13 +130,23 @@ function _warp_trsm_ka!(backend, bV, zv, P, wgs)
     # meaningful only for the shuffle-free column solve).
     ws = warp_width(backend)
     R = cld(size(P, 1), ws)
-    @views _batched_warp_forward_solve_pencil(backend, ws)(bV, conj(zv), P.Ac, P.Bc, Val(R); ndrange=(ws, g))
-    @views _batched_warp_backward_solve_pencil(backend, ws)(bV, zv, P.A, P.B, Val(R); ndrange=(ws, g))
+    if b_is_identity(P)   # B = I ⇒ skip the identity-B reads (the eye register-warp kernels)
+        @views _batched_warp_forward_solve_eye(backend, ws)(bV, conj(zv), P.Ac, Val(R); ndrange=(ws, g))
+        @views _batched_warp_backward_solve_eye(backend, ws)(bV, zv, P.A, Val(R); ndrange=(ws, g))
+    else
+        @views _batched_warp_forward_solve_pencil(backend, ws)(bV, conj(zv), P.Ac, P.Bc, Val(R); ndrange=(ws, g))
+        @views _batched_warp_backward_solve_pencil(backend, ws)(bV, zv, P.A, P.B, Val(R); ndrange=(ws, g))
+    end
 end
 function _column_trsm!(backend, bV, zv, P, wgs)
     g = length(zv)
-    @views _batched_column_oriented_forward_solve_pencil(backend, wgs)(bV, conj(zv), P.Ac, P.Bc; ndrange=(wgs, g))
-    @views _batched_column_oriented_backward_solve_pencil(backend, wgs)(bV, zv, P.A, P.B; ndrange=(wgs, g))
+    if b_is_identity(P)   # B = I ⇒ skip the identity-B reads (the eye column kernels)
+        @views _batched_column_oriented_forward_solve_eye(backend, wgs)(bV, conj(zv), P.Ac; ndrange=(wgs, g))
+        @views _batched_column_oriented_backward_solve_eye(backend, wgs)(bV, zv, P.A; ndrange=(wgs, g))
+    else
+        @views _batched_column_oriented_forward_solve_pencil(backend, wgs)(bV, conj(zv), P.Ac, P.Bc; ndrange=(wgs, g))
+        @views _batched_column_oriented_backward_solve_pencil(backend, wgs)(bV, zv, P.A, P.B; ndrange=(wgs, g))
+    end
 end
 
 # cpu solve step in lockstep_ihl!. `wgs` is accepted and ignored so this CPU method

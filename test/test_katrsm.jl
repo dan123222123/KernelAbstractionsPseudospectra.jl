@@ -264,6 +264,77 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
             end
         end
 
+        @testset "batched B=I eye kernels (column + warp)" begin
+            # For a standard pencil (B = I) the eye column/warp solves drop the B read: M = zI − A,
+            # so the pivot is (z − A[j,j]) and off-diagonal updates are (−A[i,j]). They must agree
+            # with LAPACK on M = zI − {L,U} AND with the generic kernels run with B = the materialized
+            # identity, to round-off (they compute the shorter z−A / −A expressions, so NVPTX FMA
+            # contraction can differ by ~1 ULP — not bit-for-bit). Column eye runs on any backend;
+            # warp eye (shuffle) is GPU + warp_trsm_safe only. This is the path `_column_trsm!` /
+            # `_warp_trsm_ka!` take for a StandardSchurMatrixPencil.
+            for T in types, m in (8, 16, 31, 32, 64)
+                rtol = _tol(T)
+                g = 4
+                L = _rand_lowertri(T, m); U = _rand_uppertri(T, m)   # Ac/A play the triangular role
+                Id = Matrix{T}(I, m, m)
+                zv = T(2) .+ T(0.3) * randn(T, g)
+                b0 = reduce(hcat, [randn(T, m) for _ = 1:g])
+                L_d = _to(backend, L); U_d = _to(backend, U)
+                Id_d = _to(backend, Id); zv_d = _to(backend, zv)
+
+                # column eye vs generic-with-identity (and vs LAPACK). wgs=1 single-thread, wgs=4 split.
+                for wgs in (1, 4)
+                    be = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_column_oriented_forward_solve_eye(backend, wgs, (wgs, g))(be, zv_d, L_d)
+                    bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_column_oriented_forward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, L_d, Id_d)
+                    KernelAbstractions.synchronize(backend)
+                    beh = _from(be.data); bch = _from(bc.data)
+                    for i = 1:g
+                        @test isapprox(beh[:, i], LowerTriangular(zv[i] * I - L) \ b0[:, i]; rtol=rtol)
+                        @test isapprox(beh[:, i], bch[:, i]; rtol=rtol)   # ~round-off vs generic (FMA order)
+                    end
+
+                    be = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_column_oriented_backward_solve_eye(backend, wgs, (wgs, g))(be, zv_d, U_d)
+                    bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_column_oriented_backward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, U_d, Id_d)
+                    KernelAbstractions.synchronize(backend)
+                    beh = _from(be.data); bch = _from(bc.data)
+                    for i = 1:g
+                        @test isapprox(beh[:, i], UpperTriangular(zv[i] * I - U) \ b0[:, i]; rtol=rtol)
+                        @test isapprox(beh[:, i], bch[:, i]; rtol=rtol)   # ~round-off vs generic (FMA order)
+                    end
+                end
+
+                # warp eye vs generic warp-with-identity (GPU + usable shuffle only).
+                if KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, false)
+                    wgs = 32; R = cld(m, wgs)
+                    be = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_warp_forward_solve_eye(backend, wgs, (wgs, g))(be, zv_d, L_d, Val(R))
+                    bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_warp_forward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, L_d, Id_d, Val(R))
+                    KernelAbstractions.synchronize(backend)
+                    beh = _from(be.data); bch = _from(bc.data)
+                    for i = 1:g
+                        @test isapprox(beh[:, i], LowerTriangular(zv[i] * I - L) \ b0[:, i]; rtol=rtol)
+                        @test isapprox(beh[:, i], bch[:, i]; rtol=rtol)   # ~round-off vs generic (FMA order)
+                    end
+
+                    be = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_warp_backward_solve_eye(backend, wgs, (wgs, g))(be, zv_d, U_d, Val(R))
+                    bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_warp_backward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, U_d, Id_d, Val(R))
+                    KernelAbstractions.synchronize(backend)
+                    beh = _from(be.data); bch = _from(bc.data)
+                    for i = 1:g
+                        @test isapprox(beh[:, i], UpperTriangular(zv[i] * I - U) \ b0[:, i]; rtol=rtol)
+                        @test isapprox(beh[:, i], bch[:, i]; rtol=rtol)   # ~round-off vs generic (FMA order)
+                    end
+                end
+            end
+        end
+
         @testset "blkco non-pencil kernels (KA, single block)" begin
             for T in types, m in (8, 16)
                 rtol = _tol(T)
