@@ -30,9 +30,15 @@ using KernelIntrinsics: @shfl, Idx
 
 _blsym(s) = Symbol("bl_", s)
 
-# Forward (lower-triangular): panels ascend p = 1…R; within a panel columns ascend; each
-# solved column updates rows BELOW it (same-panel lanes > jj, and panels q > p).
-@inline @generated function _warp_reg_forward_solve_pencil!(bg, z, A, B, lane, ws, ::Val{R}) where {R}
+# Forward (lower-triangular): panels ascend p = 1…R; within a panel columns ascend; each solved
+# column updates rows BELOW it (same-panel lanes > jj, and panels q > p). `::Val{eye}` selects the
+# pencil element splice: GENERIC emits `@inline zBAij` — textually identical to the pre-merge code,
+# so the unrolled body is byte-for-byte unchanged and the warp-vs-column BITWISE test still holds;
+# B=I "eye" emits the reduced `z − A[j,j]` / `−A[i,j]`, which never reference B (so the eye wrapper
+# passes B = nothing). Do NOT otherwise edit the generated scaffold — only these two expressions vary.
+@inline @generated function _warp_reg_forward_solve_pencil!(bg, z, A, B, lane, ws, ::Val{R}, ::Val{eye}) where {R, eye}
+    pivx = eye ? :(z - A[j, j]) : :(@inline zBAij(j, j, z, A, B))
+    offx = eye ? :(-A[i, j])    : :(@inline zBAij(i, j, z, A, B))
     body = Expr(:block, :(m = size(A, 1)), :(ET = eltype(bg)))
     # load owned rows into registers bl_1 … bl_R (out-of-range slots padded with 0)
     for r in 1:R
@@ -49,14 +55,14 @@ _blsym(s) = Symbol("bl_", s)
             for jj = 1:ws
                 local j = $(p - 1) * ws + jj
                 if j <= m                                   # warp-uniform → shuffle safe
-                    local piv = (lane == jj) ? _pdiv($blp, @inline zBAij(j, j, z, A, B)) : zero(ET)
+                    local piv = (lane == jj) ? _pdiv($blp, $pivx) : zero(ET)
                     local xj = _trsm_shfl(piv, jj)          # broadcast pivot from lane jj
                     if lane == jj
                         $blp = xj
                     elseif lane > jj
                         local i = $(p - 1) * ws + lane
                         if i <= m
-                            $blp = $blp - xj * @inline zBAij(i, j, z, A, B)
+                            $blp = $blp - xj * $offx
                         end
                     end
                 end
@@ -72,7 +78,7 @@ _blsym(s) = Symbol("bl_", s)
                         local xj = _trsm_shfl($blp, jj)
                         local i = $(q - 1) * ws + lane
                         if i <= m
-                            $blq = $blq - xj * @inline zBAij(i, j, z, A, B)
+                            $blq = $blq - xj * $offx
                         end
                     end
                 end
@@ -93,9 +99,12 @@ _blsym(s) = Symbol("bl_", s)
     body
 end
 
-# Backward (upper-triangular): mirror — panels descend p = R…1; within a panel columns
-# descend; each solved column updates rows ABOVE it (same-panel lanes < jj, panels q < p).
-@inline @generated function _warp_reg_backward_solve_pencil!(bg, z, A, B, lane, ws, ::Val{R}) where {R}
+# Backward (upper-triangular): mirror — panels descend p = R…1; within a panel columns descend; each
+# solved column updates rows ABOVE it (same-panel lanes < jj, panels q < p). `::Val{eye}` selects the
+# element splice exactly as in the forward kernel (generic stays textually `@inline zBAij` → bitwise).
+@inline @generated function _warp_reg_backward_solve_pencil!(bg, z, A, B, lane, ws, ::Val{R}, ::Val{eye}) where {R, eye}
+    pivx = eye ? :(z - A[j, j]) : :(@inline zBAij(j, j, z, A, B))
+    offx = eye ? :(-A[i, j])    : :(@inline zBAij(i, j, z, A, B))
     body = Expr(:block, :(m = size(A, 1)), :(ET = eltype(bg)))
     for r in 1:R
         bl = _blsym(r)
@@ -111,14 +120,14 @@ end
             for jj = ws:-1:1
                 local j = $(p - 1) * ws + jj
                 if j <= m
-                    local piv = (lane == jj) ? _pdiv($blp, @inline zBAij(j, j, z, A, B)) : zero(ET)
+                    local piv = (lane == jj) ? _pdiv($blp, $pivx) : zero(ET)
                     local xj = _trsm_shfl(piv, jj)
                     if lane == jj
                         $blp = xj
                     elseif lane < jj
                         local i = $(p - 1) * ws + lane
                         if i <= m
-                            $blp = $blp - xj * @inline zBAij(i, j, z, A, B)
+                            $blp = $blp - xj * $offx
                         end
                     end
                 end
@@ -134,7 +143,7 @@ end
                         local xj = _trsm_shfl($blp, jj)
                         local i = $(q - 1) * ws + lane
                         if i <= m
-                            $blq = $blq - xj * @inline zBAij(i, j, z, A, B)
+                            $blq = $blq - xj * $offx
                         end
                     end
                 end
@@ -159,143 +168,27 @@ end
     @uniform ws = @groupsize()[1]
     lane = @index(Local)
     gi = @index(Group)
-    @inline _warp_reg_forward_solve_pencil!(bv[gi], zv[gi], A, B, lane, ws, Val(R))
+    @inline _warp_reg_forward_solve_pencil!(bv[gi], zv[gi], A, B, lane, ws, Val(R), Val(false))
 end
 @kernel function _batched_warp_backward_solve_pencil(bv, zv, @Const(A), @Const(B), ::Val{R}) where {R}
     @uniform ws = @groupsize()[1]
     lane = @index(Local)
     gi = @index(Group)
-    @inline _warp_reg_backward_solve_pencil!(bv[gi], zv[gi], A, B, lane, ws, Val(R))
+    @inline _warp_reg_backward_solve_pencil!(bv[gi], zv[gi], A, B, lane, ws, Val(R), Val(false))
 end
 
-# ── B = I ("eye") register-warp solves ──
-# For a standard pencil M = zI − A the pivot is (z − A[j,j]) and every off-diagonal update is
-# (−A[i,j]) — the z·B term vanishes (every update touches a strictly off-diagonal entry, where
-# B[i,j]=0). These drop the B argument and skip its reads (~half the matrix-data DRAM traffic for
-# B=I). Numerically equivalent to the generic warp kernels for B=I and backward-stable vs LAPACK;
-# they match to round-off (~1 ULP, not bit-for-bit — the shorter z−A / −A expressions let NVPTX
-# contract FMAs differently). Dispatched from `_warp_trsm_ka!` when `b_is_identity(P)`.
-@inline @generated function _warp_reg_forward_solve_eye!(bg, z, A, lane, ws, ::Val{R}) where {R}
-    body = Expr(:block, :(m = size(A, 1)), :(ET = eltype(bg)))
-    for r in 1:R
-        bl = _blsym(r)
-        push!(body.args, quote
-            local ir = lane + $(r - 1) * ws
-            $bl = ir <= m ? bg[ir] : zero(ET)
-        end)
-    end
-    for p in 1:R
-        blp = _blsym(p)
-        push!(body.args, quote
-            for jj = 1:ws
-                local j = $(p - 1) * ws + jj
-                if j <= m
-                    local piv = (lane == jj) ? _pdiv($blp, z - A[j, j]) : zero(ET)
-                    local xj = _trsm_shfl(piv, jj)
-                    if lane == jj
-                        $blp = xj
-                    elseif lane > jj
-                        local i = $(p - 1) * ws + lane
-                        if i <= m
-                            $blp = $blp - xj * (-A[i, j])
-                        end
-                    end
-                end
-            end
-        end)
-        for q in (p+1):R
-            blq = _blsym(q)
-            push!(body.args, quote
-                for jj = 1:ws
-                    local j = $(p - 1) * ws + jj
-                    if j <= m
-                        local xj = _trsm_shfl($blp, jj)
-                        local i = $(q - 1) * ws + lane
-                        if i <= m
-                            $blq = $blq - xj * (-A[i, j])
-                        end
-                    end
-                end
-            end)
-        end
-    end
-    for r in 1:R
-        bl = _blsym(r)
-        push!(body.args, quote
-            local ir = lane + $(r - 1) * ws
-            if ir <= m
-                bg[ir] = $bl
-            end
-        end)
-    end
-    push!(body.args, :(return nothing))
-    body
-end
-@inline @generated function _warp_reg_backward_solve_eye!(bg, z, A, lane, ws, ::Val{R}) where {R}
-    body = Expr(:block, :(m = size(A, 1)), :(ET = eltype(bg)))
-    for r in 1:R
-        bl = _blsym(r)
-        push!(body.args, quote
-            local ir = lane + $(r - 1) * ws
-            $bl = ir <= m ? bg[ir] : zero(ET)
-        end)
-    end
-    for p in R:-1:1
-        blp = _blsym(p)
-        push!(body.args, quote
-            for jj = ws:-1:1
-                local j = $(p - 1) * ws + jj
-                if j <= m
-                    local piv = (lane == jj) ? _pdiv($blp, z - A[j, j]) : zero(ET)
-                    local xj = _trsm_shfl(piv, jj)
-                    if lane == jj
-                        $blp = xj
-                    elseif lane < jj
-                        local i = $(p - 1) * ws + lane
-                        if i <= m
-                            $blp = $blp - xj * (-A[i, j])
-                        end
-                    end
-                end
-            end
-        end)
-        for q in 1:(p-1)
-            blq = _blsym(q)
-            push!(body.args, quote
-                for jj = ws:-1:1
-                    local j = $(p - 1) * ws + jj
-                    if j <= m
-                        local xj = _trsm_shfl($blp, jj)
-                        local i = $(q - 1) * ws + lane
-                        if i <= m
-                            $blq = $blq - xj * (-A[i, j])
-                        end
-                    end
-                end
-            end)
-        end
-    end
-    for r in 1:R
-        bl = _blsym(r)
-        push!(body.args, quote
-            local ir = lane + $(r - 1) * ws
-            if ir <= m
-                bg[ir] = $bl
-            end
-        end)
-    end
-    push!(body.args, :(return nothing))
-    body
-end
+# B = I ("eye") register-warp wrappers: take a SINGLE matrix and call the shared generic kernel with
+# `Val(true)` (and B = nothing), so the z·B term reduces to z−A / −A and B is never read (~half the
+# matrix-data bandwidth for B=I). Dispatched from `_warp_trsm_ka!` when `b_is_identity(P)`.
 @kernel function _batched_warp_forward_solve_eye(bv, zv, @Const(A), ::Val{R}) where {R}
     @uniform ws = @groupsize()[1]
     lane = @index(Local)
     gi = @index(Group)
-    @inline _warp_reg_forward_solve_eye!(bv[gi], zv[gi], A, lane, ws, Val(R))
+    @inline _warp_reg_forward_solve_pencil!(bv[gi], zv[gi], A, nothing, lane, ws, Val(R), Val(true))
 end
 @kernel function _batched_warp_backward_solve_eye(bv, zv, @Const(A), ::Val{R}) where {R}
     @uniform ws = @groupsize()[1]
     lane = @index(Local)
     gi = @index(Group)
-    @inline _warp_reg_backward_solve_eye!(bv[gi], zv[gi], A, lane, ws, Val(R))
+    @inline _warp_reg_backward_solve_pencil!(bv[gi], zv[gi], A, nothing, lane, ws, Val(R), Val(true))
 end
