@@ -53,8 +53,8 @@ b_is_identity(::StandardSchurMatrixPencil) = true
 b_is_identity(::GeneralizedSchurMatrixPencil) = false
 
 function MatrixPencil(F::Schur{T}) where {T<:Complex}
-    Iₘ = Matrix{T}(I, size(F.T))
-    StandardSchurMatrixPencil{T}(F.T, F.T', Iₘ, Iₘ, F.Z)   # B = I (standard pencil)
+    Iₘ = Diagonal(ones(T, size(F.T, 1)))                   # B = Bc = I, stored as a Diagonal (m elts,
+    StandardSchurMatrixPencil{T}(F.T, F.T', Iₘ, Iₘ, F.Z)   #   not a dense m×m); no solve path needs dense B
 end
 function MatrixPencil(F::GeneralizedSchur{T}) where {T<:Complex}
     GeneralizedSchurMatrixPencil{T}(F.S, F.S', F.T, F.T', F.Z)
@@ -75,13 +75,13 @@ Adapt.@adapt_structure MatrixPencil
 # device copy of each field, so this stores the same bytes laid out for coalescing instead of for a
 # transposed view. The host struct keeps its lazy views (the CPU solve path reads `P.A'`, never Ac/Bc).
 #
-# B/Bc DEVICE memory: a standard pencil has B = Bc = I, and after the B=I "eye" kernels (column /
-# warp / tiled) NO GPU kernel reads B/Bc for a standard pencil. So the device pencil doesn't need a
-# dense m×m identity for them — `adapt` sends a `Diagonal` identity (m elements, shared between B and
-# Bc) instead, cutting the standard pencil's device footprint from 5·m² to ~3·m² (it is replicated on
-# every GPU). The HOST struct keeps its dense Iₘ, so the CPU solve and the dense SVD oracle (`ℂsvdpsa`,
-# typed `B::Matrix`) are untouched. A generalized pencil's B/Bc are real data and stay dense (Bc is
-# materialized like Ac).
+# B/Bc memory: a standard pencil has B = Bc = I, and after the B=I "eye" kernels (column / warp /
+# tiled) NO GPU kernel reads B/Bc for a standard pencil — so neither host nor device needs a dense
+# m×m identity. The pencil is BUILT with a `Diagonal` identity (see `MatrixPencil(::Schur)`, m
+# elements), and `adapt` ships a `Diagonal` to the device too (shared between B and Bc) — cutting the
+# standard pencil's footprint from 5·m² to ~3·m² on host and on every GPU. `ℂsvdpsa!` takes
+# `AbstractMatrix`, so the dense SVD oracle and the CPU solve handle the `Diagonal` (its `z*B − A`
+# just materialises). A generalized pencil's B/Bc are real data and stay dense (Bc materialized like Ac).
 function Adapt.adapt_structure(to, P::StandardSchurMatrixPencil{T}) where {T}
     Id = Diagonal(adapt(to, ones(T, size(P.A, 1))))   # device B = Bc = I (m elements; unread after eye)
     StandardSchurMatrixPencil{T}(adapt(to, P.A), adapt(to, Matrix(P.Ac)), Id, Id, adapt(to, P.Z))

@@ -15,7 +15,9 @@ perturbation `zΔ − Γ` has norm `≤ ε(γ + δ|z|)`). Common choices are `(1
 (standard pseudospectrum, `= σ_min(zB − A)`, the default) and `(1,1)`. Result
 is stored in `srg`.
 """
-function ℂsvdpsa!(srg::Matrix{S}, zg::Matrix{T}, A::Matrix{T}, B::Matrix{T}, γ::Real, δ::Real) where {T<:Complex{S}} where {S<:Real}
+# A, B are `AbstractMatrix` (not `Matrix`) so a standard pencil's `Diagonal` identity B — and any
+# other lazy/wrapped operand — works: the body only needs `z*B - A` and `svdvals`, both generic.
+function ℂsvdpsa!(srg::Matrix{S}, zg::Matrix{T}, A::AbstractMatrix{T}, B::AbstractMatrix{T}, γ::Real, δ::Real) where {T<:Complex{S}} where {S<:Real}
     Threads.@threads for Mind in eachindex(zg)
         srg[Mind] = svdvals(zg[Mind] * B - A)[end] / (γ + δ * abs(zg[Mind]))
     end
