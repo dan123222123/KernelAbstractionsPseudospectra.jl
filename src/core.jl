@@ -19,46 +19,34 @@ function MatrixPencil(A::AbstractMatrix{T}, B::Union{AbstractMatrix{T},UniformSc
     return MatrixPencil(schur(A, B))
 end
 
-# Schur-factored pencils used by the GPU trsm path. `SchurMatrixPencil` is the abstract umbrella
-# (so `::SchurMatrixPencil` dispatch and `isa` checks cover both); the concrete subtype encodes
-# whether B = I, so the tiled solve's B-tile skip (and the pencil arithmetic) is chosen by
-# DISPATCH on the type rather than a runtime `b_is_identity` flag. Both carry the same fields.
+# Schur-factored pencils used by the GPU trsm path. ONE parametric struct with a compile-time `STD`
+# Bool tag (true ⇒ B = I standard; false ⇒ B ≠ I generalized). `b_is_identity`, the eye-vs-generic
+# kernel selection, the tiled B-tile skip and the adapt B/Bc handling all dispatch on `STD` (a
+# compile-time branch, not a runtime flag). `const` aliases keep the old `Standard…`/`Generalized…`
+# names. (`::SchurMatrixPencil` bare still matches any instance for dispatch.)
 #
 # Z is the right Schur transform: A_orig = Z * A * Z' (standard) or A_orig = Q * A * Z',
-# B_orig = Q * B * Z' (generalized). Used by ihlpsa to bring a user-supplied x₀ from the
-# original-A basis into the Schur basis so ihlpsa's Lanczos iterates match textbook Lanczos on
-# the original problem with the same x₀. Lazy adjoint by default to avoid duplicating m×m bytes.
-abstract type SchurMatrixPencil{T} <: AbstractMatrixPencil{T} end
-
-struct StandardSchurMatrixPencil{T} <: SchurMatrixPencil{T}     # B = I (standard, non-generalized)
+# B_orig = Q * B * Z' (generalized). Used by ihlpsa to bring a user-supplied x₀ from the original-A
+# basis into the Schur basis so ihlpsa's Lanczos iterates match textbook Lanczos with the same x₀.
+# Ac/Bc are lazy conjugate-transpose views on the host (shared storage); see `adapt_structure` below.
+struct SchurMatrixPencil{T, STD} <: AbstractMatrixPencil{T}
     A::AbstractMatrix{T}
     Ac::AbstractMatrix{T}
     B::AbstractMatrix{T}
     Bc::AbstractMatrix{T}
     Z::AbstractMatrix{T}
 end
-struct GeneralizedSchurMatrixPencil{T} <: SchurMatrixPencil{T}  # B ≠ I (generalized pencil)
-    A::AbstractMatrix{T}
-    Ac::AbstractMatrix{T}
-    B::AbstractMatrix{T}
-    Bc::AbstractMatrix{T}
-    Z::AbstractMatrix{T}
-end
+const StandardSchurMatrixPencil{T}    = SchurMatrixPencil{T, true}     # B = I (standard)
+const GeneralizedSchurMatrixPencil{T} = SchurMatrixPencil{T, false}    # B ≠ I (generalized)
 
-# Whether B = I — resolved by type, replacing the former runtime `b_is_identity` field. Lets the
-# tiled GPU trailing update skip the B tile (off-diagonal B[i,j]=0 ⇒ the z·B term vanishes),
-# halving its shared memory (better occupancy; a wide element type's single tile fits the 48 KB
-# limit). The non-`eye` solver paths still read B/Bc (they hold the actual identity matrix).
-b_is_identity(::StandardSchurMatrixPencil) = true
-b_is_identity(::GeneralizedSchurMatrixPencil) = false
+# Whether B = I — read straight off the compile-time `STD` tag.
+b_is_identity(::SchurMatrixPencil{T, STD}) where {T, STD} = STD
 
-function MatrixPencil(F::Schur{T}) where {T<:Complex}
-    Iₘ = Diagonal(ones(T, size(F.T, 1)))                   # B = Bc = I, stored as a Diagonal (m elts,
-    StandardSchurMatrixPencil{T}(F.T, F.T', Iₘ, Iₘ, F.Z)   #   not a dense m×m); no solve path needs dense B
-end
-function MatrixPencil(F::GeneralizedSchur{T}) where {T<:Complex}
-    GeneralizedSchurMatrixPencil{T}(F.S, F.S', F.T, F.T', F.Z)
-end
+MatrixPencil(F::Schur{T}) where {T<:Complex} =
+    (Iₘ = Diagonal(ones(T, size(F.T, 1)));                  # B = Bc = I as a Diagonal (m elts, not m×m)
+     SchurMatrixPencil{T, true}(F.T, F.T', Iₘ, Iₘ, F.Z))
+MatrixPencil(F::GeneralizedSchur{T}) where {T<:Complex} =
+    SchurMatrixPencil{T, false}(F.S, F.S', F.T, F.T', F.Z)
 
 Base.size(x::AbstractMatrixPencil) = size(x.A)
 Base.size(x::AbstractMatrixPencil, i) = size(x.A, i)
@@ -66,29 +54,26 @@ KernelAbstractions.get_backend(x::AbstractMatrixPencil) = get_backend(x.A)
 
 Adapt.@adapt_structure MatrixPencil
 
-# The Schur pencils' Ac/Bc are lazy conjugate-transpose views (`F.T'`, …). On the host that shares
-# storage; but the GPU forward solve reads them with a TRANSPOSED (column-strided) access pattern,
-# which is uncoalesced and ~1.4–1.8× slower than a contiguous read (measured at the kernel level).
-# So when adapting a pencil to a device we MATERIALIZE the adjoint fields as dense contiguous arrays
-# (`Matrix(P.Ac)`): values are unchanged — only the layout — so results stay bitwise-identical, while
-# the forward solve becomes coalesced. It is ~free in device memory: `adapt` already makes a separate
-# device copy of each field, so this stores the same bytes laid out for coalescing instead of for a
-# transposed view. The host struct keeps its lazy views (the CPU solve path reads `P.A'`, never Ac/Bc).
-#
-# B/Bc memory: a standard pencil has B = Bc = I, and after the B=I "eye" kernels (column / warp /
-# tiled) NO GPU kernel reads B/Bc for a standard pencil — so neither host nor device needs a dense
-# m×m identity. The pencil is BUILT with a `Diagonal` identity (see `MatrixPencil(::Schur)`, m
-# elements), and `adapt` ships a `Diagonal` to the device too (shared between B and Bc) — cutting the
-# standard pencil's footprint from 5·m² to ~3·m² on host and on every GPU. `ℂsvdpsa!` takes
-# `AbstractMatrix`, so the dense SVD oracle and the CPU solve handle the `Diagonal` (its `z*B − A`
-# just materialises). A generalized pencil's B/Bc are real data and stay dense (Bc materialized like Ac).
-function Adapt.adapt_structure(to, P::StandardSchurMatrixPencil{T}) where {T}
-    Id = Diagonal(adapt(to, ones(T, size(P.A, 1))))   # device B = Bc = I (m elements; unread after eye)
-    StandardSchurMatrixPencil{T}(adapt(to, P.A), adapt(to, Matrix(P.Ac)), Id, Id, adapt(to, P.Z))
+# Adapting a Schur pencil to a device does two memory/perf things, branched on the compile-time `STD`:
+#  * Ac (and Bc for a generalized pencil) are lazy conjugate-transpose views (`F.T'`); the GPU forward
+#    solve reads them TRANSPOSED (column-strided) → uncoalesced, ~1.4–1.8× slower. We MATERIALIZE them
+#    as dense contiguous arrays (`Matrix(P.Ac)`) so the forward read is coalesced — values unchanged,
+#    ~free in device memory (`adapt` already copies each field; this just lays the bytes out for
+#    coalescing). The host struct keeps the lazy views (the CPU solve reads `P.A'`, never Ac/Bc).
+#  * For a STANDARD pencil B = Bc = I, and after the B=I "eye" kernels NO GPU kernel reads B/Bc, so
+#    `adapt` ships a tiny `Diagonal` identity (m elements, shared between B and Bc) instead of a dense
+#    m×m — cutting the standard pencil from 5·m² to ~3·m² per device. A generalized pencil's B/Bc are
+#    real data → stay dense (Bc materialized like Ac). The host build already uses a Diagonal identity
+#    (ctor above); `ℂsvdpsa!` takes `AbstractMatrix`, so the SVD oracle / CPU solve handle the Diagonal.
+function Adapt.adapt_structure(to, P::SchurMatrixPencil{T, STD}) where {T, STD}
+    A = adapt(to, P.A); Ac = adapt(to, Matrix(P.Ac)); Z = adapt(to, P.Z)
+    if STD
+        Id = Diagonal(adapt(to, ones(T, size(P.A, 1))))    # device B = Bc = I (m elements; unread after eye)
+        SchurMatrixPencil{T, true}(A, Ac, Id, Id, Z)
+    else
+        SchurMatrixPencil{T, false}(A, Ac, adapt(to, P.B), adapt(to, Matrix(P.Bc)), Z)
+    end
 end
-Adapt.adapt_structure(to, P::GeneralizedSchurMatrixPencil{T}) where {T} =
-    GeneralizedSchurMatrixPencil{T}(adapt(to, P.A), adapt(to, Matrix(P.Ac)),
-                                    adapt(to, P.B), adapt(to, Matrix(P.Bc)), adapt(to, P.Z))
 
 """
     validate(zg, A, B, γ=missing, δ=missing)
