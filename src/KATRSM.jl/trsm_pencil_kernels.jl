@@ -32,106 +32,76 @@ end
 # when a diagonal element is solved for, all operations in the corresponding column are independent of one another and can be done in parallel by a workgroup
 # if the max workgroup size is less than size(P,1), workitems cycle down/up the column to complete all independent operations
 # each pencil is solved at the WORKGROUP level, with the number of workgroups equal to the batch dimension
+# Generic (B≠I) and B=I "eye" forward/backward each share ONE body: `veye::Val` selects the pencil
+# element via `_piv_elem`/`_offd_elem`. For the eye case those never read B, so the `_eye` wrappers
+# take a SINGLE matrix and pass `B = nothing` — skipping the identity-B DRAM read (~half the matrix
+# bandwidth for B=I). The eye result matches the generic to round-off (~1 ULP via FMA order, since
+# the eye computes the shorter z−A / −A); the generic routes through `zBAij`, AST-identical to the
+# former inline `(z*B)−A`, so it stays bitwise. The lane-0 pivot lives in @localmem and is broadcast
+# by the @synchronize block barrier. Wrappers dispatched from `_column_trsm!` per `b_is_identity(P)`.
+@inline function _col_fwd_body!(b, z, A, B, veye, BLKSIZE, m, i)
+    sbj = @localmem eltype(A) 1
+    for j = 1:1:m
+        if i == 1
+            sbj[1] = _pdiv(b[j], @inline _piv_elem(veye, j, z, A, B))
+            b[j] = sbj[1]
+        end
+        @synchronize()
+        I = j + i
+        while I <= m
+            b[I] -= sbj[1] * @inline _offd_elem(veye, I, j, z, A, B)
+            I += BLKSIZE
+        end
+        @synchronize()
+    end
+end
+@inline function _col_bwd_body!(b, z, A, B, veye, BLKSIZE, m, i)
+    sbj = @localmem eltype(A) 1
+    for j = m:-1:1
+        if i == 1
+            sbj[1] = _pdiv(b[j], @inline _piv_elem(veye, j, z, A, B))
+            b[j] = sbj[1]
+        end
+        @synchronize()
+        I = j - i
+        while I >= 1
+            b[I] -= sbj[1] * @inline _offd_elem(veye, I, j, z, A, B)
+            I -= BLKSIZE
+        end
+        @synchronize()
+    end
+end
 @kernel function _batched_column_oriented_forward_solve_pencil(bv, zv, @Const(A), @Const(B))
     @uniform begin
         BLKSIZE = @groupsize()[1]
         m = size(A, 1)
     end
-
-    sbj = @localmem eltype(A) 1
-
-    i = @index(Local)
-    gi = @index(Group)
-
-    for j = 1:1:m
-        if i == 1
-            sbj[1] = _pdiv(bv[gi][j], zv[gi] * B[j, j] - A[j, j])
-            bv[gi][j] = sbj[1]
-        end
-        @synchronize()
-        I = j + i
-        while I <= m
-            bv[gi][I] -= sbj[1] * (zv[gi] * B[I, j] - A[I, j])
-            I += BLKSIZE
-        end
-        @synchronize()
-    end
+    i = @index(Local); gi = @index(Group)
+    @inline _col_fwd_body!(bv[gi], zv[gi], A, B, Val(false), BLKSIZE, m, i)
 end
 @kernel function _batched_column_oriented_backward_solve_pencil(bv, zv, @Const(A), @Const(B))
     @uniform begin
         BLKSIZE = @groupsize()[1]
         m = size(A, 1)
     end
-
-    sbj = @localmem eltype(A) 1
-
-    i = @index(Local)
-    gi = @index(Group)
-
-    for j = m:-1:1
-        if i == 1
-            sbj[1] = _pdiv(bv[gi][j], zv[gi] * B[j, j] - A[j, j])
-            bv[gi][j] = sbj[1]
-        end
-        @synchronize()
-        I = j - i
-        while I >= 1
-            bv[gi][I] -= sbj[1] * (zv[gi] * B[I, j] - A[I, j])
-            I -= BLKSIZE
-        end
-        @synchronize()
-    end
+    i = @index(Local); gi = @index(Group)
+    @inline _col_bwd_body!(bv[gi], zv[gi], A, B, Val(false), BLKSIZE, m, i)
 end
-
-# B = I ("eye") column-oriented solves. For a standard pencil M = zI − A the pivot is (z − A[j,j])
-# and the off-diagonal update is (−A[i,j]): the z·B term vanishes (B[i,j]=0 off the diagonal, =1 on
-# it). These skip the Bc/B read entirely — ~half the matrix-data DRAM traffic for B=I, the dominant
-# bandwidth cost. Numerically equivalent to the generic kernels for B=I and backward-stable vs
-# LAPACK; they match to round-off (~1 ULP, not bit-for-bit: computing the shorter z−A / −A
-# expressions lets NVPTX contract FMAs differently). Dispatched from `_column_trsm!` when `b_is_identity(P)`.
-@kernel function _batched_column_oriented_forward_solve_eye(bv, zv, @Const(A))
+@kernel function _batched_column_oriented_forward_solve_eye(bv, zv, @Const(A))   # B = I: single matrix
     @uniform begin
         BLKSIZE = @groupsize()[1]
         m = size(A, 1)
     end
-    sbj = @localmem eltype(A) 1
-    i = @index(Local)
-    gi = @index(Group)
-    for j = 1:1:m
-        if i == 1
-            sbj[1] = _pdiv(bv[gi][j], zv[gi] - A[j, j])
-            bv[gi][j] = sbj[1]
-        end
-        @synchronize()
-        I = j + i
-        while I <= m
-            bv[gi][I] -= sbj[1] * (-A[I, j])
-            I += BLKSIZE
-        end
-        @synchronize()
-    end
+    i = @index(Local); gi = @index(Group)
+    @inline _col_fwd_body!(bv[gi], zv[gi], A, nothing, Val(true), BLKSIZE, m, i)
 end
-@kernel function _batched_column_oriented_backward_solve_eye(bv, zv, @Const(A))
+@kernel function _batched_column_oriented_backward_solve_eye(bv, zv, @Const(A))  # B = I: single matrix
     @uniform begin
         BLKSIZE = @groupsize()[1]
         m = size(A, 1)
     end
-    sbj = @localmem eltype(A) 1
-    i = @index(Local)
-    gi = @index(Group)
-    for j = m:-1:1
-        if i == 1
-            sbj[1] = _pdiv(bv[gi][j], zv[gi] - A[j, j])
-            bv[gi][j] = sbj[1]
-        end
-        @synchronize()
-        I = j - i
-        while I >= 1
-            bv[gi][I] -= sbj[1] * (-A[I, j])
-            I -= BLKSIZE
-        end
-        @synchronize()
-    end
+    i = @index(Local); gi = @index(Group)
+    @inline _col_bwd_body!(bv[gi], zv[gi], A, nothing, Val(true), BLKSIZE, m, i)
 end
 
 # put pencil versions of sm3 blkco kernels

@@ -46,106 +46,62 @@ using KernelIntrinsics: @shfl, Idx
 
 # ---- diagonal panel solves (one warp per grid point) ----
 
-# Solve the lower-triangular diagonal tile of panel k for one grid point per workgroup.
-# `koff` is the panel's column offset; `lane` is the 1-based KA local index, so `j0 = koff+lane`
-# is the row this lane owns within the panel. `bl` holds that row's RHS entry in a register and
-# is updated in place. Columns are solved in ascending order (lower-triangular forward substitution).
-@kernel function _tiled_panel_forward(bv, zv, @Const(A), @Const(B), koff, plen)   # lower-triangular diagonal tile
-    lane = @index(Local)
-    gi = @index(Group)
-    @uniform ET = eltype(A)
-    b = bv[gi]
-    z = zv[gi]
-    j0 = koff + lane
-    valid = lane <= plen                       # mask off lanes past a partial last panel (plen < 32)
-    bl = valid ? b[j0] : zero(ET)
-    for jj = 1:plen
-        j = koff + jj
-        # Only the owner lane (lane == jj) computes the real pivot x_j; every other lane emits
-        # zero, so `@shfl(Idx, piv, jj)` broadcasts the single non-zero value from lane jj to all.
-        piv = (lane == jj) ? _pdiv(bl, @inline zBAij(j, j, z, A, B)) : zero(ET)
-        xj = _trsm_shfl(piv, jj)
-        if lane == jj
-            bl = xj                            # owner stores its solved value
-        elseif (lane > jj) & valid
-            bl -= xj * @inline zBAij(j0, j, z, A, B)   # rows BELOW the pivot get the lower-tri update
-        end
-    end
-    valid && (b[j0] = bl)                       # `& valid` guard: never write back an out-of-range row
-end
-
-# Mirror of `_tiled_panel_forward` for the upper-triangular diagonal tile (backward substitution).
-# Columns are solved in DESCENDING order, and each solved column updates the rows ABOVE it
-# (`lane < jj`) — the dual of the forward kernel's `lane > jj`.
-@kernel function _tiled_panel_backward(bv, zv, @Const(A), @Const(B), koff, plen)  # upper-triangular diagonal tile
-    lane = @index(Local)
-    gi = @index(Group)
-    @uniform ET = eltype(A)
-    b = bv[gi]
-    z = zv[gi]
-    j0 = koff + lane
-    valid = lane <= plen                       # mask off lanes past a partial last panel
-    bl = valid ? b[j0] : zero(ET)
-    for jj = plen:-1:1
-        j = koff + jj
-        # Owner lane jj computes the pivot; others emit zero; the shuffle broadcasts from lane jj.
-        piv = (lane == jj) ? _pdiv(bl, @inline zBAij(j, j, z, A, B)) : zero(ET)
-        xj = _trsm_shfl(piv, jj)
-        if lane == jj
-            bl = xj
-        elseif (lane < jj) & valid
-            bl -= xj * @inline zBAij(j0, j, z, A, B)   # rows ABOVE the pivot get the upper-tri update
-        end
-    end
-    valid && (b[j0] = bl)
-end
-
-# B = I ("eye") diagonal-panel solves: M = zI − A on the panel, so the pivot is (z − A[j,j]) and the
-# in-panel update is (−A[i,j]) — drop the B argument and its reads. With the eye TRAILING kernels
-# (below), the whole tiled solve is B-free for a standard pencil. Numerically equivalent to the
-# generic panel kernels (match to round-off; FMA order differs). Dispatched from `_tiled_trsm!` when
-# `b_is_identity(P)`.
-@kernel function _tiled_panel_forward_eye(bv, zv, @Const(A), koff, plen)
-    lane = @index(Local)
-    gi = @index(Group)
-    @uniform ET = eltype(A)
-    b = bv[gi]
-    z = zv[gi]
+# Generic (B≠I) and B=I "eye" diagonal-panel solves share ONE body per direction. `veye::Val` selects
+# the pencil element via `_piv_elem`/`_offd_elem`; the eye wrappers pass `B = nothing` (single matrix,
+# no B read). One warp per grid point: `j0 = koff+lane` is the row this lane owns within the panel,
+# `bl` holds its RHS entry in a register, and the owner lane (lane==jj) broadcasts its solved pivot by
+# `@shfl` (every other lane emits zero into the shuffle). Generic routes through `zBAij` (AST-identical
+# to the former inline). `valid` masks lanes past a partial last panel (plen<32). With the eye TRAILING
+# kernels, the tiled solve is fully B-free for a standard pencil. Wrappers dispatched from `_tiled_trsm!`.
+@inline function _panel_fwd_body!(b, z, A, B, koff, plen, lane, veye)   # lower-tri (ascending)
+    ET = eltype(A)
     j0 = koff + lane
     valid = lane <= plen
     bl = valid ? b[j0] : zero(ET)
     for jj = 1:plen
         j = koff + jj
-        piv = (lane == jj) ? _pdiv(bl, z - A[j, j]) : zero(ET)
+        piv = (lane == jj) ? _pdiv(bl, @inline _piv_elem(veye, j, z, A, B)) : zero(ET)
         xj = _trsm_shfl(piv, jj)
         if lane == jj
             bl = xj
-        elseif (lane > jj) & valid
-            bl -= xj * (-A[j0, j])
+        elseif (lane > jj) & valid                       # rows BELOW the pivot
+            bl -= xj * @inline _offd_elem(veye, j0, j, z, A, B)
         end
     end
     valid && (b[j0] = bl)
 end
-@kernel function _tiled_panel_backward_eye(bv, zv, @Const(A), koff, plen)
-    lane = @index(Local)
-    gi = @index(Group)
-    @uniform ET = eltype(A)
-    b = bv[gi]
-    z = zv[gi]
+@inline function _panel_bwd_body!(b, z, A, B, koff, plen, lane, veye)   # upper-tri (descending)
+    ET = eltype(A)
     j0 = koff + lane
     valid = lane <= plen
     bl = valid ? b[j0] : zero(ET)
     for jj = plen:-1:1
         j = koff + jj
-        piv = (lane == jj) ? _pdiv(bl, z - A[j, j]) : zero(ET)
+        piv = (lane == jj) ? _pdiv(bl, @inline _piv_elem(veye, j, z, A, B)) : zero(ET)
         xj = _trsm_shfl(piv, jj)
         if lane == jj
             bl = xj
-        elseif (lane < jj) & valid
-            bl -= xj * (-A[j0, j])
+        elseif (lane < jj) & valid                       # rows ABOVE the pivot
+            bl -= xj * @inline _offd_elem(veye, j0, j, z, A, B)
         end
     end
     valid && (b[j0] = bl)
+end
+@kernel function _tiled_panel_forward(bv, zv, @Const(A), @Const(B), koff, plen)
+    lane = @index(Local); gi = @index(Group)
+    @inline _panel_fwd_body!(bv[gi], zv[gi], A, B, koff, plen, lane, Val(false))
+end
+@kernel function _tiled_panel_backward(bv, zv, @Const(A), @Const(B), koff, plen)
+    lane = @index(Local); gi = @index(Group)
+    @inline _panel_bwd_body!(bv[gi], zv[gi], A, B, koff, plen, lane, Val(false))
+end
+@kernel function _tiled_panel_forward_eye(bv, zv, @Const(A), koff, plen)   # B = I: single matrix
+    lane = @index(Local); gi = @index(Group)
+    @inline _panel_fwd_body!(bv[gi], zv[gi], A, nothing, koff, plen, lane, Val(true))
+end
+@kernel function _tiled_panel_backward_eye(bv, zv, @Const(A), koff, plen)  # B = I: single matrix
+    lane = @index(Local); gi = @index(Group)
+    @inline _panel_bwd_body!(bv[gi], zv[gi], A, nothing, koff, plen, lane, Val(true))
 end
 
 # ---- tiled trailing updates (shared A,B tile reused across `gt` grid points) ----
