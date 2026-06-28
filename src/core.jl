@@ -74,11 +74,18 @@ Adapt.@adapt_structure MatrixPencil
 # the forward solve becomes coalesced. It is ~free in device memory: `adapt` already makes a separate
 # device copy of each field, so this stores the same bytes laid out for coalescing instead of for a
 # transposed view. The host struct keeps its lazy views (the CPU solve path reads `P.A'`, never Ac/Bc).
-# `Bc` is the materialized identity for a standard pencil (already dense) and a lazy adjoint for a
-# generalized one, so only the generalized case needs `Matrix(P.Bc)`.
-Adapt.adapt_structure(to, P::StandardSchurMatrixPencil{T}) where {T} =
-    StandardSchurMatrixPencil{T}(adapt(to, P.A), adapt(to, Matrix(P.Ac)),
-                                 adapt(to, P.B), adapt(to, P.Bc), adapt(to, P.Z))
+#
+# B/Bc DEVICE memory: a standard pencil has B = Bc = I, and after the B=I "eye" kernels (column /
+# warp / tiled) NO GPU kernel reads B/Bc for a standard pencil. So the device pencil doesn't need a
+# dense m×m identity for them — `adapt` sends a `Diagonal` identity (m elements, shared between B and
+# Bc) instead, cutting the standard pencil's device footprint from 5·m² to ~3·m² (it is replicated on
+# every GPU). The HOST struct keeps its dense Iₘ, so the CPU solve and the dense SVD oracle (`ℂsvdpsa`,
+# typed `B::Matrix`) are untouched. A generalized pencil's B/Bc are real data and stay dense (Bc is
+# materialized like Ac).
+function Adapt.adapt_structure(to, P::StandardSchurMatrixPencil{T}) where {T}
+    Id = Diagonal(adapt(to, ones(T, size(P.A, 1))))   # device B = Bc = I (m elements; unread after eye)
+    StandardSchurMatrixPencil{T}(adapt(to, P.A), adapt(to, Matrix(P.Ac)), Id, Id, adapt(to, P.Z))
+end
 Adapt.adapt_structure(to, P::GeneralizedSchurMatrixPencil{T}) where {T} =
     GeneralizedSchurMatrixPencil{T}(adapt(to, P.A), adapt(to, Matrix(P.Ac)),
                                     adapt(to, P.B), adapt(to, Matrix(P.Bc)), adapt(to, P.Z))
