@@ -65,8 +65,23 @@ Base.size(x::AbstractMatrixPencil, i) = size(x.A, i)
 KernelAbstractions.get_backend(x::AbstractMatrixPencil) = get_backend(x.A)
 
 Adapt.@adapt_structure MatrixPencil
-Adapt.@adapt_structure StandardSchurMatrixPencil
-Adapt.@adapt_structure GeneralizedSchurMatrixPencil
+
+# The Schur pencils' Ac/Bc are lazy conjugate-transpose views (`F.T'`, …). On the host that shares
+# storage; but the GPU forward solve reads them with a TRANSPOSED (column-strided) access pattern,
+# which is uncoalesced and ~1.4–1.8× slower than a contiguous read (measured at the kernel level).
+# So when adapting a pencil to a device we MATERIALIZE the adjoint fields as dense contiguous arrays
+# (`Matrix(P.Ac)`): values are unchanged — only the layout — so results stay bitwise-identical, while
+# the forward solve becomes coalesced. It is ~free in device memory: `adapt` already makes a separate
+# device copy of each field, so this stores the same bytes laid out for coalescing instead of for a
+# transposed view. The host struct keeps its lazy views (the CPU solve path reads `P.A'`, never Ac/Bc).
+# `Bc` is the materialized identity for a standard pencil (already dense) and a lazy adjoint for a
+# generalized one, so only the generalized case needs `Matrix(P.Bc)`.
+Adapt.adapt_structure(to, P::StandardSchurMatrixPencil{T}) where {T} =
+    StandardSchurMatrixPencil{T}(adapt(to, P.A), adapt(to, Matrix(P.Ac)),
+                                 adapt(to, P.B), adapt(to, P.Bc), adapt(to, P.Z))
+Adapt.adapt_structure(to, P::GeneralizedSchurMatrixPencil{T}) where {T} =
+    GeneralizedSchurMatrixPencil{T}(adapt(to, P.A), adapt(to, Matrix(P.Ac)),
+                                    adapt(to, P.B), adapt(to, Matrix(P.Bc)), adapt(to, P.Z))
 
 """
     validate(zg, A, B, γ=missing, δ=missing)
