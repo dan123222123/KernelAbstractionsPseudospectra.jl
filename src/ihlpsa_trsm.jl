@@ -50,20 +50,26 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     #    free column solve, while a wide B=I pencil uses the single-tile sB-free kernels and fits.
     #    Wide warp/tiled use the per-limb `_trsm_shfl` override (MultiFloatsPseudospectra).
     #    Size threshold for warp→tiled = `trsm_crossover()`.
-    wide = !(real(eltype(P.A)) <: Base.IEEEFloat)
-    big = size(P, 1) >= trsm_crossover()
-    tiled_ok = tiled_tiles_fit(backend, P)         # tiled's @localmem tiles fit device shared memory
+    wide       = !(real(eltype(P.A)) <: Base.IEEEFloat)   # non-IEEE (MultiFloats/BigFloat)
+    big        = size(P, 1) >= trsm_crossover()           # m ≥ warp→tiled crossover
+    tiled_ok   = tiled_tiles_fit(backend, P)              # tiled's @localmem tiles fit device shared memory
+    shuffle_ok = warp_trsm_safe(backend, wide)            # warp/tiled shuffle usable for this backend+type
     if strat == "tiled"
-        tiled_ok ? _tiled_trsm!(backend, bV, zv, P, wgs) :
-                   (big ? _column_trsm!(backend, bV, zv, P, wgs) : _warp_trsm!(backend, bV, zv, P, wgs))
-    elseif !warp_trsm_safe(backend, wide)           # "auto" where shuffle isn't safe (stock oneAPI) / unsupported (oneAPI MultiFloats) → column
+        if tiled_ok
+            _tiled_trsm!(backend, bV, zv, P, wgs)
+        elseif big                                        # large m, tiles don't fit → shuffle-free column
+            _column_trsm!(backend, bV, zv, P, wgs)
+        else                                              # small m → warp
+            _warp_trsm!(backend, bV, zv, P, wgs)
+        end
+    elseif !shuffle_ok                                    # "auto", shuffle unusable (stock oneAPI) → column
         _column_trsm!(backend, bV, zv, P, wgs)
-    elseif big && tiled_ok                          # "auto", large m, tiles fit (IEEE, or wide B=I)
-        _tiled_trsm!(backend, bV, zv, P, wgs)
-    elseif big                                      # "auto", large m, wide B≠I → no tiled
-        _column_trsm!(backend, bV, zv, P, wgs)
-    else                                            # "auto", small m
+    elseif !big                                           # "auto", small m → warp
         _warp_trsm!(backend, bV, zv, P, wgs)
+    elseif tiled_ok                                       # "auto", large m, tiles fit (IEEE, or wide B=I)
+        _tiled_trsm!(backend, bV, zv, P, wgs)
+    else                                                  # "auto", large m, wide B≠I → column
+        _column_trsm!(backend, bV, zv, P, wgs)
     end
 end
 
