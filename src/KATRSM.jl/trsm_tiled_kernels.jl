@@ -100,6 +100,54 @@ end
     valid && (b[j0] = bl)
 end
 
+# B = I ("eye") diagonal-panel solves: M = zI − A on the panel, so the pivot is (z − A[j,j]) and the
+# in-panel update is (−A[i,j]) — drop the B argument and its reads. With the eye TRAILING kernels
+# (below), the whole tiled solve is B-free for a standard pencil. Numerically equivalent to the
+# generic panel kernels (match to round-off; FMA order differs). Dispatched from `_tiled_trsm!` when
+# `b_is_identity(P)`.
+@kernel function _tiled_panel_forward_eye(bv, zv, @Const(A), koff, plen)
+    lane = @index(Local)
+    gi = @index(Group)
+    @uniform ET = eltype(A)
+    b = bv[gi]
+    z = zv[gi]
+    j0 = koff + lane
+    valid = lane <= plen
+    bl = valid ? b[j0] : zero(ET)
+    for jj = 1:plen
+        j = koff + jj
+        piv = (lane == jj) ? _pdiv(bl, z - A[j, j]) : zero(ET)
+        xj = _trsm_shfl(piv, jj)
+        if lane == jj
+            bl = xj
+        elseif (lane > jj) & valid
+            bl -= xj * (-A[j0, j])
+        end
+    end
+    valid && (b[j0] = bl)
+end
+@kernel function _tiled_panel_backward_eye(bv, zv, @Const(A), koff, plen)
+    lane = @index(Local)
+    gi = @index(Group)
+    @uniform ET = eltype(A)
+    b = bv[gi]
+    z = zv[gi]
+    j0 = koff + lane
+    valid = lane <= plen
+    bl = valid ? b[j0] : zero(ET)
+    for jj = plen:-1:1
+        j = koff + jj
+        piv = (lane == jj) ? _pdiv(bl, z - A[j, j]) : zero(ET)
+        xj = _trsm_shfl(piv, jj)
+        if lane == jj
+            bl = xj
+        elseif (lane < jj) & valid
+            bl -= xj * (-A[j0, j])
+        end
+    end
+    valid && (b[j0] = bl)
+end
+
 # ---- tiled trailing updates (shared A,B tile reused across `gt` grid points) ----
 
 # Forward: subtract panel k from trailing rows rbase+1 … m.

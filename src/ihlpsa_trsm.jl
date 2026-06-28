@@ -89,7 +89,11 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
     for k in 1:nblk
         koff = (k - 1) * 32
         plen = min(32, m - koff)
-        @views _tiled_panel_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen; ndrange=(32, g))
+        if eye
+            @views _tiled_panel_forward_eye(backend, 32)(bV, zc, P.Ac, koff, plen; ndrange=(32, g))
+        else
+            @views _tiled_panel_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen; ndrange=(32, g))
+        end
         rbase = koff + plen
         ntrail = m - rbase
         if ntrail > 0
@@ -106,7 +110,11 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
     for k in nblk:-1:1
         koff = (k - 1) * 32
         plen = min(32, m - koff)
-        @views _tiled_panel_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen; ndrange=(32, g))
+        if eye
+            @views _tiled_panel_backward_eye(backend, 32)(bV, zv, P.A, koff, plen; ndrange=(32, g))
+        else
+            @views _tiled_panel_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen; ndrange=(32, g))
+        end
         if koff > 0
             rtiles = cld(koff, 32)
             ggrid = cld(g, gt)
