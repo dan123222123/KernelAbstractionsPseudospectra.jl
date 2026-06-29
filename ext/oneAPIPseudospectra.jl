@@ -29,13 +29,13 @@ function KAPseudospectra.supports_fp64(B::oneAPI.oneAPIBackend)
     return (f & oneAPI.oneL0.ZE_DEVICE_MODULE_FLAG_FP64) != 0
 end
 
-# The `auto` strategy may use the tiled (shuffle) solve on oneAPI ONLY when it is actually correct,
+# The `tiled` strategy may use the tiled (shuffle) solve on oneAPI ONLY when it is actually correct,
 # which needs BOTH: (1) the KernelIntrinsics oneAPI shuffle backend — the standard 0.1.8 ships only a
 # `## TODO` stub, so `@shfl` silently miscompiles there; and (2) a SIMD width pinned to the warp
 # width (else a 32-lane workgroup spans several Intel subgroups). Both arrive together via the opt-in
-# `set_intel_force_simd32!` + the patched KernelIntrinsics. Otherwise `auto` stays on the shuffle-free
-# `column` solve — correct on stock releases, just without the tiled speedup. (Explicit
-# KAPSEUDO_TRSM=tiled is opt-in and remains the user's responsibility.)
+# `set_intel_force_simd32!` + the patched KernelIntrinsics. Without them `warp_trsm_safe` is false, so
+# `tiled` self-gates to the shuffle-free `column` solve — correct on stock releases, just without the
+# tiled speedup.
 # MultiFloats (`wide`) always stay on `column`: their tiled path crashes the SPIR-V translator on
 # oneAPI (the per-limb shuffle kernel + reqd-sub-group-size); column is correct (and only ~1.2x
 # slower) for extended precision here.

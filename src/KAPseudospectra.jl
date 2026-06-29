@@ -7,24 +7,24 @@ using Preferences
 # the env var KAPSEUDO_TRSM as a runtime override that needs no recompile.
 #
 # The DEFAULT is "column": correct for every element type and every backend, no warp/shuffle
-# assumptions. The "tiled" fast path is OPT-IN — it assumes a fixed hardware-shuffled 32-lane warp
-# (CUDA/AMDGPU/Metal, or Intel only with the SIMD32 pin) and IEEE element types (or the per-limb
-# `_trsm_shfl` override for MultiFloats), and an explicit "tiled" bypasses the per-backend safety
-# gate, so it ships off-by-default to avoid surprising the unaware user. Opt in with
-# `set_trsm_strategy!("auto")` (or `KAPSEUDO_TRSM=auto`) once you know your setup is in the
-# supported set. Values:
-#   "column" (default) – column-oriented solve: barrier-based, shuffle-free, no per-warp
-#              register semantics. Correct for every element type / backend. Under "auto" this is
-#              the fallback wherever the tiled solve isn't usable — `warp_trsm_safe(backend, wide)`
-#              is false (stock oneAPI; Metal unless opted in), or the trailing-update tiles don't
-#              fit shared memory (e.g. a wide non-IEEE B≠I pencil needing two tiles).
-#   "auto"   – use the tiled solve wherever it's usable for this backend+type, else column; the
-#              performant choice for ComplexF32/F64 on a supported backend.
-#   "tiled"  – always the tiled (shared-memory A,B reuse) solve where its tiles fit (else column);
-#              an explicit "tiled" bypasses the per-backend shuffle-safety gate.
-# (The earlier register-warp `@generated` solve was removed: it only beat tiled at small m, where it
-# paid a per-R recompile growing to ~18 s at R=16 / minutes at R=32, so `auto` is now column+tiled.)
-const _VALID_TRSM = ("column", "auto", "tiled")
+# assumptions. The "tiled" fast path is OPT-IN (for now): it uses hardware warp shuffles, and although
+# it SELF-GATES to the always-correct `column` solve wherever the shuffle / shared memory isn't usable
+# (so it's safe to request on any backend), `column` stays the default as the fully-validated,
+# bitwise-stable baseline. Opt in with `set_trsm_strategy!("tiled")` (or `KAPSEUDO_TRSM=tiled`) once
+# you've confirmed it on your hardware. Values:
+#   "column" (default) – column-oriented solve: barrier-based, shuffle-free, no per-warp register
+#              semantics. Correct for every element type / backend, and the solve that "tiled" falls
+#              back to wherever the tiled path isn't usable.
+#   "tiled"  – the shared-memory A,B-reuse tiled solve where it's usable for this backend+type, else
+#              an automatic fall back to `column`. "Usable" = `warp_trsm_safe(backend, wide)` (the
+#              hardware shuffle works here; false on stock oneAPI, Metal-unless-opted-in, and wide
+#              non-IEEE types) AND the trailing-update tiles fit shared memory (a wide non-IEEE B≠I
+#              pencil needs two tiles and typically overflows). The performant choice for
+#              ComplexF32/F64 on CUDA / AMDGPU.
+# (The earlier register-warp `@generated` solve was removed: it only beat tiled at small m while
+# paying a per-R recompile growing to ~18 s at R=16 / minutes at R=32. The former gate-bypassing
+# `tiled` was also dropped — `tiled` now always self-gates; what it means here is the old `auto`.)
+const _VALID_TRSM = ("column", "tiled")
 
 function trsm_strategy()
     s = get(ENV, "KAPSEUDO_TRSM", @load_preference("trsm_strategy", "column"))
@@ -74,21 +74,20 @@ function set_intel_force_simd32!(flag::Bool)
 end
 export set_intel_force_simd32!
 
-# ── Metal: opt-in for the tiled fast path under `auto` ─────────────────────────────────
+# ── Metal: opt-in for the tiled fast path ──────────────────────────────────────────────
 # Unlike oneAPI (where the stock KernelIntrinsics shuffle is a stub), Metal's warp shuffles are
 # correct, so this is a policy gate, not a correctness one: it keeps the always-correct `column`
-# solve as Metal's `auto` choice by default, matching how oneAPI requires an explicit opt-in, so
-# the fast path isn't silently on for a modest speedup. The Metal extension's `warp_trsm_safe`
-# reads this. (Explicit KAPSEUDO_TRSM=tiled still bypasses the gate, as on every backend.) The
-# `metal_warp_trsm` preference name is retained for back-compat; it now gates only the tiled solve.
+# solve as what Metal's `tiled` strategy falls back to by default, matching how oneAPI requires an
+# explicit opt-in, so the fast path isn't silently on for a modest speedup. The Metal extension's
+# `warp_trsm_safe` reads this. (The `metal_warp_trsm` preference name is retained for back-compat.)
 metal_warp_trsm() = @load_preference("metal_warp_trsm", false)
 """
     set_metal_warp_trsm!(flag::Bool)
 
-Persist whether the `auto` trsm strategy may use the tiled fast path on Metal (default
-`false` → `auto` uses the always-correct `column` solve on Metal). Metal's shuffles are correct,
-so this is an opt-in for a modest speedup, mirroring oneAPI's `set_intel_force_simd32!`. Stored
-in LocalPreferences.toml; restart Julia (or set `KAPSEUDO_TRSM=tiled`) for it to take effect.
+Persist whether the `tiled` trsm strategy may use the tiled fast path on Metal (default
+`false` → `tiled` falls back to the always-correct `column` solve on Metal). Metal's shuffles are
+correct, so this is an opt-in for a modest speedup, mirroring oneAPI's `set_intel_force_simd32!`.
+Stored in LocalPreferences.toml; restart Julia (or set `KAPSEUDO_TRSM=tiled`) for it to take effect.
 """
 function set_metal_warp_trsm!(flag::Bool)
     @set_preferences!("metal_warp_trsm" => flag)

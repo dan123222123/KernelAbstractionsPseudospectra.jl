@@ -330,34 +330,27 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
     end
 end
 
-# End-to-end consistency of the GPU trsm strategies (KAPSEUDO_TRSM): the `tiled` solve and `auto`
-# must match the shuffle-free `column` baseline to element-type tolerance, across sizes incl.
-# partial last panels (m not a multiple of 32).
+# End-to-end consistency of the GPU `tiled` trsm strategy (KAPSEUDO_TRSM=tiled): it must match the
+# shuffle-free `column` baseline to element-type tolerance, across sizes incl. partial last panels
+# (m not a multiple of 32). `tiled` self-gates to `column` where the shuffle/tiles aren't usable, so
+# it's safe to request on any backend (on a shuffle-unsafe backend it simply IS column here).
 function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
     KernelAbstractions.isgpu(backend) || return
     @testset "trsm strategy consistency -- $(backend)" begin
-        # `auto` is always safe (it routes tiled→column on backends where the shuffle isn't usable,
-        # e.g. stock oneAPI, or where the trailing tiles don't fit). Only force explicit `tiled`
-        # where it's actually correct (warp_trsm_safe) — otherwise it'd run the stub shuffle and fail.
-        strategies = KAPseudospectra.warp_trsm_safe(backend, false) ? ("tiled", "auto") : ("auto",)
-
-        # Run every strategy on pencil `P` and require it to match the shuffle-free `column`
-        # baseline to element-type tolerance. `extraenv` injects extra ENV pairs (e.g. a forced
-        # crossover) for the duration of each run.
-        function check(P, T; extraenv=())
+        # Run the `tiled` strategy on pencil `P` and require it to match the shuffle-free `column`
+        # baseline to element-type tolerance.
+        function check(P, T)
             _, _, zg = qgrid(T, (-3, 3), (-3, 3), (40, 40))
             tol = real(T) === Float32 ? 1e-4 : 1e-10
-            σc = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "column", extraenv...)
-            for strat in strategies
-                σ = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => strat, extraenv...)
-                @test maximum(abs.(σ .- σc)) / maximum(abs.(σc)) < tol
-            end
+            σc = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "column")
+            σt = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "tiled")
+            @test maximum(abs.(σt .- σc)) / maximum(abs.(σc)) < tol
         end
 
         for T in types
             # Standard (B=I) pencil. Sizes span power-of-two panels and partial last panels (m not a
             # multiple of 32), AND small m < 32 (the tiled panel solve is intrinsically 32-wide and
-            # masks lanes past a partial last panel — exercised here end-to-end via `auto`/`tiled`).
+            # masks lanes past a partial last panel — exercised here end-to-end via `tiled`).
             # 64/256 were folded in from the former bench/tiled_check.jl.
             for m in (8, 16, 31, 32, 64, 100, 128, 256, 300)
                 rng = Random.seed!(2024)

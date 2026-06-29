@@ -14,9 +14,10 @@ backend = select_backend(ARGS)
 gpu = KernelAbstractions.isgpu(backend)
 devs = gpu ? KAPseudospectra.devices(backend) : missing   # devices(::CPU) is scalar → use missing
 
-# This bench FORCES KAPSEUDO_TRSM=tiled, which runs a warp-shuffle kernel. On a GPU where the
-# shuffle isn't usable (stock oneAPI's KernelIntrinsics @shfl is a TODO stub; Metal without the
-# opt-in) that would miscompile/crash, so fail fast with guidance. (On CPU the strategy is a no-op.)
+# This bench compares KAPSEUDO_TRSM=tiled vs column. On a GPU where the shuffle isn't usable (stock
+# oneAPI's KernelIntrinsics @shfl is a TODO stub; Metal without the opt-in) `tiled` self-gates to the
+# column solve — so the comparison would be column-vs-column. Fail fast with guidance instead so the
+# bench actually measures the tiled kernel. (On CPU the strategy is a no-op.)
 if gpu && !KAPseudospectra.warp_trsm_safe(backend, false)
     error("the tiled solve isn't usable on $(backend) (warp_trsm_safe == false) — use a backend " *
           "where it runs (CUDA/AMDGPU, or oneAPI/Metal with the opt-in enabled), or run on cpu.")

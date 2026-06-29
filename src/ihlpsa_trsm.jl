@@ -24,31 +24,27 @@ end
 # Two GPU solve kernels are available:
 #   * column-oriented (default): a `@synchronize()`-per-column workgroup kernel — barrier-based,
 #     shuffle-free, correct for every element type and backend. The portable default.
-#   * tiled (`auto` / `tiled`): a right-looking blocked solve with shared-memory A,B-tile reuse
-#     across the grid-point batch (panel solves broadcast pivots by `@shfl`). Bandwidth-optimal and
-#     the performance path on a shuffle-capable backend.
+#   * tiled (opt-in `tiled`): a right-looking blocked solve with shared-memory A,B-tile reuse across
+#     the grid-point batch (panel solves broadcast pivots by `@shfl`). Bandwidth-optimal and the
+#     performance path on a shuffle-capable backend; it SELF-GATES to the column solve wherever the
+#     shuffle / shared memory isn't usable, so `tiled` is safe to request on any backend.
 function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
-    strat = trsm_strategy()
     # The default `column` needs no routing info, so return early — this keeps the per-iteration
     # device-property queries (`device_smem_bytes`, etc.) off the default path.
-    if strat == "column"
+    if trsm_strategy() == "column"
         return _column_trsm!(backend, bV, zv, P, wgs)
     end
-    # `tiled` / `auto`: run the tiled solve where it's usable, else the shuffle-free column solve.
-    # The tiled kernels need their trailing-update `@localmem` tiles to fit this device's shared
-    # memory (`tiled_tiles_fit`: 32²·sizeof(ET)·{1 if B=I else 2} vs `device_smem_bytes`) and a
-    # hardware warp shuffle usable for this backend+type (`warp_trsm_safe`; false on stock oneAPI /
-    # Metal-without-opt-in, and for wide non-IEEE types lacking the per-limb `_trsm_shfl` override —
-    # MultiFloatsPseudospectra). A wide B=I pencil uses the single-tile sB-free kernels and fits; a
-    # wide B≠I pencil needs two tiles and typically overflows → column. For `auto` BOTH gates are
-    # checked; an explicit `tiled` bypasses the shuffle gate (the user opted in), needing only the
-    # tiles to fit.
-    tiled_ok = tiled_tiles_fit(backend, P)               # tiled's @localmem tiles fit device shared memory
-    if strat == "tiled"
-        return tiled_ok ? _tiled_trsm!(backend, bV, zv, P, wgs) : _column_trsm!(backend, bV, zv, P, wgs)
-    end
+    # `tiled`: run the tiled solve where it's usable for this backend+type, else fall back to the
+    # shuffle-free column solve (so requesting `tiled` is always correct). "Usable" needs BOTH: the
+    # trailing-update `@localmem` tiles fit this device's shared memory (`tiled_tiles_fit`:
+    # 32²·sizeof(ET)·{1 if B=I else 2} vs `device_smem_bytes`) AND a hardware warp shuffle usable
+    # here (`warp_trsm_safe`; false on stock oneAPI / Metal-without-opt-in, and for wide non-IEEE
+    # types lacking the per-limb `_trsm_shfl` override — MultiFloatsPseudospectra). A wide B=I pencil
+    # uses the single-tile sB-free kernels and fits; a wide B≠I pencil needs two tiles and typically
+    # overflows → column.
     wide       = !(real(eltype(P.A)) <: Base.IEEEFloat)  # non-IEEE (MultiFloats/BigFloat)
+    tiled_ok   = tiled_tiles_fit(backend, P)             # tiled's @localmem tiles fit device shared memory
     shuffle_ok = warp_trsm_safe(backend, wide)           # tiled shuffle usable for this backend+type
     if shuffle_ok && tiled_ok
         _tiled_trsm!(backend, bV, zv, P, wgs)

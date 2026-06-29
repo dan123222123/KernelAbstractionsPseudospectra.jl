@@ -34,11 +34,11 @@ warp_width(backend) = 32
 # per-device budget instead of an assumed constant.
 device_smem_bytes(backend) = 48 * 1024
 
-# Whether the tiled solve (which broadcasts pivots with warp shuffles) is correct under the "auto"
+# Whether the tiled solve (which broadcasts pivots with warp shuffles) is correct under the `tiled`
 # strategy on this backend. True for CUDA / AMDGPU / Metal: fixed warp/wavefront/SIMD width + a
 # hardware shuffle. On oneAPI it needs BOTH the KernelIntrinsics oneAPI shuffle backend AND a pinned
-# SIMD width, so that extension overrides this; without them `auto` stays on the shuffle-free
+# SIMD width, so that extension overrides this; without them `tiled` falls back to the shuffle-free
 # `column` solve — correct, just not the fast path. Metal also gates it behind an opt-in preference.
-# (Explicit KAPSEUDO_TRSM=tiled is opt-in and not gated.) `wide` is true for non-IEEE element types
-# (MultiFloats / BigFloat); the oneAPI override keeps those on `column`.
+# `wide` is true for non-IEEE element types (MultiFloats / BigFloat); the oneAPI override keeps those
+# on `column`.
 warp_trsm_safe(backend, wide) = true

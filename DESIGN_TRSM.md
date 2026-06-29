@@ -89,11 +89,11 @@ Values:
 | value    | behaviour |
 |----------|-----------|
 | `column` (**default**) | the column-oriented solve — **shuffle-free**, correct for every element type and backend |
-| `auto`   | the tiled solve where it is usable (tiles fit **and** the shuffle is safe), else `column` |
-| `tiled`  | the tiled solve where its tiles fit (shuffle gate bypassed — user opt-in), else `column` |
+| `tiled`  | the tiled solve where it is usable (tiles fit **and** the shuffle is safe), else an automatic fall back to `column` |
 
-**`column` is the shipped default; `auto`/`tiled` are opt-in performance modes.**
-There is **no size crossover** — both opt-in modes route on capability, not `m`:
+**`column` is the shipped default; `tiled` is the opt-in performance mode.**
+There is **no size crossover** — `tiled` routes on capability, not `m`, checking
+**both** of:
 
 - `tiled_tiles_fit(backend, P)` — the 32×32 trailing-update `@localmem` tiles (one
   tile if `B = I`, two if `B ≠ I`) fit `device_smem_bytes`. A wide `B = I` pencil
@@ -107,14 +107,16 @@ There is **no size crossover** — both opt-in modes route on capability, not `m
   type, so a wide pencil tiles through the per-limb override rather than falling
   back to `column`.
 
-`auto` checks **both** gates; an explicit `tiled` checks only the tiles (the user
-opted in to the shuffle). Making `column` the default means a user can't silently
-get garbage by setting the strategy without knowing their setup is safe.
-`ComplexF32` and `ComplexF64` are the tested fast-path types (`test_katrsm.jl`'s
-`test_katrsm_kernels` and `test_trsm_strategies`, the latter over both standard and
-generalized `B≠I` pencils); the genuinely untested/risky case is MultiFloats, which
-is what the conservative default protects against. Switching to a fast mode is one
-`set_trsm_strategy!("auto")` / `KAPSEUDO_TRSM=auto` away.
+Because `tiled` **self-gates** to `column` wherever either check fails, it never
+runs a broken kernel and is safe to request on any backend. (An earlier ungated
+`tiled` that bypassed the shuffle check — and a separate `auto` that did the gating
+— were collapsed into this single gated `tiled`.) `column` nonetheless stays the
+default: it's the fully-validated, bitwise-stable baseline, and a user opts into the
+fast path only once they've confirmed it on their hardware. `ComplexF32` and
+`ComplexF64` are the tested fast-path types (`test_katrsm.jl`'s `test_katrsm_kernels`
+and `test_trsm_strategies`, the latter over both standard and generalized `B≠I`
+pencils); the genuinely untested/risky case is MultiFloats. Switching to the fast
+mode is one `set_trsm_strategy!("tiled")` / `KAPSEUDO_TRSM=tiled` away.
 
 ## Why the register-warp solve was removed
 
@@ -174,7 +176,7 @@ in the tiled trailing-update GEMM, accumulated over the iterations.
   shuffle kernels — they JIT at runtime, and CUDA PTX would not survive the
   precompile→runtime boundary anyway).
 - `test/test_katrsm.jl` — per-kernel correctness (tiled vs LAPACK and vs `column`)
-  and `test_trsm_strategies` (end-to-end `tiled`/`auto` vs `column`).
+  and `test_trsm_strategies` (end-to-end `tiled` vs `column`).
 
 ## Dependency note
 
