@@ -236,5 +236,16 @@ support matrix.
 - A narrow `TC` shrinks the tile enough that some wide `B≠I` pencils which today
   fail `tiled_tiles_fit` (a 32×32-tile check) would now fit — let `tiled_tiles_fit`
   consider the chosen `TC` so those reach the tiled path instead of `column`.
+- Subgroup-width-adaptive panel solve for Intel without the SIMD32 pin. The panel
+  solve's `@shfl` assumes a 32-lane shuffle domain, so on oneAPI we currently force
+  IGC to SIMD32 (`set_intel_force_simd32!`) rather than adapt. A more general path
+  would query the kernel's actual dispatched subgroup size `W` (Level-Zero kernel
+  properties / SYCL `get_sub_group_size`; Metal's `threadExecutionWidth`) and
+  specialise the panel solve on `Val{W}` (a W-lane register shuffle), with the
+  trailing-tile height a multiple of `W`. The query is easy; the `Val{W}` shuffle
+  solve is the work, and the only payoff is running on Intel *without* the pin (and
+  losing the `reqd_sub_group_size` guarantee) — so the pin stays the default. (Note
+  the trailing kernel does NOT need this: it has no shuffle, and 32 is already a
+  multiple of any SIMD width; its height is also occupancy-neutral.)
 - Validate / extend the tiled solve for higher-precision element types, or
   keep them on `column`.
