@@ -5,8 +5,7 @@
 
 # Workgroup size for the column trsm kernel: the warp width (capped at m) on GPU, 1 on CPU. Override
 # via the `wgs` kwarg to ihlpsa. (`warp_width` is a per-backend hook in src/backend.jl.) NOTE: the
-# warp/tiled SHUFFLE solves do NOT use this — they always launch a full `warp_width` warp because a
-# partial-warp `@shfl` is UB (see `_warp_trsm_ka!`), and the tiled kernels are intrinsically 32-wide.
+# tiled SHUFFLE solve does NOT use this — its kernels are intrinsically 32-wide.
 default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, warp_width(backend)) : 1
 
 # Whether the tiled solve's `@localmem` tiles fit this device's shared memory for pencil `P`.
@@ -23,61 +22,40 @@ end
 # non-cpu solve step in lockstep_ihl!
 #
 # Two GPU solve kernels are available:
-#   * warp-register (default): one warp/grid-point with the RHS held in registers and
-#     pivots broadcast by warp shuffle — no block barriers, no global round-trips on b.
-#     Specialized on R = cld(m, ws) (a Val), so one compile per matrix size m (m is fixed
-#     per ihlpsa run; the survivor count g stays the dynamic ndrange).
-#   * column-oriented (fallback): the original `@synchronize()`-per-column kernel. Select
-#     it with KAPSEUDO_WARP_TRSM=0.
+#   * column-oriented (default): a `@synchronize()`-per-column workgroup kernel — barrier-based,
+#     shuffle-free, correct for every element type and backend. The portable default.
+#   * tiled (`auto` / `tiled`): a right-looking blocked solve with shared-memory A,B-tile reuse
+#     across the grid-point batch (panel solves broadcast pivots by `@shfl`). Bandwidth-optimal and
+#     the performance path on a shuffle-capable backend.
 function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
     strat = trsm_strategy()
-    # The default `column` (and explicit `warp`) need no routing info, so return early — this keeps
-    # the per-iteration device-property queries (`device_smem_bytes`, etc.) off the default path.
+    # The default `column` needs no routing info, so return early — this keeps the per-iteration
+    # device-property queries (`device_smem_bytes`, etc.) off the default path.
     if strat == "column"
         return _column_trsm!(backend, bV, zv, P, wgs)
-    elseif strat == "warp"
-        return _warp_trsm!(backend, bV, zv, P, wgs)
     end
-    # `tiled` / `auto`: element-type + size routing for the GPU inner solve.
-    #  * The warp solve is `@generated` on R = ⌈m/32⌉: excellent at small m, but its compile
-    #    time and register pressure blow up with R (≈26 s compile at R=16, register-bound
-    #    occupancy collapse for wide elements). So large problems avoid warp.
-    #  * The tiled solve's trailing-update `@localmem` tiles must fit this device's shared memory
-    #    (`tiled_tiles_fit` computes 32²·sizeof(ET)·{1 if B=I else 2} vs the queried
-    #    `device_smem_bytes`). IEEE floats fit on any GPU; a wide (non-IEEE: MultiFloats/BigFloat)
-    #    generalized pencil needs two tiles and typically overflows, falling back to the shuffle-
-    #    free column solve, while a wide B=I pencil uses the single-tile sB-free kernels and fits.
-    #    Wide warp/tiled use the per-limb `_trsm_shfl` override (MultiFloatsPseudospectra).
-    #    Size threshold for warp→tiled = `trsm_crossover()`.
-    wide       = !(real(eltype(P.A)) <: Base.IEEEFloat)   # non-IEEE (MultiFloats/BigFloat)
-    big        = size(P, 1) >= trsm_crossover()           # m ≥ warp→tiled crossover
-    tiled_ok   = tiled_tiles_fit(backend, P)              # tiled's @localmem tiles fit device shared memory
-    shuffle_ok = warp_trsm_safe(backend, wide)            # warp/tiled shuffle usable for this backend+type
+    # `tiled` / `auto`: run the tiled solve where it's usable, else the shuffle-free column solve.
+    # The tiled kernels need their trailing-update `@localmem` tiles to fit this device's shared
+    # memory (`tiled_tiles_fit`: 32²·sizeof(ET)·{1 if B=I else 2} vs `device_smem_bytes`) and a
+    # hardware warp shuffle usable for this backend+type (`warp_trsm_safe`; false on stock oneAPI /
+    # Metal-without-opt-in, and for wide non-IEEE types lacking the per-limb `_trsm_shfl` override —
+    # MultiFloatsPseudospectra). A wide B=I pencil uses the single-tile sB-free kernels and fits; a
+    # wide B≠I pencil needs two tiles and typically overflows → column. For `auto` BOTH gates are
+    # checked; an explicit `tiled` bypasses the shuffle gate (the user opted in), needing only the
+    # tiles to fit.
+    tiled_ok = tiled_tiles_fit(backend, P)               # tiled's @localmem tiles fit device shared memory
     if strat == "tiled"
-        if tiled_ok
-            _tiled_trsm!(backend, bV, zv, P, wgs)
-        elseif big                                        # large m, tiles don't fit → shuffle-free column
-            _column_trsm!(backend, bV, zv, P, wgs)
-        else                                              # small m → warp
-            _warp_trsm!(backend, bV, zv, P, wgs)
-        end
-    elseif !shuffle_ok                                    # "auto", shuffle unusable (stock oneAPI) → column
-        _column_trsm!(backend, bV, zv, P, wgs)
-    elseif !big                                           # "auto", small m → warp
-        _warp_trsm!(backend, bV, zv, P, wgs)
-    elseif tiled_ok                                       # "auto", large m, tiles fit (IEEE, or wide B=I)
+        return tiled_ok ? _tiled_trsm!(backend, bV, zv, P, wgs) : _column_trsm!(backend, bV, zv, P, wgs)
+    end
+    wide       = !(real(eltype(P.A)) <: Base.IEEEFloat)  # non-IEEE (MultiFloats/BigFloat)
+    shuffle_ok = warp_trsm_safe(backend, wide)           # tiled shuffle usable for this backend+type
+    if shuffle_ok && tiled_ok
         _tiled_trsm!(backend, bV, zv, P, wgs)
-    else                                                  # "auto", large m, wide B≠I → column
+    else
         _column_trsm!(backend, bV, zv, P, wgs)
     end
 end
-
-# Warp-register solve. Uses the portable KA + KernelIntrinsics kernels on every backend.
-# `_warp_trsm!` stays a separate dispatch hook (rather than calling `_warp_trsm_ka!` directly at
-# the call site) so a backend extension could specialize it later, but no extension overrides it
-# today — the earlier opt-in CUDA-native (`@cuda` + `CUDA.shfl_sync`) override was removed.
-_warp_trsm!(backend, bV, zv, P, wgs) = _warp_trsm_ka!(backend, bV, zv, P, wgs)
 
 # Tiled / blocked solve: right-looking panel sweep with shared-memory A,B-tile reuse across
 # the grid-point batch (see src/KATRSM.jl/trsm_tiled_kernels.jl). `z` is conjugated once for
@@ -130,26 +108,6 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
                 @views _tiled_trailing_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen, gt, rtiles; ndrange=32 * rtiles * ggrid)
             end
         end
-    end
-end
-function _warp_trsm_ka!(backend, bV, zv, P, wgs)
-    g = length(zv)
-    # The register-warp shuffle kernels require the workgroup to BE one full hardware warp: each
-    # pivot is broadcast across all `ws` lanes with `@shfl`, whose default membermask names every
-    # lane of the warp. A partial-warp launch (which `default_wgs = min(m, warp_width)` produces for
-    # m < warp_width) would shuffle over lanes that were never launched — UB per the shfl.sync
-    # contract (benign on Pascal, but a portability hazard on Volta+). The kernels already pad rows
-    # past m via their `ir<=m`/`j<=m` guards — exactly the wgs=32 / m=8,16,31 config the unit tests
-    # exercise — so always launch a full warp regardless of m (and of the passed `wgs`, which stays
-    # meaningful only for the shuffle-free column solve).
-    ws = warp_width(backend)
-    R = cld(size(P, 1), ws)
-    if b_is_identity(P)   # B = I ⇒ skip the identity-B reads (the eye register-warp kernels)
-        @views _batched_warp_forward_solve_eye(backend, ws)(bV, conj(zv), P.Ac, Val(R); ndrange=(ws, g))
-        @views _batched_warp_backward_solve_eye(backend, ws)(bV, zv, P.A, Val(R); ndrange=(ws, g))
-    else
-        @views _batched_warp_forward_solve_pencil(backend, ws)(bV, conj(zv), P.Ac, P.Bc, Val(R); ndrange=(ws, g))
-        @views _batched_warp_backward_solve_pencil(backend, ws)(bV, zv, P.A, P.B, Val(R); ndrange=(ws, g))
     end
 end
 function _column_trsm!(backend, bV, zv, P, wgs)

@@ -37,15 +37,12 @@ end
 
 include("trsm_wrappers.jl")
 include("trsm_pencil_wrappers.jl")
-include("trsm_warp_kernels.jl")
 include("trsm_tiled_kernels.jl")
 
 export _batched_backward_solve_pencil, _batched_column_oriented_backward_solve_pencil
 export _batched_forward_solve_pencil, _batched_column_oriented_forward_solve_pencil
 export set_pdiv_accurate
-export _batched_warp_forward_solve_pencil, _batched_warp_backward_solve_pencil
 export _batched_column_oriented_forward_solve_eye, _batched_column_oriented_backward_solve_eye
-export _batched_warp_forward_solve_eye, _batched_warp_backward_solve_eye
 export _tiled_panel_forward, _tiled_panel_backward
 export _tiled_panel_forward_eye, _tiled_panel_backward_eye
 export _tiled_trailing_forward, _tiled_trailing_backward

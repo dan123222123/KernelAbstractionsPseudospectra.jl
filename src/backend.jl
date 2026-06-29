@@ -20,11 +20,12 @@ supports_fp64(B) = KernelAbstractions.supports_float64(B)
 
 # ── device-property queries the trsm solves route on (defaults here; extensions query hardware) ──
 
-# Warp/subgroup width used by the register-warp / tiled solves (one shuffle domain). The default is
-# 32, but this is a per-backend QUERY hook, not a baked constant: each GPU extension overrides it
-# with the actual hardware value — `CUDA.warpsize` (32), `AMDGPU` warpSize (32 on RDNA, 64 on CDNA),
-# 32 for Metal SIMD-groups, 32 for Intel under the SIMD32 pin (`set_intel_force_simd32!`).
-# KernelAbstractions has no portable pre-launch query, so the value comes from each backend's API.
+# Warp/subgroup width (one shuffle domain). Sets the column solve's workgroup size (`default_wgs`);
+# the tiled solve's panel width is a fixed 32 regardless. The default is 32, but this is a per-backend
+# QUERY hook, not a baked constant: each GPU extension overrides it with the actual hardware value —
+# `CUDA.warpsize` (32), `AMDGPU` warpSize (32 on RDNA, 64 on CDNA), 32 for Metal SIMD-groups, 32 for
+# Intel under the SIMD32 pin (`set_intel_force_simd32!`). KernelAbstractions has no portable
+# pre-launch query, so the value comes from each backend's API.
 warp_width(backend) = 32
 
 # Shared-memory bytes per workgroup available to the tiled solve's `@localmem` tiles. Default a
@@ -33,11 +34,11 @@ warp_width(backend) = 32
 # per-device budget instead of an assumed constant.
 device_smem_bytes(backend) = 48 * 1024
 
-# Whether the register-warp / tiled solves (which broadcast pivots with warp shuffles) are correct
-# under the "auto" strategy on this backend. True for CUDA / AMDGPU / Metal: fixed warp/wavefront/
-# SIMD width + a hardware shuffle. On oneAPI it needs BOTH the KernelIntrinsics oneAPI shuffle
-# backend AND a pinned SIMD width, so that extension overrides this; without them `auto` stays on
-# the shuffle-free `column` solve — correct, just not the fast path. Metal also gates it behind an
-# opt-in preference. (Explicit KAPSEUDO_TRSM=warp/tiled is opt-in and not gated.) `wide` is true for
-# non-IEEE element types (MultiFloats / BigFloat); the oneAPI override keeps those on `column`.
+# Whether the tiled solve (which broadcasts pivots with warp shuffles) is correct under the "auto"
+# strategy on this backend. True for CUDA / AMDGPU / Metal: fixed warp/wavefront/SIMD width + a
+# hardware shuffle. On oneAPI it needs BOTH the KernelIntrinsics oneAPI shuffle backend AND a pinned
+# SIMD width, so that extension overrides this; without them `auto` stays on the shuffle-free
+# `column` solve — correct, just not the fast path. Metal also gates it behind an opt-in preference.
+# (Explicit KAPSEUDO_TRSM=tiled is opt-in and not gated.) `wide` is true for non-IEEE element types
+# (MultiFloats / BigFloat); the oneAPI override keeps those on `column`.
 warp_trsm_safe(backend, wide) = true

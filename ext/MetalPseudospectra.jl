@@ -29,7 +29,7 @@ KAPseudospectra.device_reclaim(B::Metal.MetalBackend) = GC.gc()
 # the @localmem budget for the tiled solve. NOTE: untested on hardware.
 KAPseudospectra.warp_width(B::Metal.MetalBackend) = 32
 KAPseudospectra.device_smem_bytes(B::Metal.MetalBackend) = Int(Metal.device().maxThreadgroupMemoryLength)
-# Make the warp/tiled fast path opt-in on Metal (like oneAPI), defaulting to the always-correct
+# Make the tiled fast path opt-in on Metal (like oneAPI), defaulting to the always-correct
 # column solve under `auto`. Metal's IEEE-F32 shuffles ARE correct, so for the F32 case this is a
 # policy gate (modest speedup vs column) rather than a correctness one — flip it with
 # set_metal_warp_trsm!. The `!wide` is effectively moot: Apple GPUs have no FP64, so the Float64-

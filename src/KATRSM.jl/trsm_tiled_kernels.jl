@@ -1,16 +1,15 @@
 # Tiled / blocked batched pencil triangular solves (KernelAbstractions + KernelIntrinsics).
-# See also DESIGN_TRSM.md §"Tiled" for the bandwidth motivation, the crossover with the
-# register-warp solve, and the end-to-end speedups.
+# See also DESIGN_TRSM.md §"Tiled" for the bandwidth motivation and the end-to-end speedups.
 #
-# For large m the per-grid-point warp solves become bandwidth-bound: every warp re-streams
+# For large m a per-grid-point column solve becomes bandwidth-bound: every grid point re-streams
 # the whole m×m A,B pencil from DRAM with zero reuse across grid points (A,B are shared; only
 # z varies). The tiled solve fixes this with a right-looking blocked algorithm, panel width
 # = warp size (32):
 #   for each panel k:
 #     (1) PANEL SOLVE — solve the ≤32×32 *triangular* diagonal tile for every grid point
 #         (lower-triangular for the forward sweep, upper-triangular for the backward sweep;
-#         one warp per grid point, pivots broadcast by `@shfl`, same numerics as the
-#         register-warp kernel);
+#         one warp per grid point, pivots broadcast by `@shfl`, same per-element numerics as the
+#         column kernel);
 #     (2) TRAILING UPDATE — a tiled GEMM that subtracts panel k's contribution from the
 #         trailing rows. Each workgroup loads the A,B[row-tile, panel-k] tile into `@localmem`
 #         ONCE and reuses it across `gt` grid points, turning the streaming into compute-bound
@@ -39,10 +38,18 @@
 # sA/sB or multiplied — dead storage, not dead computation.
 #
 # Trailing-update workgroups use a flat 1-D group index decoded into (row-tile, grid-pt-tile)
-# to avoid relying on KA 2-D group indexing. Numerics match the column-oriented / register-warp
-# kernels (same `_pdiv`, `zBAij`, update order).
+# to avoid relying on KA 2-D group indexing. Per-element numerics match the column-oriented
+# kernels (same `_pdiv`, `zBAij`); the blocked update order differs, so results agree to round-off.
 
 using KernelIntrinsics: @shfl, Idx
+
+# Warp-shuffle broadcast used by the tiled panel solves to broadcast each solved pivot lane→lane (it
+# also synchronizes the warp). For IEEE hardware floats (ComplexF32/F64) this is a single `@shfl`.
+# Multi-limb float types (MultiFloats) are miscompiled when shuffled as one wide composite and
+# silently return garbage; the MultiFloatsPseudospectra extension overrides this with a per-limb
+# shuffle (each underlying hardware float shuffled separately, then reconstructed) — verified exact,
+# whereas the whole-value shuffle is not.
+@inline _trsm_shfl(v, src) = @shfl(Idx, v, src)
 
 # ---- diagonal panel solves (one warp per grid point) ----
 

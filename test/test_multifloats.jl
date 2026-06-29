@@ -7,8 +7,8 @@
 #     plain Float64 does. Migrated from examples/ihlpsa_multifloats_accuracy.jl (now a real test).
 #     CPU-runnable (the extended-precision path goes through the shuffle-free column solve).
 #
-#  2. test_multifloats_warp_shuffle(backend) — GPU-only (where warp_trsm_safe): the per-limb
-#     `_trsm_shfl` override (MultiFloatsPseudospectra) must make the warp solve BITWISE-match
+#  2. test_multifloats_tiled_shuffle(backend) — GPU-only (where warp_trsm_safe): the per-limb
+#     `_trsm_shfl` override (MultiFloatsPseudospectra) must make the tiled panel solve BITWISE-match
 #     the column solve for Complex{Float64x2}. Skipped on CPU / stock oneAPI (no usable shuffle).
 
 using MultiFloats, GenericSchur, GenericLinearAlgebra
@@ -53,17 +53,18 @@ function test_multifloats_accuracy()
     end
 end
 
-# (2) The per-limb shuffle override must reproduce the column solve bitwise on GPU. Only runs
-# where the warp shuffle is usable for wide types (CUDA / AMDGPU / Metal-opt-in); skipped on CPU
-# and stock oneAPI (its KernelIntrinsics @shfl for oneAPI is a TODO stub).
-function test_multifloats_warp_shuffle(backend)
+# (2) The per-limb shuffle override must reproduce the column solve bitwise on GPU. The tiled panel
+# solve broadcasts each pivot with `_trsm_shfl` (the override), and for a single ≤32 panel the panel
+# solve IS the full triangular solve — same `_pdiv` / pencil / ascending-column update order as the
+# column kernel, so it must be BITWISE identical. Exercise the override by comparing the tiled panel
+# kernels to column for m ≤ 32. Only runs where the warp shuffle is usable for wide types (CUDA /
+# AMDGPU / Metal-opt-in); skipped on CPU and stock oneAPI (its KernelIntrinsics @shfl is a TODO stub).
+function test_multifloats_tiled_shuffle(backend)
     (KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, true)) || return
-    @testset "MultiFloats per-limb warp shuffle (bitwise vs column) -- $(backend)" begin
+    @testset "MultiFloats per-limb tiled shuffle (bitwise vs column) -- $(backend)" begin
         T = Complex{Float64x2}
-        for m in (16, 32, 33, 64)
+        for m in (16, 31, 32)            # single panel (≤32): the tiled panel solve is the full solve
             g = 4
-            wgs = 32
-            R = cld(m, wgs)
             # Build well-conditioned triangular pencils by promoting Float64 randoms (MultiFloats
             # has no native randn); same dominant-diagonal trick as _rand_*tri keeps cond O(1).
             up(s) = (Mr = s .* triu(randn(ComplexF64, m, m), 1); [Mr[i, i] = 1 + s * randn(ComplexF64) for i in 1:m]; T.(Mr))
@@ -73,24 +74,23 @@ function test_multifloats_warp_shuffle(backend)
             zv = T.(2 .+ 0.3 .* randn(ComplexF64, g))
             b0 = reduce(hcat, [T.(randn(ComplexF64, m)) for _ in 1:g])
 
-            # forward (lower-tri): warp vs column, must be bitwise identical
-            bw = VectorOfSimilarVectors(_to(backend, copy(b0)))
-            KATRSM._batched_warp_forward_solve_pencil(backend, wgs, (wgs, g))(bw, _to(backend, zv), _to(backend, Al), _to(backend, Bl), Val(R))
+            # forward (lower-tri): tiled panel (one panel = full solve) vs column, bitwise identical
+            bt = VectorOfSimilarVectors(_to(backend, copy(b0)))
+            KATRSM._tiled_panel_forward(backend, 32, (32, g))(bt, _to(backend, zv), _to(backend, Al), _to(backend, Bl), 0, m)
             KernelAbstractions.synchronize(backend)
             bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
-            KATRSM._batched_column_oriented_forward_solve_pencil(backend, wgs, (wgs, g))(bc, _to(backend, zv), _to(backend, Al), _to(backend, Bl))
+            KATRSM._batched_column_oriented_forward_solve_pencil(backend, 32, (32, g))(bc, _to(backend, zv), _to(backend, Al), _to(backend, Bl))
             KernelAbstractions.synchronize(backend)
-            @test _from(bw.data) == _from(bc.data)
+            @test _from(bt.data) == _from(bc.data)
 
-            # backward (upper-tri): the backward warp solve also goes through the per-limb _trsm_shfl,
-            # so exercise it too — bitwise identical to the column-oriented backward kernel.
-            bw = VectorOfSimilarVectors(_to(backend, copy(b0)))
-            KATRSM._batched_warp_backward_solve_pencil(backend, wgs, (wgs, g))(bw, _to(backend, zv), _to(backend, Au), _to(backend, Bu), Val(R))
+            # backward (upper-tri): exercises the same per-limb _trsm_shfl in the descending panel solve
+            bt = VectorOfSimilarVectors(_to(backend, copy(b0)))
+            KATRSM._tiled_panel_backward(backend, 32, (32, g))(bt, _to(backend, zv), _to(backend, Au), _to(backend, Bu), 0, m)
             KernelAbstractions.synchronize(backend)
             bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
-            KATRSM._batched_column_oriented_backward_solve_pencil(backend, wgs, (wgs, g))(bc, _to(backend, zv), _to(backend, Au), _to(backend, Bu))
+            KATRSM._batched_column_oriented_backward_solve_pencil(backend, 32, (32, g))(bc, _to(backend, zv), _to(backend, Au), _to(backend, Bu))
             KernelAbstractions.synchronize(backend)
-            @test _from(bw.data) == _from(bc.data)
+            @test _from(bt.data) == _from(bc.data)
         end
     end
 end

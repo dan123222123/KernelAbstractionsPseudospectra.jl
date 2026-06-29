@@ -209,69 +209,13 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
             end
         end
 
-        @testset "batched warp-register pencil (KA, shuffle, GPU only)" begin
-            # The warp-register kernels use warp shuffles (@shfl), so they run on GPU
-            # backends only. They must agree with LAPACK and be BITWISE-identical to the
-            # column-oriented kernel (same pencil/_pdiv/update order). wgs is fixed at the
-            # warp width 32; R = cld(m, 32) is the per-lane register-slot count.
-            # Skipped where the backend's warp shuffle isn't usable for these solves: on
-            # oneAPI that needs the KernelIntrinsics shuffle backend + a pinned SIMD32 width
-            # (see `warp_trsm_safe`) — stock oneAPI routes ihlpsa to the column solve, so the
-            # warp kernels aren't part of its supported path and would just `## TODO`-stub out.
-            if KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, false)
-                wgs = 32
-                for T in types, m in (8, 16, 31, 32, 33, 64, 96)
-                    rtol = _tol(T)
-                    g = 4
-                    R = cld(m, wgs)
-                    Au = _rand_uppertri(T, m); Bu = _rand_uppertri(T, m)
-                    Al = _rand_lowertri(T, m); Bl = _rand_lowertri(T, m)
-                    zv = T(2) .+ T(0.3) * randn(T, g)
-                    b0_mat = reduce(hcat, [randn(T, m) for _ = 1:g])
-
-                    Au_d = _to(backend, Au); Bu_d = _to(backend, Bu)
-                    Al_d = _to(backend, Al); Bl_d = _to(backend, Bl)
-                    zv_d = _to(backend, zv)
-
-                    # forward (lower-triangular)
-                    bw = VectorOfSimilarVectors(_to(backend, copy(b0_mat)))
-                    KATRSM._batched_warp_forward_solve_pencil(backend, wgs, (wgs, g))(bw, zv_d, Al_d, Bl_d, Val(R))
-                    KernelAbstractions.synchronize(backend)
-                    bc = VectorOfSimilarVectors(_to(backend, copy(b0_mat)))
-                    KATRSM._batched_column_oriented_forward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, Al_d, Bl_d)
-                    KernelAbstractions.synchronize(backend)
-                    bw_h = _from(bw.data); bc_h = _from(bc.data)
-                    for i = 1:g
-                        yref = LowerTriangular(zv[i] * Bl .- Al) \ b0_mat[:, i]
-                        @test isapprox(bw_h[:, i], yref; rtol=rtol)
-                        @test bw_h[:, i] == bc_h[:, i]      # bitwise vs column-oriented
-                    end
-
-                    # backward (upper-triangular)
-                    bw = VectorOfSimilarVectors(_to(backend, copy(b0_mat)))
-                    KATRSM._batched_warp_backward_solve_pencil(backend, wgs, (wgs, g))(bw, zv_d, Au_d, Bu_d, Val(R))
-                    KernelAbstractions.synchronize(backend)
-                    bc = VectorOfSimilarVectors(_to(backend, copy(b0_mat)))
-                    KATRSM._batched_column_oriented_backward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, Au_d, Bu_d)
-                    KernelAbstractions.synchronize(backend)
-                    bw_h = _from(bw.data); bc_h = _from(bc.data)
-                    for i = 1:g
-                        xref = UpperTriangular(zv[i] * Bu .- Au) \ b0_mat[:, i]
-                        @test isapprox(bw_h[:, i], xref; rtol=rtol)
-                        @test bw_h[:, i] == bc_h[:, i]
-                    end
-                end
-            end
-        end
-
-        @testset "batched B=I eye kernels (column + warp)" begin
-            # For a standard pencil (B = I) the eye column/warp solves drop the B read: M = zI − A,
+        @testset "batched B=I eye kernels (column)" begin
+            # For a standard pencil (B = I) the eye column solve drops the B read: M = zI − A,
             # so the pivot is (z − A[j,j]) and off-diagonal updates are (−A[i,j]). They must agree
             # with LAPACK on M = zI − {L,U} AND with the generic kernels run with B = the materialized
             # identity, to round-off (they compute the shorter z−A / −A expressions, so NVPTX FMA
-            # contraction can differ by ~1 ULP — not bit-for-bit). Column eye runs on any backend;
-            # warp eye (shuffle) is GPU + warp_trsm_safe only. This is the path `_column_trsm!` /
-            # `_warp_trsm_ka!` take for a StandardSchurMatrixPencil.
+            # contraction can differ by ~1 ULP — not bit-for-bit). Column eye runs on any backend.
+            # This is the path `_column_trsm!` takes for a StandardSchurMatrixPencil.
             for T in types, m in (8, 16, 31, 32, 64)
                 rtol = _tol(T)
                 g = 4
@@ -299,32 +243,6 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
                     KATRSM._batched_column_oriented_backward_solve_eye(backend, wgs, (wgs, g))(be, zv_d, U_d)
                     bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
                     KATRSM._batched_column_oriented_backward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, U_d, Id_d)
-                    KernelAbstractions.synchronize(backend)
-                    beh = _from(be.data); bch = _from(bc.data)
-                    for i = 1:g
-                        @test isapprox(beh[:, i], UpperTriangular(zv[i] * I - U) \ b0[:, i]; rtol=rtol)
-                        @test isapprox(beh[:, i], bch[:, i]; rtol=rtol)   # ~round-off vs generic (FMA order)
-                    end
-                end
-
-                # warp eye vs generic warp-with-identity (GPU + usable shuffle only).
-                if KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, false)
-                    wgs = 32; R = cld(m, wgs)
-                    be = VectorOfSimilarVectors(_to(backend, copy(b0)))
-                    KATRSM._batched_warp_forward_solve_eye(backend, wgs, (wgs, g))(be, zv_d, L_d, Val(R))
-                    bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
-                    KATRSM._batched_warp_forward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, L_d, Id_d, Val(R))
-                    KernelAbstractions.synchronize(backend)
-                    beh = _from(be.data); bch = _from(bc.data)
-                    for i = 1:g
-                        @test isapprox(beh[:, i], LowerTriangular(zv[i] * I - L) \ b0[:, i]; rtol=rtol)
-                        @test isapprox(beh[:, i], bch[:, i]; rtol=rtol)   # ~round-off vs generic (FMA order)
-                    end
-
-                    be = VectorOfSimilarVectors(_to(backend, copy(b0)))
-                    KATRSM._batched_warp_backward_solve_eye(backend, wgs, (wgs, g))(be, zv_d, U_d, Val(R))
-                    bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
-                    KATRSM._batched_warp_backward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, U_d, Id_d, Val(R))
                     KernelAbstractions.synchronize(backend)
                     beh = _from(be.data); bch = _from(bc.data)
                     for i = 1:g
@@ -412,16 +330,16 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
     end
 end
 
-# End-to-end consistency of the GPU trsm strategies (KAPSEUDO_TRSM): the per-warp `warp`
-# and `tiled` solves, and `auto`, must match the shuffle-free `column` baseline to element-
-# type tolerance, across sizes incl. partial last panels (m not a multiple of 32).
+# End-to-end consistency of the GPU trsm strategies (KAPSEUDO_TRSM): the `tiled` solve and `auto`
+# must match the shuffle-free `column` baseline to element-type tolerance, across sizes incl.
+# partial last panels (m not a multiple of 32).
 function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
     KernelAbstractions.isgpu(backend) || return
     @testset "trsm strategy consistency -- $(backend)" begin
-        # `auto` is always safe (it routes warp/tiled→column on backends where the shuffle isn't
-        # usable, e.g. stock oneAPI). Only force explicit `warp`/`tiled` where they're actually
-        # correct (warp_trsm_safe) — otherwise they'd run the stub shuffle and fail.
-        strategies = KAPseudospectra.warp_trsm_safe(backend, false) ? ("warp", "tiled", "auto") : ("auto",)
+        # `auto` is always safe (it routes tiled→column on backends where the shuffle isn't usable,
+        # e.g. stock oneAPI, or where the trailing tiles don't fit). Only force explicit `tiled`
+        # where it's actually correct (warp_trsm_safe) — otherwise it'd run the stub shuffle and fail.
+        strategies = KAPseudospectra.warp_trsm_safe(backend, false) ? ("tiled", "auto") : ("auto",)
 
         # Run every strategy on pencil `P` and require it to match the shuffle-free `column`
         # baseline to element-type tolerance. `extraenv` injects extra ENV pairs (e.g. a forced
@@ -438,16 +356,15 @@ function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
 
         for T in types
             # Standard (B=I) pencil. Sizes span power-of-two panels and partial last panels (m not a
-            # multiple of 32), AND small m < 32: there the production warp launch is still a full
-            # `warp_width` warp (regression guard for the partial-warp shuffle fix), exercised here
-            # end-to-end via `auto`/`warp`. 64/256 were folded in from the former bench/tiled_check.jl;
-            # 512 (the R=16 warp-compile cliff) is left to bench/warp_trsm_bench.jl to keep CI sane.
+            # multiple of 32), AND small m < 32 (the tiled panel solve is intrinsically 32-wide and
+            # masks lanes past a partial last panel — exercised here end-to-end via `auto`/`tiled`).
+            # 64/256 were folded in from the former bench/tiled_check.jl.
             for m in (8, 16, 31, 32, 64, 100, 128, 256, 300)
                 rng = Random.seed!(2024)
                 check(MatrixPencil(schur(randn(rng, T, m, m))), T)
             end
             # Generalized (B≠I) pencil: the ONLY coverage of the two-tile generic tiled trailing
-            # kernels (_tiled_trailing_{forward,backward}) and the B≠I warp/column paths — every
+            # kernels (_tiled_trailing_{forward,backward}) and the B≠I tiled/column paths — every
             # other case here is B=I, so `b_is_identity` selects the sB-free `*_eye` kernels. m>32 so
             # the trailing update actually runs; 100 adds a partial last panel. B is diagonally
             # dominant so z*B−A stays well-conditioned across the grid.
@@ -456,14 +373,6 @@ function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
                 A = randn(rng, T, m, m)
                 B = randn(rng, T, m, m) + T(5) * I
                 check(MatrixPencil(A, B), T)
-            end
-            # `auto` crossover into the tiled solve: the default crossover (512) is above every size
-            # here, so without a forced crossover `auto` is identical to `warp` and the auto→tiled
-            # branch is never taken. Force it low so `auto` routes m≥64 to tiled.
-            for m in (64, 128)
-                rng = Random.seed!(2026)
-                check(MatrixPencil(schur(randn(rng, T, m, m))), T;
-                      extraenv=("KAPSEUDO_TRSM_CROSSOVER" => "64",))
             end
         end
     end
