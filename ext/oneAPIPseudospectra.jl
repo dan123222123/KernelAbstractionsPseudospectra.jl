@@ -20,6 +20,11 @@ KAPseudospectra.device_reclaim(B::oneAPI.oneAPIBackend) = GC.gc()
 KAPseudospectra.warp_width(B::oneAPI.oneAPIBackend) = 32
 KAPseudospectra.device_smem_bytes(B::oneAPI.oneAPIBackend) =
     Int(oneAPI.oneL0.compute_properties(oneAPI.device()).maxSharedLocalMemory)
+# Intel SLM is per-subslice, and a subslice runs ~one workgroup's SLM at a time, so the per-"SM"
+# occupancy budget ≈ the per-workgroup SLM (no separate per-SM figure to query). Used only for the
+# no-probe analytic `tiled_tc` default — the timed `tune_trsm_tc!` probe is the accurate path here.
+KAPseudospectra.device_smem_per_sm(B::oneAPI.oneAPIBackend) =
+    Int(oneAPI.oneL0.compute_properties(oneAPI.device()).maxSharedLocalMemory)
 # oneAPI.jl statically declares `supports_float64` false for every backend, even
 # FP64-capable Arc/Max parts. Override the package's `supports_fp64` hook with a
 # device-accurate Level-Zero query so F64 auto-enables exactly where the hardware

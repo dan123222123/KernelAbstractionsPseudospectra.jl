@@ -17,6 +17,15 @@ KAPseudospectra.device_reclaim(B::AMDGPU.ROCBackend) = AMDGPU.HIP.reclaim()
 KAPseudospectra.warp_width(B::AMDGPU.ROCBackend) = Int(AMDGPU.HIP.properties(AMDGPU.device()).warpSize)
 KAPseudospectra.device_smem_bytes(B::AMDGPU.ROCBackend) =
     Int(AMDGPU.HIP.properties(AMDGPU.device()).sharedMemPerBlock)
+# Per-CU LDS, for the tiled trailing-tile-width occupancy estimate (`tiled_tc`). The timed
+# `tune_trsm_tc!` probe is authoritative; this only feeds the no-probe analytic default — so if a
+# given AMDGPU.jl doesn't expose the per-MP field, fall back to ~2× the per-block LDS rather than
+# erroring at load.
+KAPseudospectra.device_smem_per_sm(B::AMDGPU.ROCBackend) =
+    let p = AMDGPU.HIP.properties(AMDGPU.device())
+        hasproperty(p, :maxSharedMemoryPerMultiProcessor) ?
+            Int(p.maxSharedMemoryPerMultiProcessor) : 2 * Int(p.sharedMemPerBlock)
+    end
 
 ## precompile gpu code (only when a device is actually usable)
 if AMDGPU.functional()

@@ -25,24 +25,40 @@ end
 # measured on a 1080 Ti, the trailing update ~1.3–1.7× faster — at the cost of ⌈plen/TC⌉ tile reloads
 # per panel (A,B DRAM traffic is unchanged). TC=32 reproduces the original single-tile sweep.
 #
-# Chosen analytically per device+type — NO benchmark run. The end-to-end optimum is NOT the narrowest
-# tile: more sub-tiles mean more @localmem reloads / panel passes, whose overhead eventually outweighs
-# the occupancy gain (measured 1080 Ti: the 1-tile eye solve peaks at TC=16, the 2-tile generic at
-# TC=8 — both ≈24 resident blocks/SM). So target the occupancy SWEET SPOT, ~¾ of the per-SM block cap
-# resident, and use the LARGEST TC that reaches it (least narrowing → least overhead); fall back to
-# the narrowest that fits a block if none do. `device_smem_per_sm` gives the per-SM budget for the
-# blocks-per-SM estimate (= smem_sm ÷ tile, capped by the hardware block limit). `KAPSEUDO_TRSM_TC`
-# forces a value (tuning/measurement). Only called for pencils that passed `tiled_tiles_fit`, so the
-# 32×32 tile fits and at least TC=32 is valid.
+# Resolution order: `KAPSEUDO_TRSM_TC` env var > a value persisted by the `tune_trsm_tc!` probe
+# (src/tune.jl), keyed per element type + eye/generic > the analytic estimate `_auto_tiled_tc`. The
+# probe is the accurate per-device path (it MEASURES the compute+bandwidth tradeoff directly, so it
+# needs no occupancy model); the analytic estimate is the zero-setup default when no probe has run.
+# Only called for pencils that passed `tiled_tiles_fit`, so the 32×32 tile fits and TC=32 is valid.
 const _TC_CANDIDATES = (32, 16, 8)         # largest → smallest; 32 reproduces the pre-optimization sweep
 const _MAX_BLOCKS_PER_SM = 32              # NVIDIA/AMD per-SM resident-block cap (Pascal…Hopper, CDNA/RDNA)
 const _TARGET_BLOCKS = 3 * _MAX_BLOCKS_PER_SM ÷ 4   # ~¾ of the cap = the measured occupancy sweet spot
+_tc_pref_key(T, eye::Bool) = "trsm_tc_$(T)_$(eye ? "eye" : "gen")"
+
 function tiled_tc(backend, P)
     if haskey(ENV, "KAPSEUDO_TRSM_TC")
         tc = parse(Int, ENV["KAPSEUDO_TRSM_TC"])
         tc in _TC_CANDIDATES || error("KAPSEUDO_TRSM_TC must be one of $(_TC_CANDIDATES) (got $tc)")
         return tc
     end
+    tuned = @load_preference(_tc_pref_key(eltype(P.A), b_is_identity(P)), nothing)
+    if tuned !== nothing
+        tc = tryparse(Int, tuned)
+        (tc !== nothing && tc in _TC_CANDIDATES) && return tc
+    end
+    return _auto_tiled_tc(backend, P)
+end
+
+# Analytic per-device+type estimate — NO benchmark run. The end-to-end optimum is NOT the narrowest
+# tile: more sub-tiles mean more @localmem reloads / panel passes, whose overhead eventually outweighs
+# the occupancy gain (measured 1080 Ti: the 1-tile eye solve peaks at TC=16, the 2-tile generic at
+# TC=8 — both ≈24 resident blocks/SM). So target the occupancy SWEET SPOT, ~¾ of the per-SM block cap
+# resident, and use the LARGEST TC that reaches it (least narrowing → least overhead); fall back to
+# the narrowest that fits a block if none do. `device_smem_per_sm` gives the per-SM budget for the
+# blocks-per-SM estimate (= smem_sm ÷ tile, capped by the hardware block limit). NOTE the target is a
+# fixed ¾-of-cap heuristic — the true sweet spot also depends on the type's arithmetic intensity and
+# the device's compute:bandwidth ratio, which is exactly what `tune_trsm_tc!` measures directly.
+function _auto_tiled_tc(backend, P)
     ntiles = b_is_identity(P) ? 1 : 2
     elt = sizeof(eltype(P.A))
     smem_block = device_smem_bytes(backend)        # per-block shared-memory limit

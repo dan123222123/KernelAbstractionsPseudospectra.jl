@@ -99,12 +99,26 @@ Halving `TC` halves the tile and roughly doubles resident blocks. End-to-end on 
 The optimum is **not** the narrowest tile: more sub-tiles mean more `@localmem`
 reloads, whose overhead eventually outweighs the occupancy gain — both cases peak
 at ≈24 resident blocks/SM (the 1-tile eye reaches that at `TC=16`, the 2-tile
-generic at `TC=8`). `tiled_tc` (`src/ihlpsa_trsm.jl`) therefore picks, **per
-device + element type with no benchmark run**, the *largest* `TC` whose `32×TC`
-tile reaches ≈¾ of the device's blocks/SM cap (estimated from
-`device_smem_per_sm`), falling back to the narrowest that fits a block.
-`KAPSEUDO_TRSM_TC=8|16|32` overrides it (tuning / measurement); `TC=32` reproduces
-the pre-optimization single-tile sweep exactly.
+generic at `TC=8`). `tiled_tc` (`src/ihlpsa_trsm.jl`) resolves `TC` per device +
+element type in three tiers:
+
+1. `KAPSEUDO_TRSM_TC=8|16|32` env override (tuning / measurement; `TC=32`
+   reproduces the pre-optimization single-tile sweep exactly);
+2. a value persisted by the **`tune_trsm_tc!` probe** (`src/tune.jl`) — it times
+   the tiled solve at each `TC` per `(type, eye/generic)` and stores the fastest in
+   `LocalPreferences.toml`. A timed probe needs *no* occupancy model, so it captures
+   the type's arithmetic intensity and the device's compute:bandwidth ratio
+   directly — the accurate per-device path, run once on the target hardware;
+3. otherwise a zero-setup **analytic estimate**: the *largest* `TC` whose `32×TC`
+   tile reaches ≈¾ of the device's blocks/SM cap (from `device_smem_per_sm`), else
+   the narrowest that fits a block. The ¾-of-cap target is a fixed heuristic
+   calibrated on Pascal/ComplexF32 — good enough as a default, but exactly the
+   quantity the probe measures rather than assumes.
+
+`device_smem_per_sm` is a per-backend hook (CUDA/AMDGPU query the real per-SM/CU
+figure; oneAPI/Metal fall back to per-workgroup proxies since their execution
+models don't expose a clean per-SM shared-memory budget — there the probe is the
+intended path).
 
 ## Choosing a solve: the `trsm_strategy` local preference
 
@@ -194,9 +208,10 @@ in the tiled trailing-update GEMM, accumulated over the iterations.
 - `src/KATRSM.jl/trsm_tiled_kernels.jl` — KA/KI tiled panel + trailing kernels;
   also home to `_trsm_shfl` (the panel-solve warp shuffle).
 - `src/ihlpsa_trsm.jl` — `trsmIHL` strategy dispatch; `_tiled_trsm!`,
-  `_column_trsm!` drivers; `default_wgs`, `tiled_tiles_fit`; `lockstep_ihl!`.
+  `_column_trsm!` drivers; `default_wgs`, `tiled_tiles_fit`, `tiled_tc`; `lockstep_ihl!`.
+- `src/tune.jl` — `tune_trsm_tc!`, the per-device trailing-tile-width probe.
 - `src/backend.jl` — per-backend device interface (CPU defaults; GPU extensions override):
-  `warp_width`, `device_smem_bytes`, `warp_trsm_safe`, the device/array/memory ops, `supports_fp64`.
+  `warp_width`, `device_smem_bytes`, `device_smem_per_sm`, `warp_trsm_safe`, the device/array/memory ops, `supports_fp64`.
 - `src/KAPseudospectra.jl` — `trsm_strategy()`, `set_trsm_strategy!()`.
 - `ext/CUDAPseudospectra.jl` — CUDA device-interface overrides + GPU precompile
   workload (runs via `column` so the headless precompile worker never executes the

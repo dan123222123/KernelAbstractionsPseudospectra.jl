@@ -107,6 +107,7 @@ include("backend.jl")   # general per-backend device interface (CPU defaults; GP
 include("ihlpsa.jl")
 export ihlpsa
 
+include("tune.jl")   # tune_trsm_tc!: per-device probe for the tiled trailing-tile width
 export set_pdiv_accurate   # Float16/Float32 GPU-solve precision toggle (from KATRSM)
 
 # Build a 2D grid of complex shifts. Returns (gx, gy, zg) where gx and gy are

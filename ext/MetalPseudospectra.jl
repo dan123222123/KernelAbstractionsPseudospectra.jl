@@ -29,6 +29,10 @@ KAPseudospectra.device_reclaim(B::Metal.MetalBackend) = GC.gc()
 # the @localmem budget for the tiled solve. NOTE: untested on hardware.
 KAPseudospectra.warp_width(B::Metal.MetalBackend) = 32
 KAPseudospectra.device_smem_bytes(B::Metal.MetalBackend) = Int(Metal.device().maxThreadgroupMemoryLength)
+# Apple GPUs don't expose a per-core total threadgroup-memory figure; a core hosts several
+# threadgroups, so the per-threadgroup length is a conservative LOWER bound on the per-"SM" budget.
+# Feeds only the no-probe analytic `tiled_tc` default — `tune_trsm_tc!` is the accurate path here.
+KAPseudospectra.device_smem_per_sm(B::Metal.MetalBackend) = Int(Metal.device().maxThreadgroupMemoryLength)
 # Make the tiled fast path opt-in on Metal (like oneAPI): without the opt-in `warp_trsm_safe` is
 # false, so `tiled` self-gates to the always-correct column solve. Metal's IEEE-F32 shuffles ARE
 # correct, so for the F32 case this is a
