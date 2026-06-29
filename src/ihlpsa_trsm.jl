@@ -37,18 +37,28 @@ const _MAX_BLOCKS_PER_SM = 32              # NVIDIA/AMD per-SM resident-block ca
 const _TARGET_BLOCKS = 3 * _MAX_BLOCKS_PER_SM ÷ 4   # ~¾ of the cap = the measured occupancy sweet spot
 _tc_pref_key(T, eye::Bool) = "trsm_tc_$(T)_$(eye ? "eye" : "gen")"
 
+# The pref/analytic resolution does a `@load_preference` (a TOML read) — too slow to repeat on every
+# `_tiled_trsm!` call (it dominates tiny solves). Resolve once per (element type, eye) and cache.
+# The env override is never cached (so `tune_trsm_tc!` / experiments can force a value per call); the
+# probe empties this after persisting so a same-session tune takes effect. Lock-guarded since the
+# multi-GPU driver may resolve concurrently (all devices compute the same value — idempotent — the
+# lock just protects the Dict). Keyed by type+eye, not device: a session is assumed to use one GPU
+# model (true for the homogeneous multi-GPU box and typical single-GPU setups).
+const _TC_CACHE = Dict{Tuple{DataType,Bool},Int}()
+const _TC_CACHE_LOCK = ReentrantLock()
+_clear_tc_cache!() = (@lock _TC_CACHE_LOCK empty!(_TC_CACHE); nothing)
+
 function tiled_tc(backend, P)
     if haskey(ENV, "KAPSEUDO_TRSM_TC")
         tc = parse(Int, ENV["KAPSEUDO_TRSM_TC"])
         tc in _TC_CANDIDATES || error("KAPSEUDO_TRSM_TC must be one of $(_TC_CANDIDATES) (got $tc)")
         return tc
     end
-    tuned = @load_preference(_tc_pref_key(eltype(P.A), b_is_identity(P)), nothing)
-    if tuned !== nothing
-        tc = tryparse(Int, tuned)
-        (tc !== nothing && tc in _TC_CANDIDATES) && return tc
+    @lock _TC_CACHE_LOCK get!(_TC_CACHE, (eltype(P.A), b_is_identity(P))) do
+        tuned = @load_preference(_tc_pref_key(eltype(P.A), b_is_identity(P)), nothing)
+        tc = tuned === nothing ? nothing : tryparse(Int, tuned)
+        (tc !== nothing && tc in _TC_CANDIDATES) ? tc : _auto_tiled_tc(backend, P)
     end
-    return _auto_tiled_tc(backend, P)
 end
 
 # Analytic per-device+type estimate — NO benchmark run. The end-to-end optimum is NOT the narrowest

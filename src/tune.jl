@@ -66,6 +66,7 @@ function tune_trsm_tc!(backend, dev=missing;
         chosen[key] = best_tc
         persist && @set_preferences!(key => string(best_tc))
     end
+    persist && _clear_tc_cache!()   # so the just-persisted values are picked up this session
     persist && @info "persisted tiled TC widths to LocalPreferences.toml — `tiled_tc` reads them now " *
                      "(this session) and in future sessions; ENV[\"KAPSEUDO_TRSM_TC\"] still overrides" chosen
     return chosen
