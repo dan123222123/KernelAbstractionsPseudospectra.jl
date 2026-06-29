@@ -19,6 +19,44 @@ function tiled_tiles_fit(backend, P)
     return ntiles * tile <= device_smem_bytes(backend)
 end
 
+# Trailing-tile COLUMN width — the `Val{TC}` of the trailing kernels (src/KATRSM.jl/trsm_tiled_kernels.jl).
+# A shared-memory occupancy knob DECOUPLED from the 32-wide panel solve: a narrower TC shrinks the
+# 32×TC @localmem tile, raising resident blocks/SM (≈ occupancy) on a shared-memory-bound device and,
+# measured on a 1080 Ti, the trailing update ~1.3–1.7× faster — at the cost of ⌈plen/TC⌉ tile reloads
+# per panel (A,B DRAM traffic is unchanged). TC=32 reproduces the original single-tile sweep.
+#
+# Chosen analytically per device+type — NO benchmark run. The end-to-end optimum is NOT the narrowest
+# tile: more sub-tiles mean more @localmem reloads / panel passes, whose overhead eventually outweighs
+# the occupancy gain (measured 1080 Ti: the 1-tile eye solve peaks at TC=16, the 2-tile generic at
+# TC=8 — both ≈24 resident blocks/SM). So target the occupancy SWEET SPOT, ~¾ of the per-SM block cap
+# resident, and use the LARGEST TC that reaches it (least narrowing → least overhead); fall back to
+# the narrowest that fits a block if none do. `device_smem_per_sm` gives the per-SM budget for the
+# blocks-per-SM estimate (= smem_sm ÷ tile, capped by the hardware block limit). `KAPSEUDO_TRSM_TC`
+# forces a value (tuning/measurement). Only called for pencils that passed `tiled_tiles_fit`, so the
+# 32×32 tile fits and at least TC=32 is valid.
+const _TC_CANDIDATES = (32, 16, 8)         # largest → smallest; 32 reproduces the pre-optimization sweep
+const _MAX_BLOCKS_PER_SM = 32              # NVIDIA/AMD per-SM resident-block cap (Pascal…Hopper, CDNA/RDNA)
+const _TARGET_BLOCKS = 3 * _MAX_BLOCKS_PER_SM ÷ 4   # ~¾ of the cap = the measured occupancy sweet spot
+function tiled_tc(backend, P)
+    if haskey(ENV, "KAPSEUDO_TRSM_TC")
+        tc = parse(Int, ENV["KAPSEUDO_TRSM_TC"])
+        tc in _TC_CANDIDATES || error("KAPSEUDO_TRSM_TC must be one of $(_TC_CANDIDATES) (got $tc)")
+        return tc
+    end
+    ntiles = b_is_identity(P) ? 1 : 2
+    elt = sizeof(eltype(P.A))
+    smem_block = device_smem_bytes(backend)        # per-block shared-memory limit
+    smem_sm = device_smem_per_sm(backend)          # per-SM shared memory (occupancy estimate)
+    best = 0
+    for tc in _TC_CANDIDATES                        # largest first: take the least narrowing that suffices
+        tile = ntiles * 32 * tc * elt
+        tile <= smem_block || continue              # must fit a single block
+        best = tc
+        min(smem_sm ÷ tile, _MAX_BLOCKS_PER_SM) >= _TARGET_BLOCKS && return tc   # hit the occupancy target
+    end
+    return best == 0 ? first(_TC_CANDIDATES) : best                              # none reached it → narrowest fit
+end
+
 # non-cpu solve step in lockstep_ihl!
 #
 # Two GPU solve kernels are available:
@@ -62,6 +100,7 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
     g = length(zv)
     gt = parse(Int, get(ENV, "KAPSEUDO_TRSM_GT", "32"))
     gt >= 1 || error("KAPSEUDO_TRSM_GT must be a positive integer (got $gt)")
+    vtc = Val(tiled_tc(backend, P))   # trailing-tile column width (shared-mem occupancy knob, per device+type)
     nblk = cld(m, 32)
     zc = conj(zv)
     eye = b_is_identity(P)   # B = I ⇒ sB-free trailing kernels (half the shared memory)
@@ -80,9 +119,9 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
             rtiles = cld(ntrail, 32)
             ggrid = cld(g, gt)
             if eye
-                @views _tiled_trailing_forward_eye(backend, 32)(bV, P.Ac, koff, plen, rbase, m, gt, rtiles; ndrange=32 * rtiles * ggrid)
+                @views _tiled_trailing_forward_eye(backend, 32)(bV, P.Ac, koff, plen, rbase, m, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
             else
-                @views _tiled_trailing_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt, rtiles; ndrange=32 * rtiles * ggrid)
+                @views _tiled_trailing_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
             end
         end
     end
@@ -99,9 +138,9 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
             rtiles = cld(koff, 32)
             ggrid = cld(g, gt)
             if eye
-                @views _tiled_trailing_backward_eye(backend, 32)(bV, P.A, koff, plen, gt, rtiles; ndrange=32 * rtiles * ggrid)
+                @views _tiled_trailing_backward_eye(backend, 32)(bV, P.A, koff, plen, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
             else
-                @views _tiled_trailing_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen, gt, rtiles; ndrange=32 * rtiles * ggrid)
+                @views _tiled_trailing_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
             end
         end
     end

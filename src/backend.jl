@@ -34,6 +34,12 @@ warp_width(backend) = 32
 # per-device budget instead of an assumed constant.
 device_smem_bytes(backend) = 48 * 1024
 
+# Shared-memory bytes per SM (multiprocessor) — used only to estimate the tiled trailing kernel's
+# resident-blocks-per-SM when picking the trailing-tile width `TC` (`tiled_tc`). A conservative 64 KB
+# default; each GPU extension overrides it with the real per-SM query. (Distinct from
+# `device_smem_bytes`, which is the per-BLOCK limit.)
+device_smem_per_sm(backend) = 64 * 1024
+
 # Whether the tiled solve (which broadcasts pivots with warp shuffles) is correct under the `tiled`
 # strategy on this backend. True for CUDA / AMDGPU / Metal: fixed warp/wavefront/SIMD width + a
 # hardware shuffle. On oneAPI it needs BOTH the KernelIntrinsics oneAPI shuffle backend AND a pinned

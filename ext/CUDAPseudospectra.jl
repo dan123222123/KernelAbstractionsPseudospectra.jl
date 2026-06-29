@@ -22,6 +22,8 @@ KAPseudospectra.device_reclaim(B::CUDA.CUDABackend) = CUDA.reclaim()
 KAPseudospectra.warp_width(B::CUDA.CUDABackend) = Int(CUDA.warpsize(CUDA.device()))   # 32 on all current NVIDIA HW
 KAPseudospectra.device_smem_bytes(B::CUDA.CUDABackend) =
     Int(CUDA.attribute(CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK))
+KAPseudospectra.device_smem_per_sm(B::CUDA.CUDABackend) =
+    Int(CUDA.attribute(CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR))
 
 ## precompile gpu code (only when a device is actually usable)
 if CUDA.functional()

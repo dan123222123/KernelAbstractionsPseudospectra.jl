@@ -112,82 +112,101 @@ end
 end
 
 # ---- tiled trailing updates (shared A,B tile reused across `gt` grid points) ----
+#
+# OCCUPANCY: the `@localmem` tile is 32 ROWS × TC COLUMNS. The row count is fixed at 32 (a full warp
+# — a half-warp row tile wastes lanes and is slower); the COLUMN count TC is a compile-time `Val`
+# knob DECOUPLED from the 32-wide panel solve. A wide tile (TC=32) is heavily shared-memory-bound on
+# Pascal (a 2-tile ComplexF32 block is 16 KB → only 6 resident blocks/SM ≈ 9% occupancy); narrowing
+# TC shrinks the tile, raising resident blocks/SM (and occupancy) proportionally, which measured
+# ~1.3–1.7× faster on a 1080 Ti. A panel wider than TC is subtracted in ⌈plen/TC⌉ column sub-tiles
+# (loop over `c0`); the A,B DRAM traffic is unchanged (each column still streamed once per grid-tile).
+# TC is chosen per device+type by `tiled_tc` (src/ihlpsa_trsm.jl); TC=32 reproduces the single-tile
+# (pre-optimization) sweep exactly. `@synchronize` brackets each sub-tile so the shared tile can be
+# reloaded — both barriers are reached uniformly (the `c0` loop count depends only on plen/TC).
 
 # Forward: subtract panel k from trailing rows rbase+1 … m.
 @kernel function _tiled_trailing_forward(bv, zv, @Const(A), @Const(B),
-                                         koff, plen, rbase, m, gt, rtiles)
+                                         koff, plen, rbase, m, gt, rtiles, ::Val{TC}) where {TC}
     t = @index(Local)                 # 1..32 → row within tile
     grp = @index(Group)               # 1..rtiles*ggrid
     @uniform ET = eltype(A)
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
-    sA = @localmem ET (32, 32)
-    sB = @localmem ET (32, 32)
+    sA = @localmem ET (32, TC)
+    sB = @localmem ET (32, TC)
     i = rbase + (bi - 1) * 32 + t
-    for jj = 1:plen
-        j = koff + jj
-        sA[t, jj] = i <= m ? A[i, j] : zero(ET)
-        sB[t, jj] = i <= m ? B[i, j] : zero(ET)
-    end
-    @synchronize()
-    if i <= m
-        g = length(zv)
-        gp0 = (bg - 1) * gt
-        for gg = 1:gt
-            gp = gp0 + gg
-            if gp <= g
-                z = zv[gp]
-                b = bv[gp]
-                acc = b[i]
-                for jj = 1:plen
-                    acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + jj]
+    g = length(zv)
+    gp0 = (bg - 1) * gt
+    for c0 = 0:TC:plen-1
+        clen = min(TC, plen - c0)
+        for jj = 1:clen
+            j = koff + c0 + jj
+            sA[t, jj] = i <= m ? A[i, j] : zero(ET)
+            sB[t, jj] = i <= m ? B[i, j] : zero(ET)
+        end
+        @synchronize()
+        if i <= m
+            for gg = 1:gt
+                gp = gp0 + gg
+                if gp <= g
+                    z = zv[gp]
+                    b = bv[gp]
+                    acc = b[i]
+                    for jj = 1:clen
+                        acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + c0 + jj]
+                    end
+                    b[i] = acc
                 end
-                b[i] = acc
             end
         end
+        @synchronize()
     end
 end
 
 # Backward: subtract panel k from rows above it, 1 … koff.
 @kernel function _tiled_trailing_backward(bv, zv, @Const(A), @Const(B),
-                                          koff, plen, gt, rtiles)
+                                          koff, plen, gt, rtiles, ::Val{TC}) where {TC}
     t = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
-    sA = @localmem ET (32, 32)
-    sB = @localmem ET (32, 32)
+    sA = @localmem ET (32, TC)
+    sB = @localmem ET (32, TC)
     i = (bi - 1) * 32 + t
-    for jj = 1:plen
-        j = koff + jj
-        sA[t, jj] = i <= koff ? A[i, j] : zero(ET)
-        sB[t, jj] = i <= koff ? B[i, j] : zero(ET)
-    end
-    @synchronize()
-    if i <= koff
-        g = length(zv)
-        gp0 = (bg - 1) * gt
-        for gg = 1:gt
-            gp = gp0 + gg
-            if gp <= g
-                z = zv[gp]
-                b = bv[gp]
-                acc = b[i]
-                for jj = 1:plen
-                    acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + jj]
+    g = length(zv)
+    gp0 = (bg - 1) * gt
+    for c0 = 0:TC:plen-1
+        clen = min(TC, plen - c0)
+        for jj = 1:clen
+            j = koff + c0 + jj
+            sA[t, jj] = i <= koff ? A[i, j] : zero(ET)
+            sB[t, jj] = i <= koff ? B[i, j] : zero(ET)
+        end
+        @synchronize()
+        if i <= koff
+            for gg = 1:gt
+                gp = gp0 + gg
+                if gp <= g
+                    z = zv[gp]
+                    b = bv[gp]
+                    acc = b[i]
+                    for jj = 1:clen
+                        acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + c0 + jj]
+                    end
+                    b[i] = acc
                 end
-                b[i] = acc
             end
         end
+        @synchronize()
     end
 end
 
 # ---- B = I trailing updates (one tile, no z) ----
 # For a standard pencil (B = I) the trailing rows i are strictly off the panel columns j, so
 # B[i,j] = 0 and the pencil reduces to M[i,j] = -A[i,j]: `acc -= M[i,j]·b[j]` ⇒ `acc += A[i,j]·b[j]`.
-# Dropping the B tile halves shared memory (better occupancy; a wide element type's single 32-KB
-# tile now fits 48 KB) and removes z from the trailing update.
+# Dropping the B tile halves shared memory (one 32×TC tile instead of two → ~2× the resident blocks
+# of the generic kernel) and removes z from the trailing update.
 #
 # Why these are SEPARATE kernels rather than one kernel with a runtime `if eye` branch (or a
 # `Val`-tagged body): `@localmem` is a *static* allocation in a GPU kernel, so a unified body
@@ -195,62 +214,71 @@ end
 # defeating the entire point of the eye path (the halved shared-memory footprint). The B=I-vs-
 # pencil choice is therefore made by dispatch at the host call site (see the `eye` branch in
 # `_tiled_trsm!`, src/ihlpsa_trsm.jl), which picks the right kernel symbol; a `Val{eye}` tag would
-# compile to these same two bodies and save no lines.
+# compile to these same two bodies and save no lines. (The TC column-tile knob is shared via the
+# `Val{TC}` parameter — see the occupancy note above.)
 
-@kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles)
+@kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles, ::Val{TC}) where {TC}
     t = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
-    sA = @localmem ET (32, 32)
+    sA = @localmem ET (32, TC)
     i = rbase + (bi - 1) * 32 + t
-    for jj = 1:plen
-        sA[t, jj] = i <= m ? A[i, koff + jj] : zero(ET)
-    end
-    @synchronize()
-    if i <= m
-        g = length(bv)
-        gp0 = (bg - 1) * gt
-        for gg = 1:gt
-            gp = gp0 + gg
-            if gp <= g
-                b = bv[gp]
-                acc = b[i]
-                for jj = 1:plen
-                    acc += sA[t, jj] * b[koff + jj]
+    g = length(bv)
+    gp0 = (bg - 1) * gt
+    for c0 = 0:TC:plen-1
+        clen = min(TC, plen - c0)
+        for jj = 1:clen
+            sA[t, jj] = i <= m ? A[i, koff + c0 + jj] : zero(ET)
+        end
+        @synchronize()
+        if i <= m
+            for gg = 1:gt
+                gp = gp0 + gg
+                if gp <= g
+                    b = bv[gp]
+                    acc = b[i]
+                    for jj = 1:clen
+                        acc += sA[t, jj] * b[koff + c0 + jj]
+                    end
+                    b[i] = acc
                 end
-                b[i] = acc
             end
         end
+        @synchronize()
     end
 end
 
-@kernel function _tiled_trailing_backward_eye(bv, @Const(A), koff, plen, gt, rtiles)
+@kernel function _tiled_trailing_backward_eye(bv, @Const(A), koff, plen, gt, rtiles, ::Val{TC}) where {TC}
     t = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
-    sA = @localmem ET (32, 32)
+    sA = @localmem ET (32, TC)
     i = (bi - 1) * 32 + t
-    for jj = 1:plen
-        sA[t, jj] = i <= koff ? A[i, koff + jj] : zero(ET)
-    end
-    @synchronize()
-    if i <= koff
-        g = length(bv)
-        gp0 = (bg - 1) * gt
-        for gg = 1:gt
-            gp = gp0 + gg
-            if gp <= g
-                b = bv[gp]
-                acc = b[i]
-                for jj = 1:plen
-                    acc += sA[t, jj] * b[koff + jj]
+    g = length(bv)
+    gp0 = (bg - 1) * gt
+    for c0 = 0:TC:plen-1
+        clen = min(TC, plen - c0)
+        for jj = 1:clen
+            sA[t, jj] = i <= koff ? A[i, koff + c0 + jj] : zero(ET)
+        end
+        @synchronize()
+        if i <= koff
+            for gg = 1:gt
+                gp = gp0 + gg
+                if gp <= g
+                    b = bv[gp]
+                    acc = b[i]
+                    for jj = 1:clen
+                        acc += sA[t, jj] * b[koff + c0 + jj]
+                    end
+                    b[i] = acc
                 end
-                b[i] = acc
             end
         end
+        @synchronize()
     end
 end

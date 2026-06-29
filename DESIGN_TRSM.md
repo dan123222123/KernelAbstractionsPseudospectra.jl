@@ -79,6 +79,33 @@ structurally-zero entries exist as device storage but are never loaded into the
 shared tiles or multiplied — dead storage, not dead computation (and no wasted
 no-op flops).
 
+#### Trailing-tile width (`TC`) and occupancy
+
+The trailing tile is **32 rows × `TC` columns**: the row count is a fixed full
+warp (a half-warp row tile wastes lanes and measured slower), and `TC` is a
+compile-time `Val` **decoupled from the 32-wide panel solve** — a wider panel is
+subtracted in `⌈plen/TC⌉` column sub-tiles, leaving the `A,B` DRAM traffic
+unchanged. `TC` is the key occupancy knob, because the trailing kernel is
+**shared-memory-bound** on Pascal: a 32×32 ComplexF32 *generic* tile is
+`2·32·32·4 = 16 KB`, so only **6 blocks/SM** are resident (≈9% occupancy).
+Halving `TC` halves the tile and roughly doubles resident blocks. End-to-end on a
+1080 Ti, versus the original `TC=32`:
+
+| element / `B` | optimal `TC` | speedup at m = 512 / 1024 |
+|---|---|---|
+| ComplexF32, `B=I` (1 tile)  | 16 | 13% / 18% |
+| ComplexF32, `B≠I` (2 tiles) | 8  | 33% / 41% |
+
+The optimum is **not** the narrowest tile: more sub-tiles mean more `@localmem`
+reloads, whose overhead eventually outweighs the occupancy gain — both cases peak
+at ≈24 resident blocks/SM (the 1-tile eye reaches that at `TC=16`, the 2-tile
+generic at `TC=8`). `tiled_tc` (`src/ihlpsa_trsm.jl`) therefore picks, **per
+device + element type with no benchmark run**, the *largest* `TC` whose `32×TC`
+tile reaches ≈¾ of the device's blocks/SM cap (estimated from
+`device_smem_per_sm`), falling back to the narrowest that fits a block.
+`KAPSEUDO_TRSM_TC=8|16|32` overrides it (tuning / measurement); `TC=32` reproduces
+the pre-optimization single-tile sweep exactly.
+
 ## Choosing a solve: the `trsm_strategy` local preference
 
 The choice is a **local preference** (Preferences.jl → `LocalPreferences.toml`)
@@ -188,7 +215,11 @@ support matrix.
 
 ## Open items
 
-- Tune `tiled`: `gt` sweep, fuse the per-panel diagonal+trailing launches,
-  double-buffer the `A,B` tiles.
+- Tune `tiled` further: `gt` sweep, fuse the per-panel diagonal+trailing launches,
+  double-buffer the `A,B` tiles. (The trailing-tile width `TC` is already chosen
+  analytically per device+type — see "Trailing-tile width and occupancy".)
+- A narrow `TC` shrinks the tile enough that some wide `B≠I` pencils which today
+  fail `tiled_tiles_fit` (a 32×32-tile check) would now fit — let `tiled_tiles_fit`
+  consider the chosen `TC` so those reach the tiled path instead of `column`.
 - Validate / extend the tiled solve for higher-precision element types, or
   keep them on `column`.
