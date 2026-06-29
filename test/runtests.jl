@@ -83,6 +83,7 @@ if "cuda" in ARGS
         test_katrsm_kernels(CUDABackend())
         test_trsm_strategies(CUDABackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(CUDABackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(CUDABackend())
     end
 end
 
@@ -99,6 +100,7 @@ if "amdgpu" in ARGS
         test_katrsm_kernels(ROCBackend())
         test_trsm_strategies(ROCBackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(ROCBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(ROCBackend())
     end
 end
 
@@ -118,6 +120,7 @@ if "oneapi" in ARGS
         test_katrsm_kernels(oneAPIBackend(); types=Ts)
         test_trsm_strategies(oneAPIBackend(); types=Ts)
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(oneAPIBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(oneAPIBackend())
     end
 end
 
@@ -135,5 +138,6 @@ if "metal" in ARGS
         test_katrsm_kernels(MetalBackend(); types=Ts)
         test_trsm_strategies(MetalBackend(); types=Ts)
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(MetalBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(MetalBackend())
     end
 end

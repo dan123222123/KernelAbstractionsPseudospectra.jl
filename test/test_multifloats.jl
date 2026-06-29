@@ -94,3 +94,32 @@ function test_multifloats_tiled_shuffle(backend)
         end
     end
 end
+
+# (3) Wide-fit. A generic (B≠I) Complex{Float64x2} pencil needs TWO 32×32 trailing tiles (32 B/elt ⇒
+# 64 KB) which overflows the 48 KB shared-memory limit — so the OLD `tiled_tiles_fit` (a 32×32 check)
+# dropped it to `column`. With the TC-aware fit it tiles at a narrow `TC` instead. Confirm it is now
+# tile-able and the full multi-panel tiled driver matches the column driver to round-off (m > 32 so
+# the trailing update actually runs). GPU + usable wide shuffle only.
+function test_multifloats_tiled_generic(backend)
+    (KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, true)) || return
+    @testset "MultiFloats wide generic tiled (TC-aware fit, vs column) -- $(backend)" begin
+        T = Complex{Float64x2}
+        m, g = 64, 64
+        s = 1 / (2m + 1)
+        up() = (Mr = s .* triu(randn(ComplexF64, m, m), 1); [Mr[i, i] = 1 + s * randn(ComplexF64) for i in 1:m]; T.(Mr))
+        A, B = up(), up()        # upper-tri ⇒ Ac=A', Bc=B' are lower-tri for the forward sweep
+        P = KAPseudospectra.SchurMatrixPencil{T, false}(A, collect(A'), B, collect(B'), Matrix{T}(I, m, m))
+        @test KAPseudospectra.tiled_tiles_fit(backend, P)            # narrow TC fits → tiled, not column
+        @test KAPseudospectra.tiled_tc(backend, P) in KAPseudospectra._TC_CANDIDATES
+        Pdev = _to(backend, P)
+        zv = _to(backend, T.(2 .+ 0.3 .* randn(ComplexF64, g)))
+        b0 = reduce(hcat, [T.(randn(ComplexF64, m)) for _ in 1:g])
+        wgs = KAPseudospectra.default_wgs(backend, m)
+        bt = VectorOfSimilarVectors(_to(backend, copy(b0)))
+        KAPseudospectra._tiled_trsm!(backend, bt, zv, Pdev, wgs); KernelAbstractions.synchronize(backend)
+        bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
+        KAPseudospectra._column_trsm!(backend, bc, zv, Pdev, wgs); KernelAbstractions.synchronize(backend)
+        xt, xc = _from(bt.data), _from(bc.data)
+        @test maximum(Float64.(abs.(xt .- xc))) / maximum(Float64.(abs.(xc))) < 1e-25
+    end
+end

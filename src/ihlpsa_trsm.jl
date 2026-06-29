@@ -8,14 +8,16 @@
 # tiled SHUFFLE solve does NOT use this — its kernels are intrinsically 32-wide.
 default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, warp_width(backend)) : 1
 
-# Whether the tiled solve's `@localmem` tiles fit this device's shared memory for pencil `P`.
-# Each trailing tile is 32×32×sizeof(ET); the generic (B≠I) kernels use two tiles (sA+sB), the
-# B=I kernels one — compared against the queried `device_smem_bytes` (src/backend.jl). Replaces the
-# former `!wide || b_is_identity` type-proxy, so a wide B≠I pencil can still tile on a large-shared-
-# memory device and a normally-fitting type is correctly rejected on a tiny one.
+# Whether the tiled solve can run for pencil `P` on this device. Each trailing tile is
+# 32 × TC × sizeof(ET); the generic (B≠I) kernels use two tiles (sA+sB), the B=I kernels one. The tile
+# WIDTH TC is a tunable knob (`tiled_tc`), so this checks the NARROWEST candidate — i.e. tiled is
+# usable as long as SOME TC fits `device_smem_bytes`. That lets a wide non-IEEE pencil (MultiFloats:
+# Float64xN etc.) whose 32×32 tile would overflow still tile at a narrow TC instead of dropping to the
+# `column` solve; only a type too wide for even the narrowest TC (or a tiny-shared-memory device) is
+# rejected. `tiled_tc` then picks the actual width — always one that fits, by construction.
 function tiled_tiles_fit(backend, P)
-    tile = sizeof(eltype(P.A)) * 32 * 32
     ntiles = b_is_identity(P) ? 1 : 2
+    tile = sizeof(eltype(P.A)) * 32 * minimum(_TC_CANDIDATES)
     return ntiles * tile <= device_smem_bytes(backend)
 end
 
@@ -70,7 +72,7 @@ function _auto_tiled_tc(backend, P)
         best = tc
         min(smem_sm ÷ tile, _MAX_BLOCKS_PER_SM) >= _TARGET_BLOCKS && return tc   # hit the occupancy target
     end
-    return best == 0 ? first(_TC_CANDIDATES) : best                              # none reached it → narrowest fit
+    return best == 0 ? last(_TC_CANDIDATES) : best                               # nothing fit (shouldn't happen post tiled_tiles_fit) → narrowest
 end
 
 # non-cpu solve step in lockstep_ihl!
@@ -90,13 +92,14 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
         return _column_trsm!(backend, bV, zv, P, wgs)
     end
     # `tiled`: run the tiled solve where it's usable for this backend+type, else fall back to the
-    # shuffle-free column solve (so requesting `tiled` is always correct). "Usable" needs BOTH: the
-    # trailing-update `@localmem` tiles fit this device's shared memory (`tiled_tiles_fit`:
-    # 32²·sizeof(ET)·{1 if B=I else 2} vs `device_smem_bytes`) AND a hardware warp shuffle usable
-    # here (`warp_trsm_safe`; false on stock oneAPI / Metal-without-opt-in, and for wide non-IEEE
-    # types lacking the per-limb `_trsm_shfl` override — MultiFloatsPseudospectra). A wide B=I pencil
-    # uses the single-tile sB-free kernels and fits; a wide B≠I pencil needs two tiles and typically
-    # overflows → column.
+    # shuffle-free column solve (so requesting `tiled` is always correct). "Usable" needs BOTH: SOME
+    # trailing-tile width fits this device's shared memory (`tiled_tiles_fit` checks the narrowest
+    # 32×TC×{1 if B=I else 2}·sizeof(ET) vs `device_smem_bytes`; `tiled_tc` then picks the actual TC)
+    # AND a hardware warp shuffle usable here (`warp_trsm_safe`; false on stock oneAPI / Metal-without-
+    # opt-in, and for wide non-IEEE types lacking the per-limb `_trsm_shfl` override —
+    # MultiFloatsPseudospectra). Because the tile width adapts, a wide non-IEEE pencil (MultiFloats:
+    # Float64xN etc.) tiles at a narrow TC rather than dropping to `column`; only a type too wide for
+    # even the narrowest TC falls back.
     wide       = !(real(eltype(P.A)) <: Base.IEEEFloat)  # non-IEEE (MultiFloats/BigFloat)
     tiled_ok   = tiled_tiles_fit(backend, P)             # tiled's @localmem tiles fit device shared memory
     shuffle_ok = warp_trsm_safe(backend, wide)           # tiled shuffle usable for this backend+type

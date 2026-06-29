@@ -136,10 +136,12 @@ Values:
 There is **no size crossover** — `tiled` routes on capability, not `m`, checking
 **both** of:
 
-- `tiled_tiles_fit(backend, P)` — the 32×32 trailing-update `@localmem` tiles (one
-  tile if `B = I`, two if `B ≠ I`) fit `device_smem_bytes`. A wide `B = I` pencil
-  uses the single-tile kernels and fits; a wide `B ≠ I` pencil needs two tiles and
-  typically overflows → `column`.
+- `tiled_tiles_fit(backend, P)` — whether *some* trailing-tile width fits
+  `device_smem_bytes`. Because the width `TC` is tunable (see below), this checks
+  the **narrowest** `32×TC` tile (one if `B = I`, two if `B ≠ I`), so a wide
+  non-IEEE `B ≠ I` pencil (MultiFloats: `Float64xN`) whose `32×32` tile would
+  overflow still tiles at a narrow `TC` rather than dropping to `column`; only a
+  type too wide for even the narrowest `TC` falls back.
 - `warp_trsm_safe(backend, wide)` — the panel-solve shuffle is usable for this
   backend+type. It is `false` on stock oneAPI (no shuffle backend / no SIMD32 pin)
   and on Metal unless opted in, and for wide non-IEEE types (MultiFloats /
@@ -233,9 +235,6 @@ support matrix.
 - Tune `tiled` further: `gt` sweep, fuse the per-panel diagonal+trailing launches,
   double-buffer the `A,B` tiles. (The trailing-tile width `TC` is already chosen
   analytically per device+type — see "Trailing-tile width and occupancy".)
-- A narrow `TC` shrinks the tile enough that some wide `B≠I` pencils which today
-  fail `tiled_tiles_fit` (a 32×32-tile check) would now fit — let `tiled_tiles_fit`
-  consider the chosen `TC` so those reach the tiled path instead of `column`.
 - Subgroup-width-adaptive panel solve for Intel without the SIMD32 pin. The panel
   solve's `@shfl` assumes a 32-lane shuffle domain, so on oneAPI we currently force
   IGC to SIMD32 (`set_intel_force_simd32!`) rather than adapt. A more general path
