@@ -98,7 +98,8 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
     # The default `column` needs no routing info, so return early — this keeps the per-iteration
     # device-property queries (`device_smem_bytes`, etc.) off the default path.
-    if trsm_strategy() == "column"
+    strat = trsm_strategy()
+    if strat == "column"
         return _column_trsm!(backend, bV, zv, P, wgs)
     end
     # `tiled`: run the tiled solve where it's usable for this backend+type, else fall back to the
@@ -114,7 +115,11 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     tiled_ok   = tiled_tiles_fit(backend, P)             # tiled's @localmem tiles fit device shared memory
     shuffle_ok = warp_trsm_safe(backend, wide)           # tiled shuffle usable for this backend+type
     if shuffle_ok && tiled_ok
-        _tiled_trsm!(backend, bV, zv, P, wgs)
+        # `tiled-gemm`: keep the shared panel solve but replace the trailing kernel with a vendor-BLAS
+        # `mul!` where the element type has a fast complex GEMM (ComplexF32/F64 via `tiled_gemm_safe`).
+        # MultiFloats / unsupported backends → gemm=false, i.e. the regular `tiled` trailing kernel.
+        gemm = strat == "tiled-gemm" && tiled_gemm_safe(backend, eltype(P.A))
+        _tiled_trsm!(backend, bV, zv, P, wgs; gemm)
     else
         _column_trsm!(backend, bV, zv, P, wgs)
     end
@@ -124,9 +129,11 @@ end
 # the grid-point batch (see src/KATRSM.jl/trsm_tiled_kernels.jl). `z` is conjugated once for
 # the forward (lower-tri Ac,Bc) sweep; the backward sweep uses (A,B,z) directly. `gt` (grid
 # points per trailing tile = the A,B reuse factor) is tunable via KAPSEUDO_TRSM_GT.
-function _tiled_trsm!(backend, bV, zv, P, wgs)
+function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool=false)
     m = size(P, 1)
     g = length(zv)
+    ET = eltype(P.A)
+    Xc = flatview(bV)   # the m×g RHS as a matrix (for the `gemm` trailing `mul!`); shares storage with bV
     gt = parse(Int, get(ENV, "KAPSEUDO_TRSM_GT", "32"))
     gt >= 1 || error("KAPSEUDO_TRSM_GT must be a positive integer (got $gt)")
     vtc = Val(tiled_tc(backend, P))   # trailing-tile column width (shared-mem occupancy knob, per device+type)
@@ -147,7 +154,11 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
         if ntrail > 0
             rtiles = cld(ntrail, 32)
             ggrid = cld(g, gt)
-            if eye
+            if eye && gemm
+                # trailing update as a GEMM (grid points = wide dim): b[rbase+1:m] += Ac[rbase+1:m, panel]·b[panel].
+                # Matches the eye kernel formula (z-independent off-diagonal for B=I); α=β=+1.
+                @views mul!(Xc[rbase+1:m, :], P.Ac[rbase+1:m, koff+1:koff+plen], Xc[koff+1:koff+plen, :], one(ET), one(ET))
+            elseif eye
                 @views _tiled_trailing_forward_eye(backend, 32)(bV, P.Ac, koff, plen, rbase, m, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
             else
                 @views _tiled_trailing_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
@@ -166,7 +177,10 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
         if koff > 0
             rtiles = cld(koff, 32)
             ggrid = cld(g, gt)
-            if eye
+            if eye && gemm
+                # b[1:koff] += A[1:koff, panel]·b[panel], all grid points at once.
+                @views mul!(Xc[1:koff, :], P.A[1:koff, koff+1:koff+plen], Xc[koff+1:koff+plen, :], one(ET), one(ET))
+            elseif eye
                 @views _tiled_trailing_backward_eye(backend, 32)(bV, P.A, koff, plen, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
             else
                 @views _tiled_trailing_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)

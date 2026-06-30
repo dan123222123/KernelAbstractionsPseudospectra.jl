@@ -41,6 +41,9 @@ KAPseudospectra.device_smem_per_sm(B::Metal.MetalBackend) = Int(Metal.device().m
 # based MultiFloats can't run on Metal through ANY path; it's kept for symmetry with oneAPI.
 KAPseudospectra.warp_trsm_safe(::Metal.MetalBackend, wide::Bool) =
     !wide && KAPseudospectra.metal_warp_trsm()
+# `tiled-gemm`'s `mul!` trailing has no reliable complex-GEMM path via MPS here — keep Metal on the
+# regular `tiled` trailing kernel (`tiled-gemm` → `tiled`).
+KAPseudospectra.tiled_gemm_safe(::Metal.MetalBackend, ::Type) = false
 # No `supports_fp64` override needed: the default defers to `supports_float64`, which
 # Metal declares `false` (no `double` in MSL), so F64 paths skip Metal — F32 only. Metal
 # also needs `KAPseudospectra.set_pdiv_accurate(false)` so the F32 solves compile (see KATRSM).
