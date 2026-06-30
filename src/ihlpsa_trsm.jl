@@ -140,6 +140,9 @@ function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool=false)
     nblk = cld(m, 32)
     zc = conj(zv)
     eye = b_is_identity(P)   # B = I ⇒ sB-free trailing kernels (half the shared memory)
+    # B≠I gemm scratch: the z-scaled panel (≤32 rows). Scaling x[panel] columns by z before the B GEMM
+    # gives B·(z⊙x) = z⊙(B·x), avoiding a full m×g temp. Only allocated for the generalized gemm path.
+    Xz = gemm && !eye ? similar(Xc, 32, g) : Xc
     # forward (lower-triangular), panels ascending
     for k in 1:nblk
         koff = (k - 1) * 32
@@ -158,6 +161,13 @@ function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool=false)
                 # trailing update as a GEMM (grid points = wide dim): b[rbase+1:m] += Ac[rbase+1:m, panel]·b[panel].
                 # Matches the eye kernel formula (z-independent off-diagonal for B=I); α=β=+1.
                 @views mul!(Xc[rbase+1:m, :], P.Ac[rbase+1:m, koff+1:koff+plen], Xc[koff+1:koff+plen, :], one(ET), one(ET))
+            elseif gemm
+                # B≠I: b[rbase+1:m] += Ac·x[panel] − zc⊙(Bc·x[panel]). Scale the panel by zc first so the
+                # Bc GEMM yields zc⊙(Bc·x) directly (matches the generic forward kernel's z·Bc − Ac formula).
+                pan = (koff + 1):(koff + plen)
+                @views mul!(Xc[rbase+1:m, :], P.Ac[rbase+1:m, pan], Xc[pan, :], one(ET), one(ET))
+                @views Xz[1:plen, :] .= Xc[pan, :] .* transpose(zc)
+                @views mul!(Xc[rbase+1:m, :], P.Bc[rbase+1:m, pan], Xz[1:plen, :], -one(ET), one(ET))
             elseif eye
                 @views _tiled_trailing_forward_eye(backend, 32)(bV, P.Ac, koff, plen, rbase, m, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
             else
@@ -180,6 +190,12 @@ function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool=false)
             if eye && gemm
                 # b[1:koff] += A[1:koff, panel]·b[panel], all grid points at once.
                 @views mul!(Xc[1:koff, :], P.A[1:koff, koff+1:koff+plen], Xc[koff+1:koff+plen, :], one(ET), one(ET))
+            elseif gemm
+                # B≠I: b[1:koff] += A·x[panel] − z⊙(B·x[panel]).
+                pan = (koff + 1):(koff + plen)
+                @views mul!(Xc[1:koff, :], P.A[1:koff, pan], Xc[pan, :], one(ET), one(ET))
+                @views Xz[1:plen, :] .= Xc[pan, :] .* transpose(zv)
+                @views mul!(Xc[1:koff, :], P.B[1:koff, pan], Xz[1:plen, :], -one(ET), one(ET))
             elseif eye
                 @views _tiled_trailing_backward_eye(backend, 32)(bV, P.A, koff, plen, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
             else
