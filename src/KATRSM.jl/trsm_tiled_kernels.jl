@@ -126,23 +126,27 @@ end
 
 # Forward: subtract panel k from trailing rows rbase+1 … m.
 @kernel function _tiled_trailing_forward(bv, zv, @Const(A), @Const(B),
-                                         koff, plen, rbase, m, gt, rtiles, ::Val{TC}) where {TC}
-    t = @index(Local)                 # 1..32 → row within tile
+                                         koff, plen, rbase, m, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
+    li = @index(Local)                # 1..32W
     grp = @index(Group)               # 1..rtiles*ggrid
     @uniform ET = eltype(A)
+    t = (li - 1) % 32 + 1            # lane / row within tile
+    w = (li - 1) ÷ 32 + 1           # warp 1..W (W warps share one tile)
     bi = (grp - 1) % rtiles + 1
-    bg = (grp - 1) ÷ rtiles + 1
+    bg = (grp - 1) ÷ rtiles + 1     # each grid-block covers W*gt grid points
     sA = @localmem ET (32, TC)
     sB = @localmem ET (32, TC)
     i = rbase + (bi - 1) * 32 + t
     g = length(zv)
-    gp0 = (bg - 1) * gt
+    gp0 = (bg - 1) * (W * gt) + (w - 1) * gt
     for c0 = 0:TC:plen-1
         clen = min(TC, plen - c0)
-        for jj = 1:clen
+        jj = w                        # warp w loads columns jj ≡ w (mod W)
+        while jj <= clen
             j = koff + c0 + jj
             sA[t, jj] = i <= m ? A[i, j] : zero(ET)
             sB[t, jj] = i <= m ? B[i, j] : zero(ET)
+            jj += W
         end
         @synchronize()
         if i <= m
@@ -152,8 +156,8 @@ end
                     z = zv[gp]
                     b = bv[gp]
                     acc = b[i]
-                    for jj = 1:clen
-                        acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + c0 + jj]
+                    for jj2 = 1:clen
+                        acc -= (z * sB[t, jj2] - sA[t, jj2]) * b[koff + c0 + jj2]
                     end
                     b[i] = acc
                 end
@@ -165,23 +169,27 @@ end
 
 # Backward: subtract panel k from rows above it, 1 … koff.
 @kernel function _tiled_trailing_backward(bv, zv, @Const(A), @Const(B),
-                                          koff, plen, gt, rtiles, ::Val{TC}) where {TC}
-    t = @index(Local)
+                                          koff, plen, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
+    li = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
+    t = (li - 1) % 32 + 1
+    w = (li - 1) ÷ 32 + 1
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
     sA = @localmem ET (32, TC)
     sB = @localmem ET (32, TC)
     i = (bi - 1) * 32 + t
     g = length(zv)
-    gp0 = (bg - 1) * gt
+    gp0 = (bg - 1) * (W * gt) + (w - 1) * gt
     for c0 = 0:TC:plen-1
         clen = min(TC, plen - c0)
-        for jj = 1:clen
+        jj = w
+        while jj <= clen
             j = koff + c0 + jj
             sA[t, jj] = i <= koff ? A[i, j] : zero(ET)
             sB[t, jj] = i <= koff ? B[i, j] : zero(ET)
+            jj += W
         end
         @synchronize()
         if i <= koff
@@ -191,8 +199,8 @@ end
                     z = zv[gp]
                     b = bv[gp]
                     acc = b[i]
-                    for jj = 1:clen
-                        acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + c0 + jj]
+                    for jj2 = 1:clen
+                        acc -= (z * sB[t, jj2] - sA[t, jj2]) * b[koff + c0 + jj2]
                     end
                     b[i] = acc
                 end
@@ -217,20 +225,24 @@ end
 # compile to these same two bodies and save no lines. (The TC column-tile knob is shared via the
 # `Val{TC}` parameter — see the occupancy note above.)
 
-@kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles, ::Val{TC}) where {TC}
-    t = @index(Local)
+@kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
+    li = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
+    t = (li - 1) % 32 + 1
+    w = (li - 1) ÷ 32 + 1
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
     sA = @localmem ET (32, TC)
     i = rbase + (bi - 1) * 32 + t
     g = length(bv)
-    gp0 = (bg - 1) * gt
+    gp0 = (bg - 1) * (W * gt) + (w - 1) * gt
     for c0 = 0:TC:plen-1
         clen = min(TC, plen - c0)
-        for jj = 1:clen
+        jj = w
+        while jj <= clen
             sA[t, jj] = i <= m ? A[i, koff + c0 + jj] : zero(ET)
+            jj += W
         end
         @synchronize()
         if i <= m
@@ -239,8 +251,8 @@ end
                 if gp <= g
                     b = bv[gp]
                     acc = b[i]
-                    for jj = 1:clen
-                        acc += sA[t, jj] * b[koff + c0 + jj]
+                    for jj2 = 1:clen
+                        acc += sA[t, jj2] * b[koff + c0 + jj2]
                     end
                     b[i] = acc
                 end
@@ -250,20 +262,24 @@ end
     end
 end
 
-@kernel function _tiled_trailing_backward_eye(bv, @Const(A), koff, plen, gt, rtiles, ::Val{TC}) where {TC}
-    t = @index(Local)
+@kernel function _tiled_trailing_backward_eye(bv, @Const(A), koff, plen, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
+    li = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
+    t = (li - 1) % 32 + 1
+    w = (li - 1) ÷ 32 + 1
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
     sA = @localmem ET (32, TC)
     i = (bi - 1) * 32 + t
     g = length(bv)
-    gp0 = (bg - 1) * gt
+    gp0 = (bg - 1) * (W * gt) + (w - 1) * gt
     for c0 = 0:TC:plen-1
         clen = min(TC, plen - c0)
-        for jj = 1:clen
+        jj = w
+        while jj <= clen
             sA[t, jj] = i <= koff ? A[i, koff + c0 + jj] : zero(ET)
+            jj += W
         end
         @synchronize()
         if i <= koff
@@ -272,8 +288,8 @@ end
                 if gp <= g
                     b = bv[gp]
                     acc = b[i]
-                    for jj = 1:clen
-                        acc += sA[t, jj] * b[koff + c0 + jj]
+                    for jj2 = 1:clen
+                        acc += sA[t, jj2] * b[koff + c0 + jj2]
                     end
                     b[i] = acc
                 end

@@ -129,6 +129,14 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
     g = length(zv)
     gt = parse(Int, get(ENV, "KAPSEUDO_TRSM_GT", "32"))
     gt >= 1 || error("KAPSEUDO_TRSM_GT must be a positive integer (got $gt)")
+    # W = warps per trailing-update block. The W warps SHARE one 32×TC @localmem tile (shared
+    # mem/block is unchanged), so occupancy rises ~W× off the shared-mem-capped W=1 ceiling
+    # (~14% on A100) until registers bind — measured ~1.7× on the trailing kernels at W=4. Each
+    # block then covers W*gt grid points (warp w handles the w-th gt-chunk). W=1 reproduces the
+    # original single-warp launch exactly. Tunable via KAPSEUDO_TRSM_W.
+    W = parse(Int, get(ENV, "KAPSEUDO_TRSM_W", "4"))
+    W >= 1 || error("KAPSEUDO_TRSM_W must be a positive integer (got $W)")
+    vw = Val(W)
     vtc = Val(tiled_tc(backend, P))   # trailing-tile column width (shared-mem occupancy knob, per device+type)
     nblk = cld(m, 32)
     zc = conj(zv)
@@ -146,11 +154,11 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
         ntrail = m - rbase
         if ntrail > 0
             rtiles = cld(ntrail, 32)
-            ggrid = cld(g, gt)
+            ggrid = cld(g, W * gt)
             if eye
-                @views _tiled_trailing_forward_eye(backend, 32)(bV, P.Ac, koff, plen, rbase, m, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
+                @views _tiled_trailing_forward_eye(backend, 32 * W)(bV, P.Ac, koff, plen, rbase, m, gt, rtiles, vtc, vw; ndrange=32 * W * rtiles * ggrid)
             else
-                @views _tiled_trailing_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
+                @views _tiled_trailing_forward(backend, 32 * W)(bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt, rtiles, vtc, vw; ndrange=32 * W * rtiles * ggrid)
             end
         end
     end
@@ -165,11 +173,11 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
         end
         if koff > 0
             rtiles = cld(koff, 32)
-            ggrid = cld(g, gt)
+            ggrid = cld(g, W * gt)
             if eye
-                @views _tiled_trailing_backward_eye(backend, 32)(bV, P.A, koff, plen, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
+                @views _tiled_trailing_backward_eye(backend, 32 * W)(bV, P.A, koff, plen, gt, rtiles, vtc, vw; ndrange=32 * W * rtiles * ggrid)
             else
-                @views _tiled_trailing_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen, gt, rtiles, vtc; ndrange=32 * rtiles * ggrid)
+                @views _tiled_trailing_backward(backend, 32 * W)(bV, zv, P.A, P.B, koff, plen, gt, rtiles, vtc, vw; ndrange=32 * W * rtiles * ggrid)
             end
         end
     end
