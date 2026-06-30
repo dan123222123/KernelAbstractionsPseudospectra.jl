@@ -61,6 +61,35 @@ function tiled_tc(backend, P)
     end
 end
 
+# Warps per trailing-update block — the `Val{W}` of the trailing kernels. The W warps SHARE one
+# 32×TC @localmem tile (shared mem/block UNCHANGED) and split the `gt` grid points across warps, so
+# the shared-mem-capped resident blocks/SM each carry W warps → occupancy rises ~W× off the W=1
+# ceiling until registers bind (measured A100 ComplexF64: occupancy 14%→30%, ~1.7× on the trailing
+# kernels, ~1.57× end-to-end at W=4). W=1 reproduces the original single-warp launch exactly; the
+# result is bit-identical across W (per-(row,grid-point) FMA order is unchanged). Resolution order
+# mirrors `tiled_tc`: `KAPSEUDO_TRSM_W` env > a value persisted by `tune_trsm_tc!` (per type+eye) >
+# `_DEFAULT_W`. W is independent of `tiled_tiles_fit` (it does not change shared-mem/block); the only
+# device limit is registers, which the tuner discovers by skipping any (TC,W) whose launch fails.
+const _W_CANDIDATES = (1, 2, 4, 8)
+const _DEFAULT_W = 4                        # A100 ComplexF64 sweet spot; the tuner refines per device+type
+_w_pref_key(T, eye::Bool) = "trsm_w_$(T)_$(eye ? "eye" : "gen")"
+const _W_CACHE = Dict{Tuple{DataType,Bool},Int}()
+const _W_CACHE_LOCK = ReentrantLock()
+_clear_w_cache!() = (@lock _W_CACHE_LOCK empty!(_W_CACHE); nothing)
+
+function tiled_w(backend, P)
+    if haskey(ENV, "KAPSEUDO_TRSM_W")
+        w = parse(Int, ENV["KAPSEUDO_TRSM_W"])
+        w >= 1 || error("KAPSEUDO_TRSM_W must be a positive integer (got $w)")
+        return w
+    end
+    @lock _W_CACHE_LOCK get!(_W_CACHE, (eltype(P.A), b_is_identity(P))) do
+        tuned = @load_preference(_w_pref_key(eltype(P.A), b_is_identity(P)), nothing)
+        w = tuned === nothing ? nothing : tryparse(Int, tuned)
+        (w !== nothing && w >= 1) ? w : _DEFAULT_W
+    end
+end
+
 # Analytic per-device+type estimate — NO benchmark run. The end-to-end optimum is NOT the narrowest
 # tile: more sub-tiles mean more @localmem reloads / panel passes, whose overhead eventually outweighs
 # the occupancy gain (measured 1080 Ti: the 1-tile eye solve peaks at TC=16, the 2-tile generic at
@@ -129,13 +158,10 @@ function _tiled_trsm!(backend, bV, zv, P, wgs)
     g = length(zv)
     gt = parse(Int, get(ENV, "KAPSEUDO_TRSM_GT", "32"))
     gt >= 1 || error("KAPSEUDO_TRSM_GT must be a positive integer (got $gt)")
-    # W = warps per trailing-update block. The W warps SHARE one 32×TC @localmem tile (shared
-    # mem/block is unchanged), so occupancy rises ~W× off the shared-mem-capped W=1 ceiling
-    # (~14% on A100) until registers bind — measured ~1.7× on the trailing kernels at W=4. Each
-    # block then covers W*gt grid points (warp w handles the w-th gt-chunk). W=1 reproduces the
-    # original single-warp launch exactly. Tunable via KAPSEUDO_TRSM_W.
-    W = parse(Int, get(ENV, "KAPSEUDO_TRSM_W", "4"))
-    W >= 1 || error("KAPSEUDO_TRSM_W must be a positive integer (got $W)")
+    # W = warps per trailing-update block (occupancy knob; see `tiled_w`). Each block then covers
+    # W*gt grid points (warp w handles the w-th gt-chunk). Resolution: KAPSEUDO_TRSM_W env >
+    # tuned preference > default.
+    W = tiled_w(backend, P)
     vw = Val(W)
     vtc = Val(tiled_tc(backend, P))   # trailing-tile column width (shared-mem occupancy knob, per device+type)
     nblk = cld(m, 32)
