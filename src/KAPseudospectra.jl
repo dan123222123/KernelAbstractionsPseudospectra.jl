@@ -1,13 +1,113 @@
 module KAPseudospectra
 
+using Preferences
+
+# Triangular-solve strategy for the GPU ihlpsa inner solve. This is a LOCAL PREFERENCE
+# (stored in LocalPreferences.toml via Preferences.jl) so it can be set per-checkout, with
+# the env var KAPSEUDO_TRSM as a runtime override that needs no recompile.
+#
+# The DEFAULT is "column": correct for every element type and every backend, no warp/shuffle
+# assumptions. The "tiled" fast path is OPT-IN (for now): it uses hardware warp shuffles, and although
+# it SELF-GATES to the always-correct `column` solve wherever the shuffle / shared memory isn't usable
+# (so it's safe to request on any backend), `column` stays the default as the fully-validated,
+# bitwise-stable baseline. Opt in with `set_trsm_strategy!("tiled")` (or `KAPSEUDO_TRSM=tiled`) once
+# you've confirmed it on your hardware. Values:
+#   "column" (default) – column-oriented solve: barrier-based, shuffle-free, no per-warp register
+#              semantics. Correct for every element type / backend, and the solve that "tiled" falls
+#              back to wherever the tiled path isn't usable.
+#   "tiled"  – the shared-memory A,B-reuse tiled solve where it's usable for this backend+type, else
+#              an automatic fall back to `column`. "Usable" = `warp_trsm_safe(backend, wide)` (the
+#              hardware shuffle works here; false on stock oneAPI, Metal-unless-opted-in, and wide
+#              non-IEEE types) AND the trailing-update tiles fit shared memory (a wide non-IEEE B≠I
+#              pencil needs two tiles and typically overflows). The performant choice for
+#              ComplexF32/F64 on CUDA / AMDGPU.
+# (The earlier register-warp `@generated` solve was removed: it only beat tiled at small m while
+# paying a per-R recompile growing to ~18 s at R=16 / minutes at R=32. The former gate-bypassing
+# `tiled` was also dropped — `tiled` now always self-gates; what it means here is the old `auto`.)
+const _VALID_TRSM = ("column", "tiled")
+
+function trsm_strategy()
+    s = get(ENV, "KAPSEUDO_TRSM", @load_preference("trsm_strategy", "column"))
+    s in _VALID_TRSM || error("invalid trsm strategy $(repr(s)); valid: $(_VALID_TRSM)")
+    return s
+end
+
+# Persist the default strategy into LocalPreferences.toml. Changing it triggers a recompile;
+# the change takes effect on the next Julia session (use the KAPSEUDO_TRSM env var to switch live).
+function set_trsm_strategy!(s::AbstractString)
+    s in _VALID_TRSM || error("invalid trsm strategy $(repr(s)); valid: $(_VALID_TRSM)")
+    @set_preferences!("trsm_strategy" => s)
+    @info "set trsm_strategy local preference to $(repr(s)); restart Julia to take effect (or set ENV[\"KAPSEUDO_TRSM\"] to switch now)"
+end
+export set_trsm_strategy!
+
+# ── Intel/oneAPI: force a fixed SIMD32 subgroup so the tiled trsm works at all m ──────
+# The tiled solve assumes a fixed 32-lane warp. Intel's IGC instead
+# picks the SIMD width (8/16/32) PER KERNEL by register pressure, so a 32-lane workgroup
+# can span several subgroups and the warp shuffles silently return garbage past the first
+# subgroup. Setting IGC's SIMD32 override makes every kernel one 32-lane subgroup, so the
+# shuffles are correct for all m. These env vars are read when the Level-Zero/IGC driver
+# initializes, so they must be set BEFORE `using oneAPI`; `__init__` (which runs at
+# `using KAPseudospectra`) does that when the opt-in preference is set. Opt-in because it
+# forces SIMD32 process-wide (lowering occupancy for kernels that would prefer SIMD16).
+# Also requires the oneAPI warp-shuffle backend in KernelIntrinsics.
+intel_force_simd32() = @load_preference("intel_force_simd32", false)
+function _apply_intel_simd32!()
+    get!(ENV, "NEOReadDebugKeys", "1")          # enable Intel NEO debug keys
+    get!(ENV, "IGC_ForceOCLSIMDWidth", "32")    # force every kernel to SIMD32
+    return nothing
+end
+"""
+    set_intel_force_simd32!(flag::Bool)
+
+Persist whether KAPseudospectra forces Intel GPUs to SIMD32, so the `warp`/`tiled` trsm
+strategies are correct at every `m` (otherwise IGC may narrow the SIMD width and the warp
+shuffles break past the subgroup boundary). Stored in LocalPreferences.toml and applied
+from `__init__`; for full effect start a fresh session with `using KAPseudospectra`
+**before** `using oneAPI`. Without it, use `KAPSEUDO_TRSM=column` on Intel.
+"""
+function set_intel_force_simd32!(flag::Bool)
+    @set_preferences!("intel_force_simd32" => flag)
+    flag && _apply_intel_simd32!()
+    @info "intel_force_simd32 = $flag (LocalPreferences.toml). For full effect, restart Julia and load KAPseudospectra before oneAPI."
+    return flag
+end
+export set_intel_force_simd32!
+
+# ── Metal: opt-in for the tiled fast path ──────────────────────────────────────────────
+# Unlike oneAPI (where the stock KernelIntrinsics shuffle is a stub), Metal's warp shuffles are
+# correct, so this is a policy gate, not a correctness one: it keeps the always-correct `column`
+# solve as what Metal's `tiled` strategy falls back to by default, matching how oneAPI requires an
+# explicit opt-in, so the fast path isn't silently on for a modest speedup. The Metal extension's
+# `warp_trsm_safe` reads this. (The `metal_warp_trsm` preference name is retained for back-compat.)
+metal_warp_trsm() = @load_preference("metal_warp_trsm", false)
+"""
+    set_metal_warp_trsm!(flag::Bool)
+
+Persist whether the `tiled` trsm strategy may use the tiled fast path on Metal (default
+`false` → `tiled` falls back to the always-correct `column` solve on Metal). Metal's shuffles are
+correct, so this is an opt-in for a modest speedup, mirroring oneAPI's `set_intel_force_simd32!`.
+Stored in LocalPreferences.toml; restart Julia (or set `KAPSEUDO_TRSM=tiled`) for it to take effect.
+"""
+function set_metal_warp_trsm!(flag::Bool)
+    @set_preferences!("metal_warp_trsm" => flag)
+    @info "metal_warp_trsm = $flag (LocalPreferences.toml); restart Julia or set KAPSEUDO_TRSM=tiled to switch now"
+    return flag
+end
+export set_metal_warp_trsm!
+
 include("core.jl")
 export MatrixPencil
 
 include("svdpsa.jl")
 export ℂsvdpsa, ℝsvdpsa
 
+include("backend.jl")   # general per-backend device interface (CPU defaults; GPU exts override)
+
 include("ihlpsa.jl")
 export ihlpsa
+
+include("tune.jl")   # tune_trsm_tc!: per-device probe for the tiled trailing-tile width
 export set_pdiv_accurate   # Float16/Float32 GPU-solve precision toggle (from KATRSM)
 
 # Build a 2D grid of complex shifts. Returns (gx, gy, zg) where gx and gy are
@@ -38,6 +138,12 @@ function _precompile_ihlpsa(backend, dev, Ts)
         ihlpsa(backend, zg, Pg, 5; devs=[dev])
     end
     return nothing
+end
+
+function __init__()
+    # Apply the Intel SIMD32 override early (before the oneAPI driver initializes) when
+    # opted in. Harmless on non-Intel setups — the env vars are Intel-specific.
+    intel_force_simd32() && _apply_intel_simd32!()
 end
 
 ## precompile gpu code

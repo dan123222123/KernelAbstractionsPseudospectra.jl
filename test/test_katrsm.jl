@@ -209,6 +209,50 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
             end
         end
 
+        @testset "batched B=I eye kernels (column)" begin
+            # For a standard pencil (B = I) the eye column solve drops the B read: M = zI − A,
+            # so the pivot is (z − A[j,j]) and off-diagonal updates are (−A[i,j]). They must agree
+            # with LAPACK on M = zI − {L,U} AND with the generic kernels run with B = the materialized
+            # identity, to round-off (they compute the shorter z−A / −A expressions, so NVPTX FMA
+            # contraction can differ by ~1 ULP — not bit-for-bit). Column eye runs on any backend.
+            # This is the path `_column_trsm!` takes for a StandardSchurMatrixPencil.
+            for T in types, m in (8, 16, 31, 32, 64)
+                rtol = _tol(T)
+                g = 4
+                L = _rand_lowertri(T, m); U = _rand_uppertri(T, m)   # Ac/A play the triangular role
+                Id = Matrix{T}(I, m, m)
+                zv = T(2) .+ T(0.3) * randn(T, g)
+                b0 = reduce(hcat, [randn(T, m) for _ = 1:g])
+                L_d = _to(backend, L); U_d = _to(backend, U)
+                Id_d = _to(backend, Id); zv_d = _to(backend, zv)
+
+                # column eye vs generic-with-identity (and vs LAPACK). wgs=1 single-thread, wgs=4 split.
+                for wgs in (1, 4)
+                    be = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_column_oriented_forward_solve_eye(backend, wgs, (wgs, g))(be, zv_d, L_d)
+                    bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_column_oriented_forward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, L_d, Id_d)
+                    KernelAbstractions.synchronize(backend)
+                    beh = _from(be.data); bch = _from(bc.data)
+                    for i = 1:g
+                        @test isapprox(beh[:, i], LowerTriangular(zv[i] * I - L) \ b0[:, i]; rtol=rtol)
+                        @test isapprox(beh[:, i], bch[:, i]; rtol=rtol)   # ~round-off vs generic (FMA order)
+                    end
+
+                    be = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_column_oriented_backward_solve_eye(backend, wgs, (wgs, g))(be, zv_d, U_d)
+                    bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
+                    KATRSM._batched_column_oriented_backward_solve_pencil(backend, wgs, (wgs, g))(bc, zv_d, U_d, Id_d)
+                    KernelAbstractions.synchronize(backend)
+                    beh = _from(be.data); bch = _from(bc.data)
+                    for i = 1:g
+                        @test isapprox(beh[:, i], UpperTriangular(zv[i] * I - U) \ b0[:, i]; rtol=rtol)
+                        @test isapprox(beh[:, i], bch[:, i]; rtol=rtol)   # ~round-off vs generic (FMA order)
+                    end
+                end
+            end
+        end
+
         @testset "blkco non-pencil kernels (KA, single block)" begin
             for T in types, m in (8, 16)
                 rtol = _tol(T)
@@ -281,6 +325,47 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
                 KATRSM.blkco_forward_solve_pencil!(d, z, Al_d, Bl_d; nblkcols)
                 KernelAbstractions.synchronize(backend)
                 @test isapprox(_from(d), LowerTriangular(z * Bl .- Al) \ b0; rtol=rtol)
+            end
+        end
+    end
+end
+
+# End-to-end consistency of the GPU `tiled` trsm strategy (KAPSEUDO_TRSM=tiled): it must match the
+# shuffle-free `column` baseline to element-type tolerance, across sizes incl. partial last panels
+# (m not a multiple of 32). `tiled` self-gates to `column` where the shuffle/tiles aren't usable, so
+# it's safe to request on any backend (on a shuffle-unsafe backend it simply IS column here).
+function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
+    KernelAbstractions.isgpu(backend) || return
+    @testset "trsm strategy consistency -- $(backend)" begin
+        # Run the `tiled` strategy on pencil `P` and require it to match the shuffle-free `column`
+        # baseline to element-type tolerance.
+        function check(P, T)
+            _, _, zg = qgrid(T, (-3, 3), (-3, 3), (40, 40))
+            tol = real(T) === Float32 ? 1e-4 : 1e-10
+            σc = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "column")
+            σt = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "tiled")
+            @test maximum(abs.(σt .- σc)) / maximum(abs.(σc)) < tol
+        end
+
+        for T in types
+            # Standard (B=I) pencil. Sizes span power-of-two panels and partial last panels (m not a
+            # multiple of 32), AND small m < 32 (the tiled panel solve is intrinsically 32-wide and
+            # masks lanes past a partial last panel — exercised here end-to-end via `tiled`).
+            # 64/256 were folded in from the former bench/tiled_check.jl.
+            for m in (8, 16, 31, 32, 64, 100, 128, 256, 300)
+                rng = Random.seed!(2024)
+                check(MatrixPencil(schur(randn(rng, T, m, m))), T)
+            end
+            # Generalized (B≠I) pencil: the ONLY coverage of the two-tile generic tiled trailing
+            # kernels (_tiled_trailing_{forward,backward}) and the B≠I tiled/column paths — every
+            # other case here is B=I, so `b_is_identity` selects the sB-free `*_eye` kernels. m>32 so
+            # the trailing update actually runs; 100 adds a partial last panel. B is diagonally
+            # dominant so z*B−A stays well-conditioned across the grid.
+            for m in (64, 100)
+                rng = Random.seed!(2025)
+                A = randn(rng, T, m, m)
+                B = randn(rng, T, m, m) + T(5) * I
+                check(MatrixPencil(A, B), T)
             end
         end
     end

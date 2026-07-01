@@ -48,6 +48,19 @@ include("test_realsvdpsa.jl")
 include("test_edge_cases.jl")
 include("test_katrsm.jl")
 
+# Extended-precision (MultiFloats) tests are opt-in ("multifloats" in ARGS — NOT part of `all`).
+# Like the GPU backends, the extended-precision stack is "bring your own" rather than a default
+# test dep — add it to the test env first, then run `test/runtests.jl multifloats`:
+#   julia --project=test -e 'using Pkg; Pkg.add(["MultiFloats","GenericSchur","GenericLinearAlgebra"])'
+# (MultiFloats is a weak dep of the package, via the MultiFloatsPseudospectra extension; GenericSchur
+# and GenericLinearAlgebra supply the generic Schur + tridiagonal eigen the extended path needs and
+# are not package deps.) The accuracy oracle runs on CPU; the per-limb tiled-shuffle kernel test is
+# invoked from the GPU backend blocks below (it self-gates to backends where the shuffle is usable).
+if "multifloats" in ARGS
+    include("test_multifloats.jl")
+    test_multifloats_accuracy()
+end
+
 # --- backend dispatch ---
 
 if all_tests || "cpu" in ARGS
@@ -56,23 +69,38 @@ if all_tests || "cpu" in ARGS
     test_katrsm_kernels(CPU())
 end
 
-if all_tests || "cuda" in ARGS
+# CUDA is opt-in ("cuda" only — NOT part of `all`): CI runs CPU-only, so pulling in the whole
+# CUDA/GPUCompiler/LLVM stack there is pure precompile overhead and the GPU tests can't run on a
+# CPU runner anyway (the core kernels are still compiled by the CPU run). Add it on a CUDA machine
+# (`julia --project=test -e 'using Pkg; Pkg.add("CUDA")'`) and run `test/runtests.jl cuda`, or use
+# a GPU CI runner. Same opt-in pattern as AMDGPU / oneAPI / Metal.
+if "cuda" in ARGS
     using CUDA
     if CUDA.functional()
         test_ihlpsa_parter16(CUDABackend())
         test_cross_backend(CUDABackend())
         test_adaptive_backend(CUDABackend())
         test_katrsm_kernels(CUDABackend())
+        test_trsm_strategies(CUDABackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(CUDABackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(CUDABackend())
     end
 end
 
-if all_tests || "amdgpu" in ARGS
+# AMDGPU is opt-in ("amdgpu" only — NOT part of `all`): current AMDGPU releases require
+# KernelIntrinsics 1.x, which is incompatible with the CUDA stack's 0.1.x in a shared test
+# environment, so it can't be a default test dep. Add it on AMD hardware first
+# (`julia --project=test -e 'using Pkg; Pkg.add("AMDGPU")'`) and run `test/runtests.jl amdgpu`.
+if "amdgpu" in ARGS
     using AMDGPU
     if AMDGPU.functional()
         test_ihlpsa_parter16(ROCBackend())
         test_cross_backend(ROCBackend())
         test_adaptive_backend(ROCBackend())
         test_katrsm_kernels(ROCBackend())
+        test_trsm_strategies(ROCBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(ROCBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(ROCBackend())
     end
 end
 
@@ -90,6 +118,9 @@ if "oneapi" in ARGS
         test_cross_backend(oneAPIBackend(); types=Ts)
         test_adaptive_backend(oneAPIBackend(); types=Ts)
         test_katrsm_kernels(oneAPIBackend(); types=Ts)
+        test_trsm_strategies(oneAPIBackend(); types=Ts)
+        ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(oneAPIBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(oneAPIBackend())
     end
 end
 
@@ -105,5 +136,8 @@ if "metal" in ARGS
         test_cross_backend(MetalBackend(); types=Ts)
         test_adaptive_backend(MetalBackend(); types=Ts)
         test_katrsm_kernels(MetalBackend(); types=Ts)
+        test_trsm_strategies(MetalBackend(); types=Ts)
+        ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(MetalBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(MetalBackend())
     end
 end

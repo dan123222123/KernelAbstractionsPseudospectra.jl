@@ -8,6 +8,7 @@ Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
 ArraysOfArrays = "65a8f2f4-9b39-5baf-92e2-a9cc46fdf018"
 GridArrays = "356ae075-8bc9-5ef9-a342-46c9ba26438c"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
+KernelIntrinsics = "f9588fbb-d238-4998-b15a-468e8766d49a"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
 PrecompileTools = "aea7be01-6a6a-4083-8856-8a6e6704d82a"
@@ -20,10 +21,20 @@ ThreadsX = "ac1d9e8a-700a-412c-b207-f0111f4b6c0d"
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
+MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
 oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
 
 [extensions]
 AMDGPUPseudospectra = "AMDGPU"
 CUDAPseudospectra = "CUDA"
+MultiFloatsPseudospectra = "MultiFloats"
 MetalPseudospectra = "Metal"
 oneAPIPseudospectra = "oneAPI"
+
+[compat]
+# KernelIntrinsics 0.1.x is the portable @shfl source; the 0.1.7 floor is the minimum with a
+# working @shfl/Idx on the supported backends. Kept on 0.1.x deliberately: it pins CUDA to
+# 5.9–5.11, and AMDGPU's current releases need KI 1.x — so a single env that loads *all* GPU
+# backends at once is unsatisfiable (resolve per-backend; see DESIGN_TRSM.md "Dependency note").
+KernelIntrinsics = "0.1.7"
+Preferences = "1"
