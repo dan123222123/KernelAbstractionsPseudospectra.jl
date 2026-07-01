@@ -48,3 +48,11 @@ device_smem_per_sm(backend) = 64 * 1024
 # `wide` is true for non-IEEE element types (MultiFloats / BigFloat); the oneAPI override keeps those
 # on `column`.
 warp_trsm_safe(backend, wide) = true
+
+# Whether the `tiled-gemm` strategy's `mul!` trailing update is the fast (compute-bound) path for this
+# element type + backend. It's worth it only where `mul!` hits a vendor BLAS complex GEMM: ComplexF32/
+# F64 on CUDA (cuBLAS) / AMDGPU (rocBLAS). For MultiFloats / non-IEEE there is no fast GEMM (mul! drops
+# to a slow generic matmul), and oneAPI/Metal complex-GEMM support is patchy — those override to false,
+# so `tiled-gemm` self-gates to the regular `tiled` trailing kernel (correct, just not the GEMM path).
+# `T` is the (complex) element type of the pencil.
+tiled_gemm_safe(backend, ::Type{T}) where {T} = real(T) <: Base.IEEEFloat

@@ -49,6 +49,10 @@ KAPseudospectra.warp_trsm_safe(::oneAPI.oneAPIBackend, wide::Bool) =
     KAPseudospectra.intel_force_simd32() &&
     Base.get_extension(KernelIntrinsics, :KernelIntrinsicsoneAPIExt) !== nothing
 
+# `tiled-gemm`'s `mul!` trailing has no reliable fast complex GEMM on oneMKL here — keep oneAPI on the
+# regular `tiled` trailing kernel (`tiled-gemm` → `tiled`).
+KAPseudospectra.tiled_gemm_safe(::oneAPI.oneAPIBackend, ::Type) = false
+
 # The SIMD-width pin for the tiled fast path comes from the main-module `__init__`
 # setting `IGC_ForceOCLSIMDWidth` (when `set_intel_force_simd32!` is enabled). We deliberately
 # do NOT use oneAPI's `reqd_subgroup_size!` (the per-kernel `intel_reqd_sub_group_size`

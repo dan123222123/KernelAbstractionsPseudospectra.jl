@@ -120,6 +120,32 @@ figure; oneAPI/Metal fall back to per-workgroup proxies since their execution
 models don't expose a clean per-SM shared-memory budget — there the probe is the
 intended path).
 
+### 3. Tiled-GEMM (`tiled-gemm`)
+
+Same driver as `tiled` (`_tiled_trsm!`, with a `gemm` flag) and the **same warp
+panel solve** — the *only* difference is the trailing update. `tiled`'s custom
+shared-memory kernel reuses the A-tile across the grid-point batch (a *bandwidth*
+win); `tiled-gemm` instead does the trailing update as a vendor-BLAS **`mul!`**
+with the grid points as the GEMM's wide dimension. Because each panel's trailing
+matrix block is **z-independent for B=I** (the off-diagonal of `zI−A` is just
+`−A`), the update is a single `mul!(X[trailing,:], Mat[trailing,panel], X[panel,:],
+1, 1)` over the whole `flatview(bV)` (`Mat = Ac` forward / `A` backward) — and the
+existing grid-point-major RHS layout needs no transpose (cuBLAS handles the
+strided `lda=m` sub-matrices at full speed).
+
+This trades `tiled`'s bandwidth win for a **compute-bound** trailing GEMM, which
+helps where the solve is bandwidth/latency-bound — i.e. **large-m ComplexF32/F64**
+(where `tiled` already wins, and the GEMM extends it). It is gated by
+`tiled_gemm_safe(backend, T)`: true for ComplexF32/F64 on CUDA/AMDGPU (fast complex
+GEMM), false for MultiFloats (no vendor GEMM — `mul!` would drop to a slow generic
+matmul) and on oneAPI/Metal (patchy complex GEMM). When false, `tiled-gemm`
+self-gates to the regular `tiled` trailing kernel. **First cut: B=I only** — B≠I
+keeps the `tiled` trailing kernel (the B≠I GEMM is `A·x − z.*(B·x)`, two GEMMs +
+a per-shift scale, deferred). MultiFloats are *compute-bound by construction* (the
+limb arithmetic), so a memory-side strategy buys them nothing anyway (measured: tiled×
+shrinks 1.37→1.00 from F32 to Float64x4), which is why routing them to `tiled`
+loses nothing.
+
 ## Choosing a solve: the `trsm_strategy` local preference
 
 The choice is a **local preference** (Preferences.jl → `LocalPreferences.toml`)

@@ -21,10 +21,16 @@ using Preferences
 #              non-IEEE types) AND the trailing-update tiles fit shared memory (a wide non-IEEE B≠I
 #              pencil needs two tiles and typically overflows). The performant choice for
 #              ComplexF32/F64 on CUDA / AMDGPU.
+#   "tiled-gemm" – same diagonal panel solve as `tiled`, but the trailing update is a vendor-BLAS
+#              `mul!` (cuBLAS/rocBLAS) with the grid points as the GEMM's wide dimension — compute-
+#              bound where `tiled` is bandwidth-bound. Gated to ComplexF32/F64 (`tiled_gemm_safe`,
+#              which has the fast complex GEMM); MultiFloats / non-IEEE and backends without a complex
+#              GEMM auto-fall-back to the `tiled` trailing kernel. B=I in this first cut (B≠I keeps
+#              the `tiled` trailing). Same correctness self-gating as `tiled`.
 # (The earlier register-warp `@generated` solve was removed: it only beat tiled at small m while
 # paying a per-R recompile growing to ~18 s at R=16 / minutes at R=32. The former gate-bypassing
 # `tiled` was also dropped — `tiled` now always self-gates; what it means here is the old `auto`.)
-const _VALID_TRSM = ("column", "tiled")
+const _VALID_TRSM = ("column", "tiled", "tiled-gemm")
 
 function trsm_strategy()
     s = get(ENV, "KAPSEUDO_TRSM", @load_preference("trsm_strategy", "column"))
