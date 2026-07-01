@@ -41,6 +41,36 @@ function set_trsm_strategy!(s::AbstractString)
 end
 export set_trsm_strategy!
 
+# ─── opt-in GPU-kernel precompilation + on-disk caching ──────────────────────────────
+# The tiled GPU triangular-solve kernels (warp-shuffle panel solve + shared-memory trailing
+# update) have a non-trivial first-call compile cost. On Julia versions that serialize foreign
+# (GPUCompiler) CodeInstances into pkgimages (JuliaLang/julia#60747, milestone 1.13), exercising
+# them in the GPU precompile workload together with GPUCompiler's on-disk cache makes that
+# compile persist ACROSS sessions, eliminating their TTFP. Off by default: it lengthens
+# precompilation, and the cross-session payoff needs the #60747 fix (on older Julia the workload
+# still runs but the GPU code isn't retained yet).
+const PRECOMPILE_GPU_KERNELS = @load_preference("precompile_gpu_kernels", false)
+const _GPUCOMPILER_UUID = Base.UUID("61eb1bfa-7361-4325-ad38-22787b887f55")
+
+"""
+    enable_gpu_kernel_cache!(state=true)
+
+Opt into precompiling the tiled GPU triangular-solve kernels and caching their compiled code on
+disk, so their first-call compile is paid once (at package precompile) instead of on the first
+solve of every session. Sets the `precompile_gpu_kernels` preference and enables GPUCompiler's
+`disk_cache`; **restart Julia** to take effect (re-precompiles, slower once). Full cross-session
+persistence needs Julia ≥ the release containing JuliaLang/julia#60747 (milestone 1.13); on
+older Julia the workload still runs but the compiled GPU code is not retained across sessions
+yet (harmless — it just won't cut TTFP there).
+"""
+function enable_gpu_kernel_cache!(state::Bool=true)
+    @set_preferences!("precompile_gpu_kernels" => state)
+    Preferences.set_preferences!(_GPUCOMPILER_UUID, "disk_cache" => string(state); force=true)
+    @info "GPU kernel cache $(state ? "enabled" : "disabled") (precompile_gpu_kernels + GPUCompiler disk_cache). Restart Julia to take effect; cross-session reuse needs Julia ≥ 1.13 (JuliaLang/julia#60747)."
+    return nothing
+end
+export enable_gpu_kernel_cache!
+
 # ── Intel/oneAPI: force a fixed SIMD32 subgroup so the tiled trsm works at all m ──────
 # The tiled solve assumes a fixed 32-lane warp. Intel's IGC instead
 # picks the SIMD width (8/16/32) PER KERNEL by register pressure, so a 32-lane workgroup
@@ -60,9 +90,9 @@ end
 """
     set_intel_force_simd32!(flag::Bool)
 
-Persist whether KAPseudospectra forces Intel GPUs to SIMD32, so the `warp`/`tiled` trsm
-strategies are correct at every `m` (otherwise IGC may narrow the SIMD width and the warp
-shuffles break past the subgroup boundary). Stored in LocalPreferences.toml and applied
+Persist whether KAPseudospectra forces Intel GPUs to SIMD32, so the `tiled` trsm strategy's
+warp-shuffle panel solve is correct at every `m` (otherwise IGC may narrow the SIMD width and
+the warp shuffles break past the subgroup boundary). Stored in LocalPreferences.toml and applied
 from `__init__`; for full effect start a fresh session with `using KAPseudospectra`
 **before** `using oneAPI`. Without it, use `KAPSEUDO_TRSM=column` on Intel.
 """
@@ -136,6 +166,23 @@ function _precompile_ihlpsa(backend, dev, Ts)
         # path so a first MatrixPencil(A, B) call isn't a cold compile.
         Pg = MatrixPencil(randn(T, 32, 32), randn(T, 32, 32) + T(5) * I)
         ihlpsa(backend, zg, Pg, 5; devs=[dev])
+    end
+    return nothing
+end
+
+# Opt-in (PRECOMPILE_GPU_KERNELS) extension of the GPU precompile workload: exercise the `tiled`
+# solve (the only fast-path strategy left — the register-warp tier and its per-R recompile were
+# removed, see DESIGN_TRSM.md) so its CodeInstances are created during precompilation. With
+# JuliaLang/julia#60747 + GPUCompiler's disk cache these persist across sessions. The launch is
+# guarded: a flaky precompile-worker GPU *execution* is tolerated — the kernel still *compiles*
+# (the CI is what we need cached), so a failure degrades gracefully instead of breaking precompile.
+function _precompile_gpu_kernels(backend, dev, Ts)
+    try
+        withenv("KAPSEUDO_TRSM" => "tiled") do
+            _precompile_ihlpsa(backend, dev, Ts)
+        end
+    catch err
+        @debug "tiled precompile skipped" exception = err
     end
     return nothing
 end
