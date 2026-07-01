@@ -48,6 +48,19 @@ include("test_realsvdpsa.jl")
 include("test_edge_cases.jl")
 include("test_katrsm.jl")
 
+# Extended-precision (MultiFloats) tests are opt-in ("multifloats" in ARGS — NOT part of `all`).
+# Like the GPU backends, the extended-precision stack is "bring your own" rather than a default
+# test dep — add it to the test env first, then run `test/runtests.jl multifloats`:
+#   julia --project=test -e 'using Pkg; Pkg.add(["MultiFloats","GenericSchur","GenericLinearAlgebra"])'
+# (MultiFloats is a weak dep of the package, via the MultiFloatsPseudospectra extension; GenericSchur
+# and GenericLinearAlgebra supply the generic Schur + tridiagonal eigen the extended path needs and
+# are not package deps.) The accuracy oracle runs on CPU; the per-limb tiled-shuffle kernel test is
+# invoked from the GPU backend blocks below (it self-gates to backends where the shuffle is usable).
+if "multifloats" in ARGS
+    include("test_multifloats.jl")
+    test_multifloats_accuracy()
+end
+
 # --- backend dispatch ---
 
 if all_tests || "cpu" in ARGS
@@ -69,6 +82,8 @@ if "cuda" in ARGS
         test_adaptive_backend(CUDABackend())
         test_katrsm_kernels(CUDABackend())
         test_trsm_strategies(CUDABackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(CUDABackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(CUDABackend())
     end
 end
 
@@ -83,6 +98,9 @@ if "amdgpu" in ARGS
         test_cross_backend(ROCBackend())
         test_adaptive_backend(ROCBackend())
         test_katrsm_kernels(ROCBackend())
+        test_trsm_strategies(ROCBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(ROCBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(ROCBackend())
     end
 end
 
@@ -100,6 +118,9 @@ if "oneapi" in ARGS
         test_cross_backend(oneAPIBackend(); types=Ts)
         test_adaptive_backend(oneAPIBackend(); types=Ts)
         test_katrsm_kernels(oneAPIBackend(); types=Ts)
+        test_trsm_strategies(oneAPIBackend(); types=Ts)
+        ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(oneAPIBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(oneAPIBackend())
     end
 end
 
@@ -115,5 +136,8 @@ if "metal" in ARGS
         test_cross_backend(MetalBackend(); types=Ts)
         test_adaptive_backend(MetalBackend(); types=Ts)
         test_katrsm_kernels(MetalBackend(); types=Ts)
+        test_trsm_strategies(MetalBackend(); types=Ts)
+        ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(MetalBackend())
+        ("multifloats" in ARGS) && test_multifloats_tiled_generic(MetalBackend())
     end
 end

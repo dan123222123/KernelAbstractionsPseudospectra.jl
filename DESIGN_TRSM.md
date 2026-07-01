@@ -1,11 +1,13 @@
 # GPU triangular solves — design notes
 
-Why `ihlpsa`'s batched pencil triangular solve has three implementations and a
+Why `ihlpsa`'s batched pencil triangular solve has two implementations and a
 strategy preference to pick between them. For the adaptive-depth driver that
 calls these solves see [`DESIGN.md`](DESIGN.md); for usage see the `ihlpsa`
-docstring and README. The exploration (warp-register → CUDA-native diagnosis →
-tiled) and its intermediate benchmarks live in `git log` and the `bench/`
-scripts (`warp_smoke.jl`, `warp_trsm_bench.jl`, `tiled_check.jl`).
+docstring and README. The exploration that led here — including the now-removed
+register-warp solve (see ["Why the register-warp solve was removed"](#why-the-register-warp-solve-was-removed)) —
+and its intermediate benchmarks live in `git log` and the `bench/` timing script
+`trsm_bench.jl` (the earlier correctness scripts were folded into the test
+suite — see `test/test_katrsm.jl`).
 
 ## Why the solve is the thing to optimize
 
@@ -19,12 +21,12 @@ The pencil is built on the fly (`zBAij`, never materialised) to save memory, and
 divided with `_pdiv` (a precision-preserving complex divide that keeps F32/F16 in
 their own precision instead of widening to F64 — see `src/KATRSM.jl/KATRSM.jl`).
 
-## The three solves
+## The two solves
 
-All three produce numerically equivalent results (same `_pdiv`, same `zBAij`,
-same per-column/per-row update order); they differ only in how the warp is mapped
-onto the work. They live in `src/KATRSM.jl/` and are selected at runtime by
-`trsmIHL` (`src/ihlpsa.jl`).
+Both produce numerically equivalent results (same `_pdiv`, same `zBAij`); they
+differ in how the work is mapped onto the warp and the memory hierarchy. They
+live in `src/KATRSM.jl/` and are selected at runtime by `trsmIHL`
+(`src/ihlpsa_trsm.jl`).
 
 ### 1. Column-oriented (`column`) — the baseline
 
@@ -34,38 +36,12 @@ memory; for each of the `m` columns, lane 0 computes the pivot into `@localmem`
 and a `@synchronize()` block barrier broadcasts it before the strided column
 update — i.e. **~2m block barriers and m global round-trips on `b`** per solve.
 It uses no warp shuffles, so it works for any element type. This is the safe
-fallback (see the preference section).
+fallback (see the routing section).
 
-### 2. Warp-register (`warp`)
-
-`_batched_warp_{forward,backward}_solve_pencil` (`trsm_warp_kernels.jl`). The
-workgroup is already one warp (`default_wgs = min(m,32) = 32`), so the block
-barriers are wildly overpriced. This version keeps the RHS **in registers** —
-lane ℓ owns rows ℓ, ℓ+32, … → `R = cld(m,32)` register slots — and broadcasts each
-pivot lane-to-lane with a warp shuffle (`KernelIntrinsics.@shfl`), which *also*
-synchronises the warp. Result: **no block barriers, no global round-trips on `b`**.
-
-Key points:
-- **Why registers, not shared memory.** A shared-`b` version would still need a
-  per-column barrier for the write→next-pivot dependency. Register-resident `b`
-  carries that dependency lane-to-lane through `@shfl` alone — that is what makes
-  it barrier-free.
-- **`R` is a compile-time `Val`.** The solve is a `@generated` function that emits
-  the unrolled panel loops with register variables named by literal slot. `m` is
-  fixed for an entire run, so this specialises once per problem size — it does
-  **not** recompile on the per-iteration survivor count `g` (that stays the
-  dynamic ndrange; cf. the dynamic-ndrange fix in `git log`).
-- **Warp-safety.** Every `@shfl` is guarded by a warp-uniform condition
-  (`j = (p-1)·32 + jj` depends only on the panel/column, never the lane), so a
-  partial last panel never diverges the warp on a shuffle.
-
-Bitwise-identical to `column` for the standalone solve; ~1.4–1.6× faster at the
-kernel level for small/medium m.
-
-### 3. Tiled (`tiled`)
+### 2. Tiled (`tiled`)
 
 `_tiled_panel_{forward,backward}` + `_tiled_trailing_{forward,backward}`
-(`trsm_tiled_kernels.jl`), driven by `_tiled_trsm!` (`src/ihlpsa.jl`).
+(`trsm_tiled_kernels.jl`), driven by `_tiled_trsm!` (`src/ihlpsa_trsm.jl`).
 
 For large `m` the per-grid-point solves become **bandwidth-bound**: every warp
 re-streams the whole `m×m` `A,B` pencil from DRAM with zero reuse across grid
@@ -73,10 +49,13 @@ points. While `A,B` fit in L2 (small m) this is free; once they don't (m ≳ 512
 each grid point pays full DRAM bandwidth for `A,B`. This is why large `A,B` are
 the worst case.
 
-The tiled solve is a right-looking blocked algorithm, panel width = warp size:
+The tiled solve is a right-looking blocked algorithm, panel width = warp size
+(kernel-level implementation: `src/KATRSM.jl/trsm_tiled_kernels.jl`, which has an
+ASCII block-layout diagram in its header):
 
-1. **Panel solve** — solve the ≤32×32 diagonal block for every grid point (one
-   warp per grid point, pivots by `@shfl`).
+1. **Panel solve** — solve the ≤32×32 *triangular* diagonal tile for every grid
+   point (lower-triangular for the forward sweep, upper-triangular for the
+   backward; one warp per grid point, pivots by `@shfl`).
 2. **Trailing update** — a tiled GEMM that subtracts the panel's contribution
    from the trailing rows. Each workgroup loads the `A,B[row-tile, panel]` tile
    into `@localmem` **once** and reuses it across `gt` grid points (tunable via
@@ -85,8 +64,61 @@ The tiled solve is a right-looking blocked algorithm, panel width = warp size:
    tiles are reused across the whole batch — turning the streaming into
    compute-bound work.
 
-This loses to `warp` at small m (per-panel launch overhead) and wins
-increasingly at large m.
+Its per-panel launch overhead makes it lose to `column` at small m and win
+increasingly at large m. The panel solve broadcasts pivots with `_trsm_shfl` (a
+warp shuffle, `src/KATRSM.jl/trsm_tiled_kernels.jl`); the MultiFloats per-limb
+shuffle override (`MultiFloatsPseudospectra`) applies here so wide IEEE-free
+types still tile on a shuffle-capable backend.
+
+**The "dead" zero triangle of `A,B` is never touched.** The right-looking
+blocking keeps every trailing-tile index in the *filled* part of the triangle:
+the forward sweep loads rows `i > koff+plen` against panel columns `j ≤ koff+plen`
+(so `i > j`, the filled subdiagonal), and the backward sweep loads rows
+`i ≤ koff` against columns `j > koff` (so `i < j`, the filled superdiagonal). The
+structurally-zero entries exist as device storage but are never loaded into the
+shared tiles or multiplied — dead storage, not dead computation (and no wasted
+no-op flops).
+
+#### Trailing-tile width (`TC`) and occupancy
+
+The trailing tile is **32 rows × `TC` columns**: the row count is a fixed full
+warp (a half-warp row tile wastes lanes and measured slower), and `TC` is a
+compile-time `Val` **decoupled from the 32-wide panel solve** — a wider panel is
+subtracted in `⌈plen/TC⌉` column sub-tiles, leaving the `A,B` DRAM traffic
+unchanged. `TC` is the key occupancy knob, because the trailing kernel is
+**shared-memory-bound** on Pascal: a 32×32 ComplexF32 *generic* tile is
+`2·32·32·4 = 16 KB`, so only **6 blocks/SM** are resident (≈9% occupancy).
+Halving `TC` halves the tile and roughly doubles resident blocks. End-to-end on a
+1080 Ti, versus the original `TC=32`:
+
+| element / `B` | optimal `TC` | speedup at m = 512 / 1024 |
+|---|---|---|
+| ComplexF32, `B=I` (1 tile)  | 16 | 13% / 18% |
+| ComplexF32, `B≠I` (2 tiles) | 8  | 33% / 41% |
+
+The optimum is **not** the narrowest tile: more sub-tiles mean more `@localmem`
+reloads, whose overhead eventually outweighs the occupancy gain — both cases peak
+at ≈24 resident blocks/SM (the 1-tile eye reaches that at `TC=16`, the 2-tile
+generic at `TC=8`). `tiled_tc` (`src/ihlpsa_trsm.jl`) resolves `TC` per device +
+element type in three tiers:
+
+1. `KAPSEUDO_TRSM_TC=8|16|32` env override (tuning / measurement; `TC=32`
+   reproduces the pre-optimization single-tile sweep exactly);
+2. a value persisted by the **`tune_trsm_tc!` probe** (`src/tune.jl`) — it times
+   the tiled solve at each `TC` per `(type, eye/generic)` and stores the fastest in
+   `LocalPreferences.toml`. A timed probe needs *no* occupancy model, so it captures
+   the type's arithmetic intensity and the device's compute:bandwidth ratio
+   directly — the accurate per-device path, run once on the target hardware;
+3. otherwise a zero-setup **analytic estimate**: the *largest* `TC` whose `32×TC`
+   tile reaches ≈¾ of the device's blocks/SM cap (from `device_smem_per_sm`), else
+   the narrowest that fits a block. The ¾-of-cap target is a fixed heuristic
+   calibrated on Pascal/ComplexF32 — good enough as a default, but exactly the
+   quantity the probe measures rather than assumes.
+
+`device_smem_per_sm` is a per-backend hook (CUDA/AMDGPU query the real per-SM/CU
+figure; oneAPI/Metal fall back to per-workgroup proxies since their execution
+models don't expose a clean per-SM shared-memory budget — there the probe is the
+intended path).
 
 ## Choosing a solve: the `trsm_strategy` local preference
 
@@ -97,74 +129,98 @@ Values:
 
 | value    | behaviour |
 |----------|-----------|
-| `auto` (default) | register-`warp` for `m < trsm_crossover()` (default 512), `tiled` for `m ≥` it |
-| `warp`   | always the register-warp solve |
-| `tiled`  | always the tiled solve |
-| `column` | the original column-oriented solve — **shuffle-free, no per-warp register semantics** |
+| `column` (**default**) | the column-oriented solve — **shuffle-free**, correct for every element type and backend |
+| `tiled`  | the tiled solve where it is usable (tiles fit **and** the shuffle is safe), else an automatic fall back to `column` |
 
-**Why `column` exists as an escape hatch.** The `warp`/`tiled` solves rely on
-warp shuffles and per-lane register residency. Higher-precision element types
-(e.g. `ComplexF64`-and-beyond, MultiFloats) can blow the register budget or have
-untested per-warp behaviour; `column` is the conservative path that always works.
-Making the switch a local preference means such a case is one setting away,
-without touching code.
+**`column` is the shipped default; `tiled` is the opt-in performance mode.**
+There is **no size crossover** — `tiled` routes on capability, not `m`, checking
+**both** of:
 
-The `auto` crossover at 512 is also what keeps the default path entirely within
-KernelAbstractions + KernelIntrinsics: the KA+KI register-warp kernel has a
-codegen regression at `R = 16` (m ≈ 512, see below), and routing `m ≥ 512` to the
-tiled solve sidesteps it.
+- `tiled_tiles_fit(backend, P)` — whether *some* trailing-tile width fits
+  `device_smem_bytes`. Because the width `TC` is tunable (see below), this checks
+  the **narrowest** `32×TC` tile (one if `B = I`, two if `B ≠ I`), so a wide
+  non-IEEE `B ≠ I` pencil (MultiFloats: `Float64xN`) whose `32×32` tile would
+  overflow still tiles at a narrow `TC` rather than dropping to `column`; only a
+  type too wide for even the narrowest `TC` falls back.
+- `warp_trsm_safe(backend, wide)` — the panel-solve shuffle is usable for this
+  backend+type. It is `false` on stock oneAPI (no shuffle backend / no SIMD32 pin)
+  and on Metal unless opted in, and for wide non-IEEE types (MultiFloats /
+  BigFloat) lacking the per-limb `_trsm_shfl` override
+  (`MultiFloatsPseudospectra`). On CUDA / AMDGPU it is `true` regardless of element
+  type, so a wide pencil tiles through the per-limb override rather than falling
+  back to `column`.
 
-## The R=16 codegen regression and the CUDA-native option
+Because `tiled` **self-gates** to `column` wherever either check fails, it never
+runs a broken kernel and is safe to request on any backend. (An earlier ungated
+`tiled` that bypassed the shuffle check — and a separate `auto` that did the gating
+— were collapsed into this single gated `tiled`.) `column` nonetheless stays the
+default: it's the fully-validated, bitwise-stable baseline, and a user opts into the
+fast path only once they've confirmed it on their hardware. `ComplexF32` and
+`ComplexF64` are the tested fast-path types (`test_katrsm.jl`'s `test_katrsm_kernels`
+and `test_trsm_strategies`, the latter over both standard and generalized `B≠I`
+pencils); the genuinely untested/risky case is MultiFloats. Switching to the fast
+mode is one `set_trsm_strategy!("tiled")` / `KAPSEUDO_TRSM=tiled` away.
 
-While benchmarking, the KA+KI `warp` solve was found to run *slower than the
-baseline* at exactly m=512 (R=16) — non-monotonic (fine again at R=32). Compiling
-the identical algorithm straight through `@cuda` + `CUDA.shfl_sync` showed smooth
-register use (71→224 for R=4→32, only 32 B spill at every R) and no regression, so
-the cliff is a **KA+KI lowering artifact, not inherent register pressure**.
+## Why the register-warp solve was removed
 
-A CUDA-native warp solve (`_warp_cuda_{fwd,bwd}!` in
-`ext/CUDAPseudospectra.jl`) is kept as an **opt-in** override
-(`KAPSEUDO_CUDA_NATIVE=1`); the portable KA+KI path is the default. In practice
-`auto` avoids the cliff anyway by using `tiled` at m≥512, so the native override
-mainly matters if `warp` is forced at large m.
+An earlier `warp` strategy kept the RHS in registers (lane ℓ owning rows ℓ, ℓ+32,
+…, `R = ⌈m/32⌉` slots) and broadcast each pivot lane-to-lane with a warp shuffle —
+barrier-free and the fastest path at small `m`. It was **removed**. Benchmarked
+end-to-end `ihlpsa` on CUDA (GTX 1080 Ti, ComplexF32, standard `B = I` pencil),
+warm best-of-N, as a runtime ratio over the `column` baseline (lower = faster):
+
+| m (R) | `warp` | `tiled` |
+|-------|--------|---------|
+| 128 (R=4)  | **0.71×** | 0.83× |
+| 256 (R=8)  | 0.97×     | 1.03× |
+| 512 (R=16) | 0.96×     | **0.78×** |
+
+`warp` only won at small `m`, where the absolute saving was tiny (~0.2 s). The
+disqualifier was **compile cost**: the warp kernel was `@generated` on
+`R = ⌈m/32⌉`, so every new matrix-size bucket triggered a fresh codegen + `ptxas`
+pass, growing superlinearly — measured pure per-size compile (at `m ≥ 256`, where
+one-time costs are already paid): 3.5 s (R=8), 8.4 s (R=12), **17.5 s (R=16)**, and
+minutes at R=32 (`ptxas` still running after 6+ min). `column` and `tiled` compile
+their kernels **once** and pay ~0 marginal cost as `m` changes (they are not
+specialised on `R`). For a tool where users sweep sizes / run adaptive grids, the
+per-`R` recompile dwarfed warp's small-`m` runtime edge. `tiled` is the
+better-engineered fast path (bandwidth-optimal, compiles once, wins at large `m`);
+`column` stays the portable default.
 
 ## Benchmarks (6× GTX 1080 Ti, ComplexF32)
 
-Solve-only, single GPU, full 90k-point grid, forward solve (`warp_smoke.jl` /
-microbench): `warp` is 1.39–1.56× the column kernel for m≤256; the R=16 cliff
-shows at m=512 (KA+KI 0.87×, CUDA-native 1.24×); 1.37× at m=1024.
+End-to-end `ihlpsa` (300² grid, all 6 GPUs, nit=20, best-of-3), `tiled` speedup
+over `column`:
 
-End-to-end `ihlpsa` (300² grid, all 6 GPUs, nit=20, best-of-3), speedup over
-`column`:
+| m    | `tiled` |
+|------|---------|
+| 128  | 1.10×   |
+| 256  | 1.19×   |
+| 512  | **1.46×** |
+| 1024 | **2.77×** |
 
-| m    | `warp` | `tiled` |
-|------|--------|---------|
-| 128  | 1.13×  | 1.10×   |
-| 256  | 1.18×  | 1.19×   |
-| 512  | 1.05×  | **1.46×** |
-| 1024 | 1.83×  | **2.77×** |
-
-`auto` picks the winner at each size (1.13 / 1.18 / 1.46 / 2.77×). The tiled win
-grows with `m` as the solve dominates more and the column baseline's `m` barriers
-scale badly (m=1024: 43.9 s → 15.8 s). σ grids match `column` to F32 round-off
-(~3e-7) — the standalone solves are bitwise-identical; the tiny end-to-end delta
-is benign FMA-contraction difference accumulated over the iterations.
+The tiled win grows with `m` as the solve dominates more and the column baseline's
+`m` barriers scale badly (m=1024: 43.9 s → 15.8 s). σ grids match `column` to F32
+round-off (~3e-7); the tiny end-to-end delta is benign FMA-contraction difference
+in the tiled trailing-update GEMM, accumulated over the iterations.
 
 ## Implementation map
 
 - `src/KATRSM.jl/trsm_pencil_kernels.jl` — column-oriented baseline kernels.
-- `src/KATRSM.jl/trsm_warp_kernels.jl` — `@generated` register-warp kernels.
-- `src/KATRSM.jl/trsm_tiled_kernels.jl` — KA/KI tiled panel + trailing kernels.
-- `src/ihlpsa.jl` — `trsmIHL` strategy dispatch; `_warp_trsm_ka!`, `_tiled_trsm!`,
-  `_column_trsm!` drivers; `default_wgs`.
-- `src/KAPseudospectra.jl` — `trsm_strategy()`, `trsm_crossover()`,
-  `set_trsm_strategy!()`.
-- `ext/CUDAPseudospectra.jl` — opt-in CUDA-native warp override; GPU precompile
+- `src/KATRSM.jl/trsm_tiled_kernels.jl` — KA/KI tiled panel + trailing kernels;
+  also home to `_trsm_shfl` (the panel-solve warp shuffle).
+- `src/ihlpsa_trsm.jl` — `trsmIHL` strategy dispatch; `_tiled_trsm!`,
+  `_column_trsm!` drivers; `default_wgs`, `tiled_tiles_fit`, `tiled_tc`; `lockstep_ihl!`.
+- `src/tune.jl` — `tune_trsm_tc!`, the per-device trailing-tile-width probe.
+- `src/backend.jl` — per-backend device interface (CPU defaults; GPU extensions override):
+  `warp_width`, `device_smem_bytes`, `device_smem_per_sm`, `warp_trsm_safe`, the device/array/memory ops, `supports_fp64`.
+- `src/KAPseudospectra.jl` — `trsm_strategy()`, `set_trsm_strategy!()`.
+- `ext/CUDAPseudospectra.jl` — CUDA device-interface overrides + GPU precompile
   workload (runs via `column` so the headless precompile worker never executes the
   shuffle kernels — they JIT at runtime, and CUDA PTX would not survive the
   precompile→runtime boundary anyway).
-- `test/test_katrsm.jl` — per-kernel correctness (warp vs LAPACK and bitwise vs
-  column) and `test_trsm_strategies` (end-to-end `warp`/`tiled`/`auto` vs `column`).
+- `test/test_katrsm.jl` — per-kernel correctness (tiled vs LAPACK and vs `column`)
+  and `test_trsm_strategies` (end-to-end `tiled` vs `column`).
 
 ## Dependency note
 
@@ -176,8 +232,19 @@ support matrix.
 
 ## Open items
 
-- Tune `tiled`: `gt` sweep, fuse the per-panel diagonal+trailing launches,
-  double-buffer the `A,B` tiles, lower the `auto` crossover if a `gt`-tuned tiled
-  wins at m=256.
-- Validate / extend the per-warp solves for higher-precision element types, or
+- Tune `tiled` further: `gt` sweep, fuse the per-panel diagonal+trailing launches,
+  double-buffer the `A,B` tiles. (The trailing-tile width `TC` is already chosen
+  analytically per device+type — see "Trailing-tile width and occupancy".)
+- Subgroup-width-adaptive panel solve for Intel without the SIMD32 pin. The panel
+  solve's `@shfl` assumes a 32-lane shuffle domain, so on oneAPI we currently force
+  IGC to SIMD32 (`set_intel_force_simd32!`) rather than adapt. A more general path
+  would query the kernel's actual dispatched subgroup size `W` (Level-Zero kernel
+  properties / SYCL `get_sub_group_size`; Metal's `threadExecutionWidth`) and
+  specialise the panel solve on `Val{W}` (a W-lane register shuffle), with the
+  trailing-tile height a multiple of `W`. The query is easy; the `Val{W}` shuffle
+  solve is the work, and the only payoff is running on Intel *without* the pin (and
+  losing the `reqd_sub_group_size` guarantee) — so the pin stays the default. (Note
+  the trailing kernel does NOT need this: it has no shuffle, and 32 is already a
+  multiple of any SIMD width; its height is also occupancy-neutral.)
+- Validate / extend the tiled solve for higher-precision element types, or
   keep them on `column`.

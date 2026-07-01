@@ -7,9 +7,10 @@ struct MatrixPencil{T} <: AbstractMatrixPencil{T}
     B::AbstractMatrix{T}
 end
 
-# User-facing constructor: always returns a SchurMatrixPencil so the GPU trsm
-# path (which dispatches on SchurMatrixPencil) just works. Direct access to the
-# raw, non-factored MatrixPencil struct is still possible via MatrixPencil{T}(A, B).
+# User-facing constructor: always returns a `SchurMatrixPencil` (a `StandardSchurMatrixPencil`
+# for B = I, a `GeneralizedSchurMatrixPencil` for B ≠ I) so the GPU trsm path (which dispatches
+# on `SchurMatrixPencil`) just works. Direct access to the raw, non-factored MatrixPencil struct
+# is still possible via MatrixPencil{T}(A, B).
 function MatrixPencil(A::AbstractMatrix{T}, B::Union{AbstractMatrix{T},UniformScaling}=I) where {T<:Complex}
     if B isa UniformScaling
         return MatrixPencil(schur(A))
@@ -18,46 +19,61 @@ function MatrixPencil(A::AbstractMatrix{T}, B::Union{AbstractMatrix{T},UniformSc
     return MatrixPencil(schur(A, B))
 end
 
-struct SchurMatrixPencil{T} <: AbstractMatrixPencil{T}
+# Schur-factored pencils used by the GPU trsm path. ONE parametric struct with a compile-time `STD`
+# Bool tag (true ⇒ B = I standard; false ⇒ B ≠ I generalized). `b_is_identity`, the eye-vs-generic
+# kernel selection, the tiled B-tile skip and the adapt B/Bc handling all dispatch on `STD` (a
+# compile-time branch, not a runtime flag). `const` aliases keep the old `Standard…`/`Generalized…`
+# names. (`::SchurMatrixPencil` bare still matches any instance for dispatch.)
+#
+# Z is the right Schur transform: A_orig = Z * A * Z' (standard) or A_orig = Q * A * Z',
+# B_orig = Q * B * Z' (generalized). Used by ihlpsa to bring a user-supplied x₀ from the original-A
+# basis into the Schur basis so ihlpsa's Lanczos iterates match textbook Lanczos with the same x₀.
+# Ac/Bc are lazy conjugate-transpose views on the host (shared storage); see `adapt_structure` below.
+struct SchurMatrixPencil{T, STD} <: AbstractMatrixPencil{T}
     A::AbstractMatrix{T}
     Ac::AbstractMatrix{T}
     B::AbstractMatrix{T}
     Bc::AbstractMatrix{T}
-    # Right Schur transform: A_orig = Z * A * Z' (standard) or A_orig = Q * A * Z',
-    # B_orig = Q * B * Z' (generalized). Used by ihlpsa to bring a user-supplied
-    # x₀ from the original-A basis into the Schur basis so that ihlpsa's Lanczos
-    # iterates match textbook Lanczos applied to the original problem with the
-    # same x₀. Lazy adjoint by default to avoid duplicating m×m bytes.
     Z::AbstractMatrix{T}
-    # True when B is the identity (standard, non-generalized pencil). Lets the tiled GPU
-    # solve skip the B tile in its trailing update — off-diagonal B[i,j]=0, so the z·B term
-    # vanishes — halving its shared memory (better occupancy, and a wide element type's single
-    # tile now fits the 48 KB limit). Conservatively false for direct/backward-compat builds.
-    b_is_identity::Bool
 end
-# 5-arg (no flag): conservative b_is_identity=false.
-SchurMatrixPencil{T}(A, Ac, B, Bc, Z) where {T<:Complex} =
-    SchurMatrixPencil{T}(A, Ac, B, Bc, Z, false)
-# Backward-compat constructor for direct use (no Schur transform known).
-# Stores a typed Diagonal of ones (O(m) memory) so x₀-transform via Z'*x is a no-op
-# and Adapt-to-GPU is essentially free.
-SchurMatrixPencil{T}(A, Ac, B, Bc) where {T<:Complex} =
-    SchurMatrixPencil{T}(A, Ac, B, Bc, Diagonal(ones(T, size(A, 1))))
+const StandardSchurMatrixPencil{T}    = SchurMatrixPencil{T, true}     # B = I (standard)
+const GeneralizedSchurMatrixPencil{T} = SchurMatrixPencil{T, false}    # B ≠ I (generalized)
 
-function MatrixPencil(F::Schur{T}) where {T<:Complex}
-    Iₘ = Matrix{T}(I, size(F.T))
-    SchurMatrixPencil{T}(F.T, F.T', Iₘ, Iₘ, F.Z, true)   # B = I (standard pencil)
-end
-function MatrixPencil(F::GeneralizedSchur{T}) where {T<:Complex}
-    SchurMatrixPencil{T}(F.S, F.S', F.T, F.T', F.Z, false)
-end
+# Whether B = I — read straight off the compile-time `STD` tag.
+b_is_identity(::SchurMatrixPencil{T, STD}) where {T, STD} = STD
+
+MatrixPencil(F::Schur{T}) where {T<:Complex} =
+    (Iₘ = Diagonal(ones(T, size(F.T, 1)));                  # B = Bc = I as a Diagonal (m elts, not m×m)
+     SchurMatrixPencil{T, true}(F.T, F.T', Iₘ, Iₘ, F.Z))
+MatrixPencil(F::GeneralizedSchur{T}) where {T<:Complex} =
+    SchurMatrixPencil{T, false}(F.S, F.S', F.T, F.T', F.Z)
 
 Base.size(x::AbstractMatrixPencil) = size(x.A)
 Base.size(x::AbstractMatrixPencil, i) = size(x.A, i)
 KernelAbstractions.get_backend(x::AbstractMatrixPencil) = get_backend(x.A)
 
 Adapt.@adapt_structure MatrixPencil
-Adapt.@adapt_structure SchurMatrixPencil
+
+# Adapting a Schur pencil to a device does two memory/perf things, branched on the compile-time `STD`:
+#  * Ac (and Bc for a generalized pencil) are lazy conjugate-transpose views (`F.T'`); the GPU forward
+#    solve reads them TRANSPOSED (column-strided) → uncoalesced, ~1.4–1.8× slower. We MATERIALIZE them
+#    as dense contiguous arrays (`Matrix(P.Ac)`) so the forward read is coalesced — values unchanged,
+#    ~free in device memory (`adapt` already copies each field; this just lays the bytes out for
+#    coalescing). The host struct keeps the lazy views (the CPU solve reads `P.A'`, never Ac/Bc).
+#  * For a STANDARD pencil B = Bc = I, and after the B=I "eye" kernels NO GPU kernel reads B/Bc, so
+#    `adapt` ships a tiny `Diagonal` identity (m elements, shared between B and Bc) instead of a dense
+#    m×m — cutting the standard pencil from 5·m² to ~3·m² per device. A generalized pencil's B/Bc are
+#    real data → stay dense (Bc materialized like Ac). The host build already uses a Diagonal identity
+#    (ctor above); `ℂsvdpsa!` takes `AbstractMatrix`, so the SVD oracle / CPU solve handle the Diagonal.
+function Adapt.adapt_structure(to, P::SchurMatrixPencil{T, STD}) where {T, STD}
+    A = adapt(to, P.A); Ac = adapt(to, Matrix(P.Ac)); Z = adapt(to, P.Z)
+    if STD
+        Id = Diagonal(adapt(to, ones(T, size(P.A, 1))))    # device B = Bc = I (m elements; unread after eye)
+        SchurMatrixPencil{T, true}(A, Ac, Id, Id, Z)
+    else
+        SchurMatrixPencil{T, false}(A, Ac, adapt(to, P.B), adapt(to, Matrix(P.Bc)), Z)
+    end
+end
 
 """
     validate(zg, A, B, γ=missing, δ=missing)

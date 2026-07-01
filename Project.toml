@@ -1,7 +1,7 @@
 name = "KAPseudospectra"
 uuid = "8b8afa22-3073-43c5-8823-151938199226"
-version = "0.1.0"
 authors = ["Dan Folescu"]
+version = "0.1.0"
 
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
@@ -27,10 +27,14 @@ oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
 [extensions]
 AMDGPUPseudospectra = "AMDGPU"
 CUDAPseudospectra = "CUDA"
-KAPseudospectraMultiFloatsExt = "MultiFloats"
+MultiFloatsPseudospectra = "MultiFloats"
 MetalPseudospectra = "Metal"
 oneAPIPseudospectra = "oneAPI"
 
 [compat]
+# KernelIntrinsics 0.1.x is the portable @shfl source; the 0.1.7 floor is the minimum with a
+# working @shfl/Idx on the supported backends. Kept on 0.1.x deliberately: it pins CUDA to
+# 5.9–5.11, and AMDGPU's current releases need KI 1.x — so a single env that loads *all* GPU
+# backends at once is unsatisfiable (resolve per-backend; see DESIGN_TRSM.md "Dependency note").
 KernelIntrinsics = "0.1.7"
-Preferences = "1.5.2"
+Preferences = "1"

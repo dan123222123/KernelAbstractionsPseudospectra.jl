@@ -1,11 +1,11 @@
-module KAPseudospectraMultiFloatsExt
+module MultiFloatsPseudospectra
 
-# Per-limb warp-shuffle broadcast for MultiFloats. The register-warp and tiled panel solves
-# broadcast pivots with `KATRSM._trsm_shfl`. The core fallback shuffles the whole value with a
-# single `@shfl`, which is exact for IEEE hardware floats but MISCOMPILES for a multi-limb
-# `MultiFloat` shuffled as one wide composite inside the register solve loop (it returns
-# garbage). Shuffling each underlying hardware-float limb separately and reconstructing the
-# value is exact, so this extension overrides `_trsm_shfl` for MultiFloat element types.
+# Per-limb warp-shuffle broadcast for MultiFloats. The tiled panel solve broadcasts pivots with
+# `KATRSM._trsm_shfl`. The core fallback shuffles the whole value with a single `@shfl`, which is
+# exact for IEEE hardware floats but MISCOMPILES for a multi-limb `MultiFloat` shuffled as one wide
+# composite inside the solve loop (it returns garbage). Shuffling each underlying hardware-float limb
+# separately and reconstructing the value is exact, so this extension overrides `_trsm_shfl` for
+# MultiFloat element types.
 
 using MultiFloats: MultiFloat
 using KernelIntrinsics: @shfl, Idx

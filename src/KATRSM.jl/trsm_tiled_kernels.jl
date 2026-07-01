@@ -1,202 +1,284 @@
 # Tiled / blocked batched pencil triangular solves (KernelAbstractions + KernelIntrinsics).
+# See also DESIGN_TRSM.md §"Tiled" for the bandwidth motivation and the end-to-end speedups.
 #
-# For large m the per-grid-point warp solves become bandwidth-bound: every warp re-streams
+# For large m a per-grid-point column solve becomes bandwidth-bound: every grid point re-streams
 # the whole m×m A,B pencil from DRAM with zero reuse across grid points (A,B are shared; only
 # z varies). The tiled solve fixes this with a right-looking blocked algorithm, panel width
 # = warp size (32):
 #   for each panel k:
-#     (1) PANEL SOLVE — solve the ≤32×32 diagonal block for every grid point (one warp per
-#         grid point, pivots broadcast by `@shfl`, same numerics as the register-warp kernel);
+#     (1) PANEL SOLVE — solve the ≤32×32 *triangular* diagonal tile for every grid point
+#         (lower-triangular for the forward sweep, upper-triangular for the backward sweep;
+#         one warp per grid point, pivots broadcast by `@shfl`, same per-element numerics as the
+#         column kernel);
 #     (2) TRAILING UPDATE — a tiled GEMM that subtracts panel k's contribution from the
 #         trailing rows. Each workgroup loads the A,B[row-tile, panel-k] tile into `@localmem`
 #         ONCE and reuses it across `gt` grid points, turning the streaming into compute-bound
 #         work. The pencil M = zB − A is kept as separate A,B tiles + a per-grid-point z combine
 #         so the shared tiles are z-independent and reused across the batch.
 #
+# Block layout (forward / lower-triangular sweep; the backward sweep is the mirror image):
+#
+#     columns:   1 … koff        koff+1 … koff+plen      koff+plen+1 … m
+#              ┌──────────────┬──────────────────────┬──────────────────────┐
+#   rows<panel │     done     │     (zero — upper     │      (zero)           │
+#              │              │       triangle)       │                      │
+#              ├──────────────┼──────────────────────┼──────────────────────┤
+#   panel k    │              │  ◣ triangular tile    │      (zero)           │
+#              │              │  (_tiled_panel_*)     │                      │
+#              ├──────────────┼──────────────────────┼──────────────────────┤
+#   trailing i │              │  A,B[i, panel] ⇒ sA,sB│      (not yet         │
+#              │              │  (_tiled_trailing_*)  │       solved)         │
+#              └──────────────┴──────────────────────┴──────────────────────┘
+#
+# Note on the "dead" zero triangle of A/B: the blocking keeps every trailing-tile index in
+# the FILLED part of the triangle by construction — for the forward sweep the trailing rows
+# are i > koff+plen against panel columns j ≤ koff+plen, so i > j (filled subdiagonal); the
+# backward sweep loads rows i ≤ koff against columns j > koff, so i < j (filled superdiagonal).
+# The structurally-zero entries therefore exist as device storage but are NEVER loaded into
+# sA/sB or multiplied — dead storage, not dead computation.
+#
 # Trailing-update workgroups use a flat 1-D group index decoded into (row-tile, grid-pt-tile)
-# to avoid relying on KA 2-D group indexing. Numerics match the column-oriented / register-warp
-# kernels (same `_pdiv`, `zBAij`, update order).
+# to avoid relying on KA 2-D group indexing. Per-element numerics match the column-oriented
+# kernels (same `_pdiv`, `zBAij`); the blocked update order differs, so results agree to round-off.
 
 using KernelIntrinsics: @shfl, Idx
 
+# Warp-shuffle broadcast used by the tiled panel solves to broadcast each solved pivot lane→lane (it
+# also synchronizes the warp). For IEEE hardware floats (ComplexF32/F64) this is a single `@shfl`.
+# Multi-limb float types (MultiFloats) are miscompiled when shuffled as one wide composite and
+# silently return garbage; the MultiFloatsPseudospectra extension overrides this with a per-limb
+# shuffle (each underlying hardware float shuffled separately, then reconstructed) — verified exact,
+# whereas the whole-value shuffle is not.
+@inline _trsm_shfl(v, src) = @shfl(Idx, v, src)
+
 # ---- diagonal panel solves (one warp per grid point) ----
 
-@kernel function _tiled_panel_forward(bv, zv, @Const(A), @Const(B), koff, plen)   # lower-tri block
-    lane = @index(Local)
-    gi = @index(Group)
-    @uniform ET = eltype(A)
-    b = bv[gi]
-    z = zv[gi]
+# Generic (B≠I) and B=I "eye" diagonal-panel solves share ONE body per direction. `veye::Val` selects
+# the pencil element via `_piv_elem`/`_offd_elem`; the eye wrappers pass `B = nothing` (single matrix,
+# no B read). One warp per grid point: `j0 = koff+lane` is the row this lane owns within the panel,
+# `bl` holds its RHS entry in a register, and the owner lane (lane==jj) broadcasts its solved pivot by
+# `@shfl` (every other lane emits zero into the shuffle). Generic routes through `zBAij` (AST-identical
+# to the former inline). `valid` masks lanes past a partial last panel (plen<32). With the eye TRAILING
+# kernels, the tiled solve is fully B-free for a standard pencil. Wrappers dispatched from `_tiled_trsm!`.
+@inline function _panel_fwd_body!(b, z, A, B, koff, plen, lane, veye)   # lower-tri (ascending)
+    ET = eltype(A)
     j0 = koff + lane
     valid = lane <= plen
     bl = valid ? b[j0] : zero(ET)
     for jj = 1:plen
         j = koff + jj
-        piv = (lane == jj) ? _pdiv(bl, @inline zBAij(j, j, z, A, B)) : zero(ET)
+        piv = (lane == jj) ? _pdiv(bl, @inline _piv_elem(veye, j, z, A, B)) : zero(ET)
         xj = _trsm_shfl(piv, jj)
         if lane == jj
             bl = xj
-        elseif (lane > jj) & valid
-            bl -= xj * @inline zBAij(j0, j, z, A, B)
+        elseif (lane > jj) & valid                       # rows BELOW the pivot
+            bl -= xj * @inline _offd_elem(veye, j0, j, z, A, B)
         end
     end
     valid && (b[j0] = bl)
 end
-
-@kernel function _tiled_panel_backward(bv, zv, @Const(A), @Const(B), koff, plen)  # upper-tri block
-    lane = @index(Local)
-    gi = @index(Group)
-    @uniform ET = eltype(A)
-    b = bv[gi]
-    z = zv[gi]
+@inline function _panel_bwd_body!(b, z, A, B, koff, plen, lane, veye)   # upper-tri (descending)
+    ET = eltype(A)
     j0 = koff + lane
     valid = lane <= plen
     bl = valid ? b[j0] : zero(ET)
     for jj = plen:-1:1
         j = koff + jj
-        piv = (lane == jj) ? _pdiv(bl, @inline zBAij(j, j, z, A, B)) : zero(ET)
+        piv = (lane == jj) ? _pdiv(bl, @inline _piv_elem(veye, j, z, A, B)) : zero(ET)
         xj = _trsm_shfl(piv, jj)
         if lane == jj
             bl = xj
-        elseif (lane < jj) & valid
-            bl -= xj * @inline zBAij(j0, j, z, A, B)
+        elseif (lane < jj) & valid                       # rows ABOVE the pivot
+            bl -= xj * @inline _offd_elem(veye, j0, j, z, A, B)
         end
     end
     valid && (b[j0] = bl)
 end
+@kernel function _tiled_panel_forward(bv, zv, @Const(A), @Const(B), koff, plen)
+    lane = @index(Local); gi = @index(Group)
+    @inline _panel_fwd_body!(bv[gi], zv[gi], A, B, koff, plen, lane, Val(false))
+end
+@kernel function _tiled_panel_backward(bv, zv, @Const(A), @Const(B), koff, plen)
+    lane = @index(Local); gi = @index(Group)
+    @inline _panel_bwd_body!(bv[gi], zv[gi], A, B, koff, plen, lane, Val(false))
+end
+@kernel function _tiled_panel_forward_eye(bv, zv, @Const(A), koff, plen)   # B = I: single matrix
+    lane = @index(Local); gi = @index(Group)
+    @inline _panel_fwd_body!(bv[gi], zv[gi], A, nothing, koff, plen, lane, Val(true))
+end
+@kernel function _tiled_panel_backward_eye(bv, zv, @Const(A), koff, plen)  # B = I: single matrix
+    lane = @index(Local); gi = @index(Group)
+    @inline _panel_bwd_body!(bv[gi], zv[gi], A, nothing, koff, plen, lane, Val(true))
+end
 
 # ---- tiled trailing updates (shared A,B tile reused across `gt` grid points) ----
+#
+# OCCUPANCY: the `@localmem` tile is 32 ROWS × TC COLUMNS. The row count is fixed at 32 (a full warp
+# — a half-warp row tile wastes lanes and is slower); the COLUMN count TC is a compile-time `Val`
+# knob DECOUPLED from the 32-wide panel solve. A wide tile (TC=32) is heavily shared-memory-bound on
+# Pascal (a 2-tile ComplexF32 block is 16 KB → only 6 resident blocks/SM ≈ 9% occupancy); narrowing
+# TC shrinks the tile, raising resident blocks/SM (and occupancy) proportionally, which measured
+# ~1.3–1.7× faster on a 1080 Ti. A panel wider than TC is subtracted in ⌈plen/TC⌉ column sub-tiles
+# (loop over `c0`); the A,B DRAM traffic is unchanged (each column still streamed once per grid-tile).
+# TC is chosen per device+type by `tiled_tc` (src/ihlpsa_trsm.jl); TC=32 reproduces the single-tile
+# (pre-optimization) sweep exactly. `@synchronize` brackets each sub-tile so the shared tile can be
+# reloaded — both barriers are reached uniformly (the `c0` loop count depends only on plen/TC).
 
 # Forward: subtract panel k from trailing rows rbase+1 … m.
 @kernel function _tiled_trailing_forward(bv, zv, @Const(A), @Const(B),
-                                         koff, plen, rbase, m, gt, rtiles)
+                                         koff, plen, rbase, m, gt, rtiles, ::Val{TC}) where {TC}
     t = @index(Local)                 # 1..32 → row within tile
     grp = @index(Group)               # 1..rtiles*ggrid
     @uniform ET = eltype(A)
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
-    sA = @localmem ET (32, 32)
-    sB = @localmem ET (32, 32)
+    sA = @localmem ET (32, TC)
+    sB = @localmem ET (32, TC)
     i = rbase + (bi - 1) * 32 + t
-    for jj = 1:plen
-        j = koff + jj
-        sA[t, jj] = i <= m ? A[i, j] : zero(ET)
-        sB[t, jj] = i <= m ? B[i, j] : zero(ET)
-    end
-    @synchronize()
-    if i <= m
-        g = length(zv)
-        gp0 = (bg - 1) * gt
-        for gg = 1:gt
-            gp = gp0 + gg
-            if gp <= g
-                z = zv[gp]
-                b = bv[gp]
-                acc = b[i]
-                for jj = 1:plen
-                    acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + jj]
+    g = length(zv)
+    gp0 = (bg - 1) * gt
+    for c0 = 0:TC:plen-1
+        clen = min(TC, plen - c0)
+        for jj = 1:clen
+            j = koff + c0 + jj
+            sA[t, jj] = i <= m ? A[i, j] : zero(ET)
+            sB[t, jj] = i <= m ? B[i, j] : zero(ET)
+        end
+        @synchronize()
+        if i <= m
+            for gg = 1:gt
+                gp = gp0 + gg
+                if gp <= g
+                    z = zv[gp]
+                    b = bv[gp]
+                    acc = b[i]
+                    for jj = 1:clen
+                        acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + c0 + jj]
+                    end
+                    b[i] = acc
                 end
-                b[i] = acc
             end
         end
+        @synchronize()
     end
 end
 
 # Backward: subtract panel k from rows above it, 1 … koff.
 @kernel function _tiled_trailing_backward(bv, zv, @Const(A), @Const(B),
-                                          koff, plen, gt, rtiles)
+                                          koff, plen, gt, rtiles, ::Val{TC}) where {TC}
     t = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
-    sA = @localmem ET (32, 32)
-    sB = @localmem ET (32, 32)
+    sA = @localmem ET (32, TC)
+    sB = @localmem ET (32, TC)
     i = (bi - 1) * 32 + t
-    for jj = 1:plen
-        j = koff + jj
-        sA[t, jj] = i <= koff ? A[i, j] : zero(ET)
-        sB[t, jj] = i <= koff ? B[i, j] : zero(ET)
-    end
-    @synchronize()
-    if i <= koff
-        g = length(zv)
-        gp0 = (bg - 1) * gt
-        for gg = 1:gt
-            gp = gp0 + gg
-            if gp <= g
-                z = zv[gp]
-                b = bv[gp]
-                acc = b[i]
-                for jj = 1:plen
-                    acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + jj]
+    g = length(zv)
+    gp0 = (bg - 1) * gt
+    for c0 = 0:TC:plen-1
+        clen = min(TC, plen - c0)
+        for jj = 1:clen
+            j = koff + c0 + jj
+            sA[t, jj] = i <= koff ? A[i, j] : zero(ET)
+            sB[t, jj] = i <= koff ? B[i, j] : zero(ET)
+        end
+        @synchronize()
+        if i <= koff
+            for gg = 1:gt
+                gp = gp0 + gg
+                if gp <= g
+                    z = zv[gp]
+                    b = bv[gp]
+                    acc = b[i]
+                    for jj = 1:clen
+                        acc -= (z * sB[t, jj] - sA[t, jj]) * b[koff + c0 + jj]
+                    end
+                    b[i] = acc
                 end
-                b[i] = acc
             end
         end
+        @synchronize()
     end
 end
 
 # ---- B = I trailing updates (one tile, no z) ----
 # For a standard pencil (B = I) the trailing rows i are strictly off the panel columns j, so
 # B[i,j] = 0 and the pencil reduces to M[i,j] = -A[i,j]: `acc -= M[i,j]·b[j]` ⇒ `acc += A[i,j]·b[j]`.
-# Dropping the B tile halves shared memory (better occupancy; a wide element type's single 32-KB
-# tile now fits 48 KB) and removes z from the trailing update.
+# Dropping the B tile halves shared memory (one 32×TC tile instead of two → ~2× the resident blocks
+# of the generic kernel) and removes z from the trailing update.
+#
+# Why these are SEPARATE kernels rather than one kernel with a runtime `if eye` branch (or a
+# `Val`-tagged body): `@localmem` is a *static* allocation in a GPU kernel, so a unified body
+# that conditionally touches `sB` would still reserve both tiles regardless of the flag —
+# defeating the entire point of the eye path (the halved shared-memory footprint). The B=I-vs-
+# pencil choice is therefore made by dispatch at the host call site (see the `eye` branch in
+# `_tiled_trsm!`, src/ihlpsa_trsm.jl), which picks the right kernel symbol; a `Val{eye}` tag would
+# compile to these same two bodies and save no lines. (The TC column-tile knob is shared via the
+# `Val{TC}` parameter — see the occupancy note above.)
 
-@kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles)
+@kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles, ::Val{TC}) where {TC}
     t = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
-    sA = @localmem ET (32, 32)
+    sA = @localmem ET (32, TC)
     i = rbase + (bi - 1) * 32 + t
-    for jj = 1:plen
-        sA[t, jj] = i <= m ? A[i, koff + jj] : zero(ET)
-    end
-    @synchronize()
-    if i <= m
-        g = length(bv)
-        gp0 = (bg - 1) * gt
-        for gg = 1:gt
-            gp = gp0 + gg
-            if gp <= g
-                b = bv[gp]
-                acc = b[i]
-                for jj = 1:plen
-                    acc += sA[t, jj] * b[koff + jj]
+    g = length(bv)
+    gp0 = (bg - 1) * gt
+    for c0 = 0:TC:plen-1
+        clen = min(TC, plen - c0)
+        for jj = 1:clen
+            sA[t, jj] = i <= m ? A[i, koff + c0 + jj] : zero(ET)
+        end
+        @synchronize()
+        if i <= m
+            for gg = 1:gt
+                gp = gp0 + gg
+                if gp <= g
+                    b = bv[gp]
+                    acc = b[i]
+                    for jj = 1:clen
+                        acc += sA[t, jj] * b[koff + c0 + jj]
+                    end
+                    b[i] = acc
                 end
-                b[i] = acc
             end
         end
+        @synchronize()
     end
 end
 
-@kernel function _tiled_trailing_backward_eye(bv, @Const(A), koff, plen, gt, rtiles)
+@kernel function _tiled_trailing_backward_eye(bv, @Const(A), koff, plen, gt, rtiles, ::Val{TC}) where {TC}
     t = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
     bi = (grp - 1) % rtiles + 1
     bg = (grp - 1) ÷ rtiles + 1
-    sA = @localmem ET (32, 32)
+    sA = @localmem ET (32, TC)
     i = (bi - 1) * 32 + t
-    for jj = 1:plen
-        sA[t, jj] = i <= koff ? A[i, koff + jj] : zero(ET)
-    end
-    @synchronize()
-    if i <= koff
-        g = length(bv)
-        gp0 = (bg - 1) * gt
-        for gg = 1:gt
-            gp = gp0 + gg
-            if gp <= g
-                b = bv[gp]
-                acc = b[i]
-                for jj = 1:plen
-                    acc += sA[t, jj] * b[koff + jj]
+    g = length(bv)
+    gp0 = (bg - 1) * gt
+    for c0 = 0:TC:plen-1
+        clen = min(TC, plen - c0)
+        for jj = 1:clen
+            sA[t, jj] = i <= koff ? A[i, koff + c0 + jj] : zero(ET)
+        end
+        @synchronize()
+        if i <= koff
+            for gg = 1:gt
+                gp = gp0 + gg
+                if gp <= g
+                    b = bv[gp]
+                    acc = b[i]
+                    for jj = 1:clen
+                        acc += sA[t, jj] * b[koff + c0 + jj]
+                    end
+                    b[i] = acc
                 end
-                b[i] = acc
             end
         end
+        @synchronize()
     end
 end

@@ -94,16 +94,3 @@ function blkco_forward_solve_pencil!(b, z, A, B; nblkcols=16, blkfsk=_blkco_forw
         end
     end
 end
-
-function batched_blkco_backward_solve_pencil!(bv, zv, A, B; nblkcols=16, blkbsk=_blkco_backward_solve_pencil)
-    @assert length(zv) == length(bv)
-    for i in eachindex(bv)
-        @views blkco_backward_solve_pencil!(bv[i], zv[i], A, B; nblkcols, blkbsk)
-    end
-end
-function batched_blkco_forward_solve_pencil!(bv, zv, A, B; nblkcols=16, blkfsk=_blkco_forward_solve_pencil)
-    @assert length(zv) == length(bv)
-    for i in eachindex(bv)
-        @views blkco_forward_solve_pencil!(bv[i], zv[i], A, B; nblkcols, blkfsk)
-    end
-end
