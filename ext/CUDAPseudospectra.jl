@@ -35,10 +35,16 @@ if CUDA.functional()
             # are cached, which the column path exercises identically), and executing the
             # tiled shuffle kernels inside the headless precompile worker is where GPU
             # execution is least reliable.
+            dev = collect(CUDA.devices())[1]
             withenv("KAPSEUDO_TRSM" => "column") do
-                KAPseudospectra._precompile_ihlpsa(CUDABackend(), collect(CUDA.devices())[1],
-                    [ComplexF32, ComplexF64])
+                KAPseudospectra._precompile_ihlpsa(CUDABackend(), dev, [ComplexF32, ComplexF64])
             end
+            # Opt-in (`enable_gpu_kernel_cache!()`): also compile the warp/tiled kernels so their
+            # code persists across sessions via GPUCompiler's disk cache. Needs Julia ≥ 1.13
+            # (JuliaLang/julia#60747) for cross-session reuse; the launches are individually
+            # guarded so this never breaks precompilation on stacks where it isn't yet supported.
+            KAPseudospectra.PRECOMPILE_GPU_KERNELS &&
+                KAPseudospectra._precompile_gpu_kernels(CUDABackend(), dev, [ComplexF32, ComplexF64])
         end
     end
 end
