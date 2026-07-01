@@ -33,12 +33,10 @@ KAPseudospectra.device_smem_bytes(B::Metal.MetalBackend) = Int(Metal.device().ma
 # threadgroups, so the per-threadgroup length is a conservative LOWER bound on the per-"SM" budget.
 # Feeds only the no-probe analytic `tiled_tc` default — `tune_trsm_tc!` is the accurate path here.
 KAPseudospectra.device_smem_per_sm(B::Metal.MetalBackend) = Int(Metal.device().maxThreadgroupMemoryLength)
-# Make the tiled fast path opt-in on Metal (like oneAPI): without the opt-in `warp_trsm_safe` is
-# false, so `tiled` self-gates to the always-correct column solve. Metal's IEEE-F32 shuffles ARE
-# correct, so for the F32 case this is a
-# policy gate (modest speedup vs column) rather than a correctness one — flip it with
-# set_metal_warp_trsm!. The `!wide` is effectively moot: Apple GPUs have no FP64, so the Float64-
-# based MultiFloats can't run on Metal through ANY path; it's kept for symmetry with oneAPI.
+# Tiled fast path is opt-in on Metal (like oneAPI), but as a POLICY gate not a correctness one:
+# Metal's IEEE-F32 shuffles are correct, so this just keeps `tiled` off by default until
+# `set_metal_warp_trsm!` opts in. `!wide` is effectively moot (no FP64 on Apple GPUs, so
+# Float64-based MultiFloats can't reach Metal through any path); kept for symmetry with oneAPI.
 KAPseudospectra.warp_trsm_safe(::Metal.MetalBackend, wide::Bool) =
     !wide && KAPseudospectra.metal_warp_trsm()
 # `tiled-gemm`'s `mul!` trailing has no reliable complex-GEMM path via MPS here — keep Metal on the

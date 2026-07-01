@@ -139,12 +139,11 @@ helps where the solve is bandwidth/latency-bound — i.e. **large-m ComplexF32/F
 `tiled_gemm_safe(backend, T)`: true for ComplexF32/F64 on CUDA/AMDGPU (fast complex
 GEMM), false for MultiFloats (no vendor GEMM — `mul!` would drop to a slow generic
 matmul) and on oneAPI/Metal (patchy complex GEMM). When false, `tiled-gemm`
-self-gates to the regular `tiled` trailing kernel. **First cut: B=I only** — B≠I
-keeps the `tiled` trailing kernel (the B≠I GEMM is `A·x − z.*(B·x)`, two GEMMs +
-a per-shift scale, deferred). MultiFloats are *compute-bound by construction* (the
-limb arithmetic), so a memory-side strategy buys them nothing anyway (measured: tiled×
-shrinks 1.37→1.00 from F32 to Float64x4), which is why routing them to `tiled`
-loses nothing.
+self-gates to the regular `tiled` trailing kernel. Covers both `B=I` (single
+`mul!`) and `B≠I` (two `mul!`s: `A·x − z⊙(B·x)`, scaling the panel by `z` before
+the `B` GEMM so it needs no full `m×g` temp). MultiFloats are *compute-bound by
+construction* (the limb arithmetic), so a memory-side strategy buys them nothing
+anyway, which is why routing them to `tiled` loses nothing.
 
 ## Choosing a solve: the `trsm_strategy` local preference
 
@@ -157,6 +156,7 @@ Values:
 |----------|-----------|
 | `column` (**default**) | the column-oriented solve — **shuffle-free**, correct for every element type and backend |
 | `tiled`  | the tiled solve where it is usable (tiles fit **and** the shuffle is safe), else an automatic fall back to `column` |
+| `tiled-gemm` | `tiled`'s panel solve + a vendor-BLAS `mul!` trailing update, where `tiled_gemm_safe` (ComplexF32/F64 on CUDA/AMDGPU); else an automatic fall back to the regular `tiled` trailing kernel |
 
 **`column` is the shipped default; `tiled` is the opt-in performance mode.**
 There is **no size crossover** — `tiled` routes on capability, not `m`, checking
@@ -271,6 +271,11 @@ support matrix.
   solve is the work, and the only payoff is running on Intel *without* the pin (and
   losing the `reqd_sub_group_size` guarantee) — so the pin stays the default. (Note
   the trailing kernel does NOT need this: it has no shuffle, and 32 is already a
-  multiple of any SIMD width; its height is also occupancy-neutral.)
+  multiple of any SIMD width; its height is also occupancy-neutral.) We pin SIMD32
+  via the `IGC_ForceOCLSIMDWidth` env var rather than oneAPI's `reqd_subgroup_size!`
+  (the per-kernel `intel_reqd_sub_group_size` mode): applied globally the latter
+  crashes the SPIR-V translator on the MultiFloat kernels, whereas the env var (a
+  driver-level flag with no per-kernel metadata) pins both the IEEE tiled kernels
+  and the MultiFloat column kernels fine.
 - Validate / extend the tiled solve for higher-precision element types, or
   keep them on `column`.

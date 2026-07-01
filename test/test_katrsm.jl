@@ -8,14 +8,14 @@
 # Layout
 # ------
 #  * "KATRSM core (CPU host functions)" testset — always runs on include.
-#    Exercises the pure-Julia host loops in trsm_core.jl / trsm_pencil_core.jl
-#    (forward_solve!, backward_solve!, forward_solve_pencil!, …) — these don't
-#    dispatch through KernelAbstractions and are CPU-only by definition.
+#    Exercises the pure-Julia host loops in trsm_pencil_core.jl
+#    (forward_solve_pencil!, backward_solve_pencil!) — these don't dispatch
+#    through KernelAbstractions and are CPU-only by definition.
 #  * test_katrsm_kernels(backend) — a function over a KernelAbstractions
 #    backend. Exercises every KA kernel and wrapper KATRSM exposes (naive
-#    batched, column-oriented batched, blkco single-block, blkco multi-block
-#    partition wrappers) using device-resident inputs. runtests.jl calls this
-#    for CPU() unconditionally and for each available GPU backend.
+#    batched, column-oriented batched) using device-resident inputs.
+#    runtests.jl calls this for CPU() unconditionally and for each available
+#    GPU backend.
 #
 # All tolerances are 32 * eps(T): the test matrices are diagonally dominant
 # with cond(M) = O(1) and pencil shifts are biased so cond(z*B - A) = O(1)
@@ -63,27 +63,6 @@ _from(x) = adapt(Array, x)
 @testset "KATRSM core (CPU host functions)" begin
     Random.seed!(0xACE5)
 
-    @testset "non-pencil core" begin
-        for T in (ComplexF32, ComplexF64), m in (1, 8, 16)
-            rtol = _tol(T)
-            U = _rand_uppertri(T, m)
-            L = _rand_lowertri(T, m)
-            b = randn(T, m)
-
-            xref = UpperTriangular(U) \ b
-            x = copy(b); KATRSM.backward_solve!(x, U)
-            @test isapprox(x, xref; rtol=rtol)
-            x = copy(b); KATRSM.column_oriented_backward_solve!(x, U)
-            @test isapprox(x, xref; rtol=rtol)
-
-            yref = LowerTriangular(L) \ b
-            y = copy(b); KATRSM.forward_solve!(y, L)
-            @test isapprox(y, yref; rtol=rtol)
-            y = copy(b); KATRSM.column_oriented_forward_solve!(y, L)
-            @test isapprox(y, yref; rtol=rtol)
-        end
-    end
-
     @testset "pencil core" begin
         for T in (ComplexF32, ComplexF64), m in (1, 8, 16)
             rtol = _tol(T)
@@ -96,43 +75,10 @@ _from(x) = adapt(Array, x)
             xref = UpperTriangular(z * Bu .- Au) \ b
             x = copy(b); KATRSM.backward_solve_pencil!(x, z, Au, Bu)
             @test isapprox(x, xref; rtol=rtol)
-            x = copy(b); KATRSM.column_oriented_backward_solve_pencil!(x, z, Au, Bu)
-            @test isapprox(x, xref; rtol=rtol)
 
             yref = LowerTriangular(z * Bl .- Al) \ b
             y = copy(b); KATRSM.forward_solve_pencil!(y, z, Al, Bl)
             @test isapprox(y, yref; rtol=rtol)
-            y = copy(b); KATRSM.column_oriented_forward_solve_pencil!(y, z, Al, Bl)
-            @test isapprox(y, yref; rtol=rtol)
-        end
-    end
-
-    # Naive batched KA kernels for non-pencil triangular solves. These take a
-    # Vector{Matrix} / Vector{Vector}, which is host-resident pointer storage
-    # and does not adapt to a GPU; they're CPU-only by construction (and not
-    # exercised by ihlpsa's production paths, which use the pencil variants).
-    @testset "batched non-pencil naive (KA, CPU)" begin
-        backend = CPU()
-        for T in (ComplexF32, ComplexF64), m in (8, 16)
-            rtol = _tol(T)
-            g = 5
-            UV = [_rand_uppertri(T, m) for _ = 1:g]
-            LV = [_rand_lowertri(T, m) for _ = 1:g]
-            bV0 = [randn(T, m) for _ = 1:g]
-
-            xV = deepcopy(bV0)
-            KATRSM._batched_backward_solve(backend, 1)(xV, UV, ndrange=g)
-            KernelAbstractions.synchronize(backend)
-            for i = 1:g
-                @test isapprox(xV[i], UpperTriangular(UV[i]) \ bV0[i]; rtol=rtol)
-            end
-
-            yV = deepcopy(bV0)
-            KATRSM._batched_forward_solve(backend, 1)(yV, LV, ndrange=g)
-            KernelAbstractions.synchronize(backend)
-            for i = 1:g
-                @test isapprox(yV[i], LowerTriangular(LV[i]) \ bV0[i]; rtol=rtol)
-            end
         end
     end
 end
@@ -253,80 +199,6 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
             end
         end
 
-        @testset "blkco non-pencil kernels (KA, single block)" begin
-            for T in types, m in (8, 16)
-                rtol = _tol(T)
-                U = _rand_uppertri(T, m)
-                L = _rand_lowertri(T, m)
-                b0 = randn(T, m)
-                xref = UpperTriangular(U) \ b0
-                yref = LowerTriangular(L) \ b0
-
-                U_d = _to(backend, U); L_d = _to(backend, L)
-
-                for kfn in (KATRSM._blkco_backward_solve_sm3v1,
-                            KATRSM._blkco_backward_solve_sm3v2,
-                            KATRSM._blkco_backward_solve_sm2,
-                            KATRSM._blkco_backward_solve_sm1)
-                    d = _to(backend, copy(b0))
-                    kfn(backend, m)(d, U_d, ndrange=m)
-                    KernelAbstractions.synchronize(backend)
-                    @test isapprox(_from(d), xref; rtol=rtol)
-                end
-
-                d = _to(backend, copy(b0))
-                KATRSM._blkco_forward_solve_sm3(backend, m)(d, L_d, ndrange=m)
-                KernelAbstractions.synchronize(backend)
-                @test isapprox(_from(d), yref; rtol=rtol)
-            end
-        end
-
-        @testset "blkco pencil kernels (KA, single block)" begin
-            for T in types, m in (8, 16)
-                rtol = _tol(T)
-                Au = _rand_uppertri(T, m); Bu = _rand_uppertri(T, m)
-                Al = _rand_lowertri(T, m); Bl = _rand_lowertri(T, m)
-                z = T(2 + 0.7im)
-                b0 = randn(T, m)
-
-                Au_d = _to(backend, Au); Bu_d = _to(backend, Bu)
-                Al_d = _to(backend, Al); Bl_d = _to(backend, Bl)
-
-                d = _to(backend, copy(b0))
-                KATRSM._blkco_backward_solve_pencil(backend, m)(d, z, Au_d, Bu_d, ndrange=m)
-                KernelAbstractions.synchronize(backend)
-                @test isapprox(_from(d), UpperTriangular(z * Bu .- Au) \ b0; rtol=rtol)
-
-                d = _to(backend, copy(b0))
-                KATRSM._blkco_forward_solve_pencil(backend, m)(d, z, Al_d, Bl_d, ndrange=m)
-                KernelAbstractions.synchronize(backend)
-                @test isapprox(_from(d), LowerTriangular(z * Bl .- Al) \ b0; rtol=rtol)
-            end
-        end
-
-        @testset "blkco pencil wrappers (multi-block partition)" begin
-            for T in types, m in (16, 64), nblkcols in (8, 16)
-                nblkcols > m && continue
-                rtol = _tol(T)
-                Au = _rand_uppertri(T, m); Bu = _rand_uppertri(T, m)
-                Al = _rand_lowertri(T, m); Bl = _rand_lowertri(T, m)
-                z = T(2 + 0.6im)
-                b0 = randn(T, m)
-
-                Au_d = _to(backend, Au); Bu_d = _to(backend, Bu)
-                Al_d = _to(backend, Al); Bl_d = _to(backend, Bl)
-
-                d = _to(backend, copy(b0))
-                KATRSM.blkco_backward_solve_pencil!(d, z, Au_d, Bu_d; nblkcols)
-                KernelAbstractions.synchronize(backend)
-                @test isapprox(_from(d), UpperTriangular(z * Bu .- Au) \ b0; rtol=rtol)
-
-                d = _to(backend, copy(b0))
-                KATRSM.blkco_forward_solve_pencil!(d, z, Al_d, Bl_d; nblkcols)
-                KernelAbstractions.synchronize(backend)
-                @test isapprox(_from(d), LowerTriangular(z * Bl .- Al) \ b0; rtol=rtol)
-            end
-        end
     end
 end
 

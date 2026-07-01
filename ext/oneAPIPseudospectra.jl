@@ -34,16 +34,11 @@ function KAPseudospectra.supports_fp64(B::oneAPI.oneAPIBackend)
     return (f & oneAPI.oneL0.ZE_DEVICE_MODULE_FLAG_FP64) != 0
 end
 
-# The `tiled` strategy may use the tiled (shuffle) solve on oneAPI ONLY when it is actually correct,
-# which needs BOTH: (1) the KernelIntrinsics oneAPI shuffle backend — the standard 0.1.8 ships only a
-# `## TODO` stub, so `@shfl` silently miscompiles there; and (2) a SIMD width pinned to the warp
-# width (else a 32-lane workgroup spans several Intel subgroups). Both arrive together via the opt-in
-# `set_intel_force_simd32!` + the patched KernelIntrinsics. Without them `warp_trsm_safe` is false, so
-# `tiled` self-gates to the shuffle-free `column` solve — correct on stock releases, just without the
-# tiled speedup.
-# MultiFloats (`wide`) always stay on `column`: their tiled path crashes the SPIR-V translator on
-# oneAPI (the per-limb shuffle kernel + reqd-sub-group-size); column is correct (and only ~1.2x
-# slower) for extended precision here.
+# `tiled` is correct on oneAPI only with BOTH the KernelIntrinsics oneAPI shuffle backend (the
+# stock release ships only a stub) AND a SIMD width pinned to the warp width — both arrive via the
+# opt-in `set_intel_force_simd32!` + patched KernelIntrinsics. MultiFloats (`wide`) always stay on
+# `column`: their tiled path crashes the SPIR-V translator on oneAPI. See DESIGN_TRSM.md "Open
+# items" for why we pin SIMD32 via env var rather than `reqd_subgroup_size!`.
 KAPseudospectra.warp_trsm_safe(::oneAPI.oneAPIBackend, wide::Bool) =
     !wide &&
     KAPseudospectra.intel_force_simd32() &&
@@ -52,14 +47,6 @@ KAPseudospectra.warp_trsm_safe(::oneAPI.oneAPIBackend, wide::Bool) =
 # `tiled-gemm`'s `mul!` trailing has no reliable fast complex GEMM on oneMKL here — keep oneAPI on the
 # regular `tiled` trailing kernel (`tiled-gemm` → `tiled`).
 KAPseudospectra.tiled_gemm_safe(::oneAPI.oneAPIBackend, ::Type) = false
-
-# The SIMD-width pin for the tiled fast path comes from the main-module `__init__`
-# setting `IGC_ForceOCLSIMDWidth` (when `set_intel_force_simd32!` is enabled). We deliberately
-# do NOT use oneAPI's `reqd_subgroup_size!` (the per-kernel `intel_reqd_sub_group_size`
-# execution mode) here: applied globally it crashes the SPIR-V translator on the MultiFloat
-# kernels (whereas the env var, a driver-level flag with no per-kernel metadata, pins both the
-# IEEE tiled kernels and the MultiFloat column kernels fine). reqd-sub-group-size is the
-# cleaner long-term mechanism but needs per-kernel application (IEEE tiled kernels only) first.
 
 ## precompile gpu code (only when a device is actually usable)
 if oneAPI.functional()

@@ -13,51 +13,30 @@ include("ihlpsa_trsm.jl")        # device hooks + trsm_strategy routing + lockst
 
 ## HOST FUNCTIONS ##
 
-# Largest eigenvalue of the small Lanczos tridiagonal `SymTridiagonal(d, e)`, computed in
-# the eltype's own precision. Float64 uses the LAPACK `eigmax` (fast, well-tested);
-# extended-precision element types (MultiFloats / BigFloat) use GenericLinearAlgebra's
-# `eigen` and take the top value. `ihlsrg!` only ever calls this with `d`/`e` of the work
-# type `R` it selected, so the result follows the input precision.
-#
-# `eigen` rather than `eigmax`/`eigvals` for the generic path: near a true eigenvalue
-# σ_min → 0, so λmax = 1/σ_min² is large and the tridiagonal spans a wide dynamic range.
-# GenericLinearAlgebra's `eigen` (plain QL) resolves the extreme eigenvalue to ~machine-eps
-# on such matrices; its square-root-free `eigvals` (which `eigmax` calls) is less reliable
-# there, so we go through `eigen`. Using it means extended precision needs
-# `GenericLinearAlgebra` loaded — the same generic-linear-algebra stack the dense Schur
-# factorization already requires. The tridiagonal is tiny (nit per grid point), so the
-# eigenvectors `eigen` also returns cost nothing here.
+# Largest eigenvalue of the small Lanczos tridiagonal `SymTridiagonal(d, e)`, computed in the
+# eltype's own precision. Float64 uses LAPACK `eigmax`; extended-precision types (MultiFloats /
+# BigFloat) use GenericLinearAlgebra's `eigen`, taking the top value: near a true eigenvalue
+# σ_min → 0 so λmax = 1/σ_min² spans a wide dynamic range, and `eigen` (plain QL) resolves the
+# extreme eigenvalue to ~machine-eps there where the square-root-free `eigvals` (`eigmax`'s
+# implementation) is less reliable. The tridiagonal is tiny (nit per grid point), so the cost
+# difference is negligible.
 _eigmax_tridiag(d::AbstractVector{Float64}, e::AbstractVector{Float64}) = eigmax(SymTridiagonal(d, e))
 _eigmax_tridiag(d::AbstractVector{<:AbstractFloat}, e::AbstractVector{<:AbstractFloat}) =
     maximum(eigen(SymTridiagonal(d, e)).values)
 
-# separate srg computations
-#
-# Two notes on the σ extraction:
-#
-#  1. Work type `R = promote_type(Float64, real(eltype(α)))` — a Float64 *floor* on the
-#     eigmax precision. It is a no-op (`R == real(eltype(α))`) for Float64 and for every
-#     extended-precision type (MultiFloats/BigFloat), so those follow the input precision
-#     and the returned σ is as accurate as the resolvent solves that produced α/β. The
-#     floor only lifts the sub-Float64 types: an F32 tridiagonal near a true eigenvalue has
-#     a largest eigenvalue past F32's ~1e38 range, so its eigmax is taken in Float64.
-#     `_eigmax_tridiag` then dispatches LAPACK `eigmax` for Float64 and `eigen` otherwise;
-#     α/β are tiny (nit per grid point) so the cost is negligible either way.
-#  2. isfinite guard: even in F64, pathological Lanczos can produce NaN/Inf
-#     entries (e.g. at z exactly at an eigenvalue). When that happens we set
-#     sr[i] = eps(real(eltype(zv))) — the resolvent norm is effectively
-#     infinity at this point, so the structured stability radius is zero;
-#     using `eps` as a sentinel keeps `log10(sr)` well-defined for plotting.
+# σ_min = 1/√(eigmax) of [(zB−A)(zB−A)ᴴ]⁻¹; the (γ,δ)-pseudospectral value is σ_min/(γ+δ|z|)
+# (Frayssé et al.) = 1/((γ+δ|z|)·√eigmax). Work type `R = promote_type(Float64, real(eltype(α)))`
+# floors the eigmax precision at Float64 — a no-op for Float64/extended-precision inputs, but
+# lifts F32 (whose tridiagonal can have an eigenvalue past F32's ~1e38 range near a true
+# eigenvalue). isfinite guard: pathological Lanczos can produce NaN/Inf entries (e.g. z exactly at
+# an eigenvalue); `eps(real(eltype(zv)))` there keeps `log10(sr)` well-defined for plotting
+# (physically: resolvent norm → ∞, so the stability radius is ~0).
 function ihlsrg!(sr, zv, γ, δ, α, β)
     R = promote_type(Float64, real(eltype(α)))
     Threads.@threads for i in eachindex(zv)
         αi = R.(real.(α[:, i]))
         βi = R.(real.(β[2:end-1, i]))
         if all(isfinite, αi) && all(isfinite, βi)
-            # σ_min = 1/√(eigmax) of [(zB−A)(zB−A)ᴴ]⁻¹; the (γ,δ)-pseudospectral
-            # value is σ_min/(γ+δ|z|) (Frayssé et al.) = 1/((γ+δ|z|)·√eigmax).
-            # `_eigmax_tridiag` follows the input eltype's precision (LAPACK for
-            # Float64, GenericLinearAlgebra `eigen` for extended-precision types).
             sr[i] = 1 / ((γ + δ * abs(zv[i])) * sqrt(_eigmax_tridiag(αi, βi)))
         else
             sr[i] = eps(real(eltype(zv)))
@@ -181,6 +160,15 @@ function _ihlpsa_fanout(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil
     return results, blocks
 end
 
+# Scatter each device's columns back to their original grid positions (strided partition ⇒
+# device results are not in column order). `extract` pulls the relevant array out of each
+# device's result (identity for a single array, a field-getter for a tuple of arrays).
+function _scatter_columns!(dest::AbstractMatrix, results, blocks, extract=identity)
+    for (r, blk) in zip(results, blocks)
+        @inbounds dest[:, blk] = extract(r)
+    end
+end
+
 # Fixed-nit engine: multi-device batched inverse-Lanczos at a caller-given depth.
 # The public `ihlpsa(..., nit::Integer, ...)` method forwards here.
 function _ihlpsa_fixed(
@@ -213,12 +201,8 @@ function _ihlpsa_fixed(
         results, blocks = _ihlpsa_fanout(backend, zg, P, nit, zpd, devs,
             (zgb, zpd_dev) -> _sdihlpsa(backend, zgb, P, γ, δ, zpd_dev, nit, x₀,
                 progress ? pchnl : missing, wgs); pbar)
-        # Scatter each device's columns back to their original grid positions
-        # (strided partition ⇒ device results are not in column order).
         result = Matrix{real(T)}(undef, size(zg))
-        for (r, blk) in zip(results, blocks)
-            @inbounds result[:, blk] = r
-        end
+        _scatter_columns!(result, results, blocks)
     else
         # CPU runs the whole grid as one batch: `ThreadsX.foreach` inside `_sdihlpsa`
         # already parallelizes across threads, and the single shared IHLworkspace
@@ -364,14 +348,10 @@ function _ihlpsa_adaptive(
         results, blocks = _ihlpsa_fanout(backend, zg, P, nit_max, zpd, devs,
             (zgb, zpd_dev) -> _sdihlpsa_adaptive(backend, zgb, P, γ, δ, nit_chunk,
                 nit_max, rtol, atol, nconfirm, x₀_fixed, zpd_dev, wgs))
-        # Scatter each device's columns back to their original grid positions
-        # (strided partition ⇒ device results are not in column order).
         sr = Matrix{real(T)}(undef, size(zg))
         nit_grid = Matrix{Int}(undef, size(zg))
-        for (r, blk) in zip(results, blocks)
-            @inbounds sr[:, blk] = r[1]
-            @inbounds nit_grid[:, blk] = r[2]
-        end
+        _scatter_columns!(sr, results, blocks, r -> r[1])
+        _scatter_columns!(nit_grid, results, blocks, r -> r[2])
         unconverged = any(r[3] for r in results)
     else
         # Unlike _sdihlpsa (whose batches run under ThreadsX and would race on the

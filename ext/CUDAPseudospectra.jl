@@ -8,10 +8,7 @@ using KAPseudospectra, CUDA, PrecompileTools
 #
 # NOTE: there is no CUDA-specific triangular solve here — the column and tiled solves run through
 # the portable KernelAbstractions + KernelIntrinsics kernels (src/KATRSM.jl) on CUDA like every
-# other backend. An earlier hand-rolled `@cuda` + `CUDA.shfl_sync` warp solve (opt-in via
-# KAPSEUDO_CUDA_NATIVE) was removed, as was the later KA register-warp solve (it only beat tiled at
-# small m while paying a per-R `@generated` recompile up to minutes); the package's value is the
-# minimal portable interface. See DESIGN_TRSM.md and git history for the diagnosis.
+# other backend; that portable interface is the package's value. See DESIGN_TRSM.md.
 KAPseudospectra.device(B::CUDA.CUDABackend) = CUDA.device()
 KAPseudospectra.device!(B::CUDA.CUDABackend, dev) = CUDA.device!(dev)
 KAPseudospectra.devices(B::CUDA.CUDABackend) = CUDA.devices()

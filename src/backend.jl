@@ -40,19 +40,12 @@ device_smem_bytes(backend) = 48 * 1024
 # `device_smem_bytes`, which is the per-BLOCK limit.)
 device_smem_per_sm(backend) = 64 * 1024
 
-# Whether the tiled solve (which broadcasts pivots with warp shuffles) is correct under the `tiled`
-# strategy on this backend. True for CUDA / AMDGPU / Metal: fixed warp/wavefront/SIMD width + a
-# hardware shuffle. On oneAPI it needs BOTH the KernelIntrinsics oneAPI shuffle backend AND a pinned
-# SIMD width, so that extension overrides this; without them `tiled` falls back to the shuffle-free
-# `column` solve — correct, just not the fast path. Metal also gates it behind an opt-in preference.
-# `wide` is true for non-IEEE element types (MultiFloats / BigFloat); the oneAPI override keeps those
-# on `column`.
+# Whether the tiled solve's warp-shuffle pivot broadcast is correct on this backend+type (`wide` is
+# true for non-IEEE element types). Defaults true (CUDA/AMDGPU/Metal); oneAPI overrides it — see
+# ext/oneAPIPseudospectra.jl for why. `tiled` self-gates to `column` when false.
 warp_trsm_safe(backend, wide) = true
 
-# Whether the `tiled-gemm` strategy's `mul!` trailing update is the fast (compute-bound) path for this
-# element type + backend. It's worth it only where `mul!` hits a vendor BLAS complex GEMM: ComplexF32/
-# F64 on CUDA (cuBLAS) / AMDGPU (rocBLAS). For MultiFloats / non-IEEE there is no fast GEMM (mul! drops
-# to a slow generic matmul), and oneAPI/Metal complex-GEMM support is patchy — those override to false,
-# so `tiled-gemm` self-gates to the regular `tiled` trailing kernel (correct, just not the GEMM path).
-# `T` is the (complex) element type of the pencil.
+# Whether `tiled-gemm`'s `mul!` trailing update hits a fast vendor complex GEMM for element type `T`
+# on this backend. Defaults to "any IEEE float type"; oneAPI/Metal override to false — see their
+# extension files. `tiled-gemm` self-gates to the regular `tiled` trailing kernel when false.
 tiled_gemm_safe(backend, ::Type{T}) where {T} = real(T) <: Base.IEEEFloat

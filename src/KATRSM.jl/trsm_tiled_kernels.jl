@@ -1,21 +1,5 @@
 # Tiled / blocked batched pencil triangular solves (KernelAbstractions + KernelIntrinsics).
-# See also DESIGN_TRSM.md §"Tiled" for the bandwidth motivation and the end-to-end speedups.
-#
-# For large m a per-grid-point column solve becomes bandwidth-bound: every grid point re-streams
-# the whole m×m A,B pencil from DRAM with zero reuse across grid points (A,B are shared; only
-# z varies). The tiled solve fixes this with a right-looking blocked algorithm, panel width
-# = warp size (32):
-#   for each panel k:
-#     (1) PANEL SOLVE — solve the ≤32×32 *triangular* diagonal tile for every grid point
-#         (lower-triangular for the forward sweep, upper-triangular for the backward sweep;
-#         one warp per grid point, pivots broadcast by `@shfl`, same per-element numerics as the
-#         column kernel);
-#     (2) TRAILING UPDATE — a tiled GEMM that subtracts panel k's contribution from the
-#         trailing rows. Each workgroup loads the A,B[row-tile, panel-k] tile into `@localmem`
-#         ONCE and reuses it across `gt` grid points, turning the streaming into compute-bound
-#         work. The pencil M = zB − A is kept as separate A,B tiles + a per-grid-point z combine
-#         so the shared tiles are z-independent and reused across the batch.
-#
+# See DESIGN_TRSM.md §"Tiled" for the bandwidth motivation, algorithm, and measured speedups.
 # Block layout (forward / lower-triangular sweep; the backward sweep is the mirror image):
 #
 #     columns:   1 … koff        koff+1 … koff+plen      koff+plen+1 … m
@@ -30,16 +14,11 @@
 #              │              │  (_tiled_trailing_*)  │       solved)         │
 #              └──────────────┴──────────────────────┴──────────────────────┘
 #
-# Note on the "dead" zero triangle of A/B: the blocking keeps every trailing-tile index in
-# the FILLED part of the triangle by construction — for the forward sweep the trailing rows
-# are i > koff+plen against panel columns j ≤ koff+plen, so i > j (filled subdiagonal); the
-# backward sweep loads rows i ≤ koff against columns j > koff, so i < j (filled superdiagonal).
-# The structurally-zero entries therefore exist as device storage but are NEVER loaded into
-# sA/sB or multiplied — dead storage, not dead computation.
+# The structurally-zero triangle of A/B is never loaded into sA/sB or multiplied (dead storage,
+# not dead computation) — the blocking keeps every trailing-tile index in the filled part.
 #
 # Trailing-update workgroups use a flat 1-D group index decoded into (row-tile, grid-pt-tile)
-# to avoid relying on KA 2-D group indexing. Per-element numerics match the column-oriented
-# kernels (same `_pdiv`, `zBAij`); the blocked update order differs, so results agree to round-off.
+# to avoid relying on KA 2-D group indexing.
 
 using KernelIntrinsics: @shfl, Idx
 
@@ -115,11 +94,9 @@ end
 #
 # OCCUPANCY: the `@localmem` tile is 32 ROWS × TC COLUMNS. The row count is fixed at 32 (a full warp
 # — a half-warp row tile wastes lanes and is slower); the COLUMN count TC is a compile-time `Val`
-# knob DECOUPLED from the 32-wide panel solve. A wide tile (TC=32) is heavily shared-memory-bound on
-# Pascal (a 2-tile ComplexF32 block is 16 KB → only 6 resident blocks/SM ≈ 9% occupancy); narrowing
-# TC shrinks the tile, raising resident blocks/SM (and occupancy) proportionally, which measured
-# ~1.3–1.7× faster on a 1080 Ti. A panel wider than TC is subtracted in ⌈plen/TC⌉ column sub-tiles
-# (loop over `c0`); the A,B DRAM traffic is unchanged (each column still streamed once per grid-tile).
+# knob DECOUPLED from the 32-wide panel solve, narrowing which raises resident blocks/SM (see
+# DESIGN_TRSM.md "Trailing-tile width and occupancy" for the measured tradeoff). A panel wider than
+# TC is subtracted in ⌈plen/TC⌉ column sub-tiles (loop over `c0`); the A,B DRAM traffic is unchanged.
 # TC is chosen per device+type by `tiled_tc` (src/ihlpsa_trsm.jl); TC=32 reproduces the single-tile
 # (pre-optimization) sweep exactly. `@synchronize` brackets each sub-tile so the shared tile can be
 # reloaded — both barriers are reached uniformly (the `c0` loop count depends only on plen/TC).
@@ -216,14 +193,10 @@ end
 # Dropping the B tile halves shared memory (one 32×TC tile instead of two → ~2× the resident blocks
 # of the generic kernel) and removes z from the trailing update.
 #
-# Why these are SEPARATE kernels rather than one kernel with a runtime `if eye` branch (or a
-# `Val`-tagged body): `@localmem` is a *static* allocation in a GPU kernel, so a unified body
-# that conditionally touches `sB` would still reserve both tiles regardless of the flag —
-# defeating the entire point of the eye path (the halved shared-memory footprint). The B=I-vs-
-# pencil choice is therefore made by dispatch at the host call site (see the `eye` branch in
-# `_tiled_trsm!`, src/ihlpsa_trsm.jl), which picks the right kernel symbol; a `Val{eye}` tag would
-# compile to these same two bodies and save no lines. (The TC column-tile knob is shared via the
-# `Val{TC}` parameter — see the occupancy note above.)
+# Separate kernels rather than a runtime `if eye` / `Val{eye}` body: `@localmem` is a *static*
+# allocation, so any unified body touching `sB` would reserve both tiles regardless of the flag —
+# defeating the eye path's halved shared-memory footprint. Dispatch happens at the host call site
+# (the `eye` branch in `_tiled_trsm!`, src/ihlpsa_trsm.jl), which picks the right kernel symbol.
 
 @kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
     li = @index(Local)

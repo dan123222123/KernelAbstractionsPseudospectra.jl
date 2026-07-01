@@ -35,7 +35,6 @@ function set_pdiv_accurate(flag::Bool)
     return flag
 end
 
-include("trsm_wrappers.jl")
 include("trsm_pencil_wrappers.jl")
 include("trsm_tiled_kernels.jl")
 

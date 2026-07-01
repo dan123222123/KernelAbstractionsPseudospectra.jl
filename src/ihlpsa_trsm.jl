@@ -23,9 +23,9 @@ end
 
 # Trailing-tile COLUMN width — the `Val{TC}` of the trailing kernels (src/KATRSM.jl/trsm_tiled_kernels.jl).
 # A shared-memory occupancy knob DECOUPLED from the 32-wide panel solve: a narrower TC shrinks the
-# 32×TC @localmem tile, raising resident blocks/SM (≈ occupancy) on a shared-memory-bound device and,
-# measured on a 1080 Ti, the trailing update ~1.3–1.7× faster — at the cost of ⌈plen/TC⌉ tile reloads
-# per panel (A,B DRAM traffic is unchanged). TC=32 reproduces the original single-tile sweep.
+# 32×TC @localmem tile, raising resident blocks/SM at the cost of ⌈plen/TC⌉ tile reloads per panel
+# (A,B DRAM traffic is unchanged). TC=32 reproduces the original single-tile sweep. See DESIGN_TRSM.md
+# "Trailing-tile width and occupancy" for the measured tradeoff.
 #
 # Resolution order: `KAPSEUDO_TRSM_TC` env var > a value persisted by the `tune_trsm_tc!` probe
 # (src/tune.jl), keyed per element type + eye/generic > the analytic estimate `_auto_tiled_tc`. The
@@ -64,10 +64,9 @@ end
 # Warps per trailing-update block — the `Val{W}` of the trailing kernels. The W warps SHARE one
 # 32×TC @localmem tile (shared mem/block UNCHANGED) and split the `gt` grid points across warps, so
 # the shared-mem-capped resident blocks/SM each carry W warps → occupancy rises ~W× off the W=1
-# ceiling until registers bind (measured A100 ComplexF64: occupancy 14%→30%, ~1.7× on the trailing
-# kernels, ~1.57× end-to-end at W=4). W=1 reproduces the original single-warp launch exactly; the
-# result is bit-identical across W (per-(row,grid-point) FMA order is unchanged). Resolution order
-# mirrors `tiled_tc`: `KAPSEUDO_TRSM_W` env > a value persisted by `tune_trsm_tc!` (per type+eye) >
+# ceiling until registers bind. W=1 reproduces the original single-warp launch exactly; the result is
+# bit-identical across W (per-(row,grid-point) FMA order is unchanged). Resolution order mirrors
+# `tiled_tc`: `KAPSEUDO_TRSM_W` env > a value persisted by `tune_trsm_tc!` (per type+eye) >
 # `_DEFAULT_W`. W is independent of `tiled_tiles_fit` (it does not change shared-mem/block); the only
 # device limit is registers, which the tuner discovers by skipping any (TC,W) whose launch fails.
 const _W_CANDIDATES = (1, 2, 4, 8)
@@ -92,13 +91,12 @@ end
 
 # Analytic per-device+type estimate — NO benchmark run. The end-to-end optimum is NOT the narrowest
 # tile: more sub-tiles mean more @localmem reloads / panel passes, whose overhead eventually outweighs
-# the occupancy gain (measured 1080 Ti: the 1-tile eye solve peaks at TC=16, the 2-tile generic at
-# TC=8 — both ≈24 resident blocks/SM). So target the occupancy SWEET SPOT, ~¾ of the per-SM block cap
-# resident, and use the LARGEST TC that reaches it (least narrowing → least overhead); fall back to
-# the narrowest that fits a block if none do. `device_smem_per_sm` gives the per-SM budget for the
-# blocks-per-SM estimate (= smem_sm ÷ tile, capped by the hardware block limit). NOTE the target is a
-# fixed ¾-of-cap heuristic — the true sweet spot also depends on the type's arithmetic intensity and
-# the device's compute:bandwidth ratio, which is exactly what `tune_trsm_tc!` measures directly.
+# the occupancy gain. So target the occupancy SWEET SPOT, ~¾ of the per-SM block cap resident, and use
+# the LARGEST TC that reaches it (least narrowing → least overhead); fall back to the narrowest that
+# fits a block if none do. `device_smem_per_sm` gives the per-SM budget for the blocks-per-SM estimate
+# (= smem_sm ÷ tile, capped by the hardware block limit). NOTE the target is a fixed ¾-of-cap
+# heuristic — the true sweet spot also depends on the type's arithmetic intensity and the device's
+# compute:bandwidth ratio, which is exactly what `tune_trsm_tc!` measures directly.
 function _auto_tiled_tc(backend, P)
     ntiles = b_is_identity(P) ? 1 : 2
     elt = sizeof(eltype(P.A))
@@ -114,15 +112,8 @@ function _auto_tiled_tc(backend, P)
     return best == 0 ? last(_TC_CANDIDATES) : best                               # nothing fit (shouldn't happen post tiled_tiles_fit) → narrowest
 end
 
-# non-cpu solve step in lockstep_ihl!
-#
-# Two GPU solve kernels are available:
-#   * column-oriented (default): a `@synchronize()`-per-column workgroup kernel — barrier-based,
-#     shuffle-free, correct for every element type and backend. The portable default.
-#   * tiled (opt-in `tiled`): a right-looking blocked solve with shared-memory A,B-tile reuse across
-#     the grid-point batch (panel solves broadcast pivots by `@shfl`). Bandwidth-optimal and the
-#     performance path on a shuffle-capable backend; it SELF-GATES to the column solve wherever the
-#     shuffle / shared memory isn't usable, so `tiled` is safe to request on any backend.
+# Non-CPU solve step in lockstep_ihl! — routes to column / tiled / tiled-gemm per `trsm_strategy()`.
+# See DESIGN_TRSM.md "Choosing a solve" for the full routing rationale.
 function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
     # The default `column` needs no routing info, so return early — this keeps the per-iteration
@@ -131,22 +122,14 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     if strat == "column"
         return _column_trsm!(backend, bV, zv, P, wgs)
     end
-    # `tiled`: run the tiled solve where it's usable for this backend+type, else fall back to the
-    # shuffle-free column solve (so requesting `tiled` is always correct). "Usable" needs BOTH: SOME
-    # trailing-tile width fits this device's shared memory (`tiled_tiles_fit` checks the narrowest
-    # 32×TC×{1 if B=I else 2}·sizeof(ET) vs `device_smem_bytes`; `tiled_tc` then picks the actual TC)
-    # AND a hardware warp shuffle usable here (`warp_trsm_safe`; false on stock oneAPI / Metal-without-
-    # opt-in, and for wide non-IEEE types lacking the per-limb `_trsm_shfl` override —
-    # MultiFloatsPseudospectra). Because the tile width adapts, a wide non-IEEE pencil (MultiFloats:
-    # Float64xN etc.) tiles at a narrow TC rather than dropping to `column`; only a type too wide for
-    # even the narrowest TC falls back.
+    # `tiled`/`tiled-gemm` need BOTH some trailing-tile width to fit shared memory (`tiled_tiles_fit`)
+    # AND a usable warp shuffle (`warp_trsm_safe`); otherwise self-gate to `column`.
     wide       = !(real(eltype(P.A)) <: Base.IEEEFloat)  # non-IEEE (MultiFloats/BigFloat)
     tiled_ok   = tiled_tiles_fit(backend, P)             # tiled's @localmem tiles fit device shared memory
     shuffle_ok = warp_trsm_safe(backend, wide)           # tiled shuffle usable for this backend+type
     if shuffle_ok && tiled_ok
-        # `tiled-gemm`: keep the shared panel solve but replace the trailing kernel with a vendor-BLAS
-        # `mul!` where the element type has a fast complex GEMM (ComplexF32/F64 via `tiled_gemm_safe`).
-        # MultiFloats / unsupported backends → gemm=false, i.e. the regular `tiled` trailing kernel.
+        # `tiled-gemm` replaces the trailing kernel with a vendor-BLAS `mul!` where `tiled_gemm_safe`;
+        # otherwise gemm=false runs the regular `tiled` trailing kernel.
         gemm = strat == "tiled-gemm" && tiled_gemm_safe(backend, eltype(P.A))
         _tiled_trsm!(backend, bV, zv, P, wgs; gemm)
     else
