@@ -344,7 +344,12 @@ function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
             tol = real(T) === Float32 ? 1e-4 : 1e-10
             σc = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "column")
             σt = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "tiled")
+            # `tiled-gemm`: shared panel solve, `mul!` trailing for ComplexF32/F64 B=I; for B≠I (and
+            # MultiFloats / unsupported backends) it self-gates to the `tiled` trailing kernel. Either
+            # way it must match the `column` baseline to tolerance.
+            σg = withenv(() -> ihlpsa(backend, zg, P, 10), "KAPSEUDO_TRSM" => "tiled-gemm")
             @test maximum(abs.(σt .- σc)) / maximum(abs.(σc)) < tol
+            @test maximum(abs.(σg .- σc)) / maximum(abs.(σc)) < tol
         end
 
         for T in types
