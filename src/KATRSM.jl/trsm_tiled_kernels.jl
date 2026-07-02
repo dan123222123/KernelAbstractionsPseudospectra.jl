@@ -1,5 +1,5 @@
 # Tiled / blocked batched pencil triangular solves (KernelAbstractions + KernelIntrinsics).
-# See DESIGN_TRSM.md §"Tiled" for the bandwidth motivation, algorithm, and measured speedups.
+# See DESIGN_TRSM.md §"Tiled" for the algorithm and design rationale.
 # Block layout (forward / lower-triangular sweep; the backward sweep is the mirror image):
 #
 #     columns:   1 … koff        koff+1 … koff+plen      koff+plen+1 … m
@@ -14,31 +14,25 @@
 #              │              │  (_tiled_trailing_*)  │       solved)         │
 #              └──────────────┴──────────────────────┴──────────────────────┘
 #
-# The structurally-zero triangle of A/B is never loaded into sA/sB or multiplied (dead storage,
-# not dead computation) — the blocking keeps every trailing-tile index in the filled part.
+# The structurally-zero triangle of A/B is never loaded into sA/sB or multiplied.
 #
 # Trailing-update workgroups use a flat 1-D group index decoded into (row-tile, grid-pt-tile)
 # to avoid relying on KA 2-D group indexing.
 
 using KernelIntrinsics: @shfl, Idx
 
-# Warp-shuffle broadcast used by the tiled panel solves to broadcast each solved pivot lane→lane (it
-# also synchronizes the warp). For IEEE hardware floats (ComplexF32/F64) this is a single `@shfl`.
-# Multi-limb float types (MultiFloats) are miscompiled when shuffled as one wide composite and
-# silently return garbage; the MultiFloatsPseudospectra extension overrides this with a per-limb
-# shuffle (each underlying hardware float shuffled separately, then reconstructed) — verified exact,
-# whereas the whole-value shuffle is not.
+# Warp-shuffle broadcast of each solved pivot lane→lane (also synchronizes the warp). For IEEE
+# hardware floats this is a single `@shfl`. Multi-limb types (MultiFloats) are miscompiled when
+# shuffled as one wide composite and silently return garbage — MultiFloatsPseudospectra overrides
+# this with a per-limb shuffle instead.
 @inline _trsm_shfl(v, src) = @shfl(Idx, v, src)
 
 # ---- diagonal panel solves (one warp per grid point) ----
 
-# Generic (B≠I) and B=I "eye" diagonal-panel solves share ONE body per direction. `veye::Val` selects
-# the pencil element via `_piv_elem`/`_offd_elem`; the eye wrappers pass `B = nothing` (single matrix,
-# no B read). One warp per grid point: `j0 = koff+lane` is the row this lane owns within the panel,
-# `bl` holds its RHS entry in a register, and the owner lane (lane==jj) broadcasts its solved pivot by
-# `@shfl` (every other lane emits zero into the shuffle). Generic routes through `zBAij` (AST-identical
-# to the former inline). `valid` masks lanes past a partial last panel (plen<32). With the eye TRAILING
-# kernels, the tiled solve is fully B-free for a standard pencil. Wrappers dispatched from `_tiled_trsm!`.
+# Shared body for generic (B≠I) and B=I "eye" panel solves; `veye::Val` selects the pencil element
+# via `_piv_elem`/`_offd_elem` (eye wrappers pass `B = nothing`). One warp per grid point: `bl` holds
+# this lane's RHS entry in a register; the owner lane (lane==jj) broadcasts its solved pivot via
+# `@shfl`, other lanes emit zero. `valid` masks lanes past a partial last panel (plen<32).
 @inline function _panel_fwd_body!(b, z, A, B, koff, plen, lane, veye)   # lower-tri (ascending)
     ET = eltype(A)
     j0 = koff + lane
@@ -50,7 +44,7 @@ using KernelIntrinsics: @shfl, Idx
         xj = _trsm_shfl(piv, jj)
         if lane == jj
             bl = xj
-        elseif (lane > jj) & valid                       # rows BELOW the pivot
+        elseif (lane > jj) & valid                       # rows below the pivot
             bl -= xj * @inline _offd_elem(veye, j0, j, z, A, B)
         end
     end
@@ -67,7 +61,7 @@ end
         xj = _trsm_shfl(piv, jj)
         if lane == jj
             bl = xj
-        elseif (lane < jj) & valid                       # rows ABOVE the pivot
+        elseif (lane < jj) & valid                       # rows above the pivot
             bl -= xj * @inline _offd_elem(veye, j0, j, z, A, B)
         end
     end
@@ -91,15 +85,13 @@ end
 end
 
 # ---- tiled trailing updates (shared A,B tile reused across `gt` grid points) ----
-#
-# OCCUPANCY: the `@localmem` tile is 32 ROWS × TC COLUMNS. The row count is fixed at 32 (a full warp
-# — a half-warp row tile wastes lanes and is slower); the COLUMN count TC is a compile-time `Val`
-# knob DECOUPLED from the 32-wide panel solve, narrowing which raises resident blocks/SM (see
-# DESIGN_TRSM.md "Trailing-tile width and occupancy" for the measured tradeoff). A panel wider than
-# TC is subtracted in ⌈plen/TC⌉ column sub-tiles (loop over `c0`); the A,B DRAM traffic is unchanged.
-# TC is chosen per device+type by `tiled_tc` (src/ihlpsa_trsm.jl); TC=32 reproduces the single-tile
-# (pre-optimization) sweep exactly. `@synchronize` brackets each sub-tile so the shared tile can be
-# reloaded — both barriers are reached uniformly (the `c0` loop count depends only on plen/TC).
+# `@localmem` tile is 32 rows (fixed, one full warp) × TC columns; TC is a compile-time `Val` knob
+# decoupled from the 32-wide panel solve, chosen per device+type by `tiled_tc` (src/ihlpsa_trsm.jl).
+# See DESIGN_TRSM.md "Trailing-tile width and occupancy" for the tuning rationale.
+# A panel wider than TC is subtracted in ⌈plen/TC⌉ column sub-tiles (loop over `c0`); A,B DRAM
+# traffic is unchanged. `@synchronize` brackets each sub-tile so the shared tile can be reloaded —
+# both barriers must be reached uniformly by every thread (the `c0` loop count depends only on
+# plen/TC, so it is).
 
 # Forward: subtract panel k from trailing rows rbase+1 … m.
 @kernel function _tiled_trailing_forward(bv, zv, @Const(A), @Const(B),
@@ -190,13 +182,12 @@ end
 # ---- B = I trailing updates (one tile, no z) ----
 # For a standard pencil (B = I) the trailing rows i are strictly off the panel columns j, so
 # B[i,j] = 0 and the pencil reduces to M[i,j] = -A[i,j]: `acc -= M[i,j]·b[j]` ⇒ `acc += A[i,j]·b[j]`.
-# Dropping the B tile halves shared memory (one 32×TC tile instead of two → ~2× the resident blocks
-# of the generic kernel) and removes z from the trailing update.
+# Dropping the B tile halves shared memory and removes z from the trailing update.
 #
 # Separate kernels rather than a runtime `if eye` / `Val{eye}` body: `@localmem` is a *static*
-# allocation, so any unified body touching `sB` would reserve both tiles regardless of the flag —
-# defeating the eye path's halved shared-memory footprint. Dispatch happens at the host call site
-# (the `eye` branch in `_tiled_trsm!`, src/ihlpsa_trsm.jl), which picks the right kernel symbol.
+# allocation, so any unified body touching `sB` would reserve both tiles regardless of the flag.
+# Dispatch happens at the host call site (the `eye` branch in `_tiled_trsm!`, src/ihlpsa_trsm.jl),
+# which picks the right kernel symbol.
 
 @kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
     li = @index(Local)

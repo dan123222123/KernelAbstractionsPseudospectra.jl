@@ -1,9 +1,7 @@
-# Per-backend device interface: the hooks the GPU extensions (ext/*Pseudospectra.jl) specialize for
-# their backend, with CPU/default implementations here. This is the single place the backend
-# abstraction lives — array type, device handle, free memory, reclaim, FP64 capability, and the
-# device-property queries the trsm solves route on (warp width, shared-memory budget, warp-shuffle
-# safety). The trsm LOGIC that consumes these (default_wgs, tiled_tiles_fit, trsmIHL, the solve
-# drivers) stays in ihlpsa_trsm.jl.
+# Per-backend device interface: the hooks the GPU extensions (ext/*Pseudospectra.jl) specialize,
+# with CPU/default implementations here — array type, device handle, memory, FP64 capability, and the
+# device-property queries the trsm solves route on. The trsm logic that consumes these lives in
+# ihlpsa_trsm.jl. Per-backend values and the routing they drive: see the package documentation.
 
 # ── device / array / memory operations (CPU defaults; each GPU extension overrides) ──
 get_bgarray(B::CPU) = Array
@@ -13,39 +11,25 @@ device!(B::CPU, dev) = CPU()
 device_bytes_available(B::CPU) = (Sys.free_memory() |> Int)
 device_reclaim(B::CPU) = GC.gc()
 
-# Whether `backend`'s device can run Float64/ComplexF64 kernels. Default defers to
-# `KernelAbstractions.supports_float64`; overridable so the oneAPI extension can substitute a
-# device-accurate FP64 query (see its note). F64 paths skip unsupported devices.
+# Whether the device can run Float64/ComplexF64 kernels; F64 paths skip devices that can't. Defaults
+# to KernelAbstractions.supports_float64; overridable (the oneAPI extension substitutes its own query).
 supports_fp64(B) = KernelAbstractions.supports_float64(B)
 
 # ── device-property queries the trsm solves route on (defaults here; extensions query hardware) ──
 
-# Warp/subgroup width (one shuffle domain). Sets the column solve's workgroup size (`default_wgs`);
-# the tiled solve's panel width is a fixed 32 regardless. The default is 32, but this is a per-backend
-# QUERY hook, not a baked constant: each GPU extension overrides it with the actual hardware value —
-# `CUDA.warpsize` (32), `AMDGPU` warpSize (32 on RDNA, 64 on CDNA), 32 for Metal SIMD-groups, 32 for
-# Intel under the SIMD32 pin (`set_intel_force_simd32!`). KernelAbstractions has no portable
-# pre-launch query, so the value comes from each backend's API.
+# Warp/subgroup width — sets the column solve's workgroup size. Extensions override with the hardware value.
 warp_width(backend) = 32
 
-# Shared-memory bytes per workgroup available to the tiled solve's `@localmem` tiles. Default a
-# conservative 48 KB (the static-shared-memory limit on Volta/Turing/early-Ampere); each GPU
-# extension overrides it with the real device query so the tiled-vs-column routing uses the actual
-# per-device budget instead of an assumed constant.
+# Shared memory per workgroup for the tiled solve's `@localmem` tiles. Extensions override with the device query.
 device_smem_bytes(backend) = 48 * 1024
 
-# Shared-memory bytes per SM (multiprocessor) — used only to estimate the tiled trailing kernel's
-# resident-blocks-per-SM when picking the trailing-tile width `TC` (`tiled_tc`). A conservative 64 KB
-# default; each GPU extension overrides it with the real per-SM query. (Distinct from
-# `device_smem_bytes`, which is the per-BLOCK limit.)
+# Shared memory per SM — used to size the trailing-tile width (`tiled_tc`). Extensions override with the device query.
 device_smem_per_sm(backend) = 64 * 1024
 
 # Whether the tiled solve's warp-shuffle pivot broadcast is correct on this backend+type (`wide` is
-# true for non-IEEE element types). Defaults true (CUDA/AMDGPU/Metal); oneAPI overrides it — see
-# ext/oneAPIPseudospectra.jl for why. `tiled` self-gates to `column` when false.
+# true for non-IEEE element types); `tiled` self-gates to `column` when false.
 warp_trsm_safe(backend, wide) = true
 
-# Whether `tiled-gemm`'s `mul!` trailing update hits a fast vendor complex GEMM for element type `T`
-# on this backend. Defaults to "any IEEE float type"; oneAPI/Metal override to false — see their
-# extension files. `tiled-gemm` self-gates to the regular `tiled` trailing kernel when false.
+# Whether tiled-gemm's `mul!` trailing update hits a fast vendor complex GEMM for `T`; tiled-gemm
+# self-gates to the regular tiled kernel when false.
 tiled_gemm_safe(backend, ::Type{T}) where {T} = real(T) <: Base.IEEEFloat

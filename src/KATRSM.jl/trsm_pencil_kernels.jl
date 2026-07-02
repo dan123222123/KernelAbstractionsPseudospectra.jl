@@ -1,17 +1,16 @@
 using KernelAbstractions
 
-# note, cpu kernels exhibit odd behavior when using synchronize inside of arbitrary control flows
-# see https://github.com/JuliaGPU/KernelAbstractions.jl/issues/330 if unexplainable behavior happens
+# CPU backend kernels behave oddly with @synchronize inside arbitrary control flow —
+# see https://github.com/JuliaGPU/KernelAbstractions.jl/issues/330 if something unexplainable happens.
 
-# KA kernels for forward and backward solves of a matrix pencil
-# the matrix pencil is constructed "on the fly" to limit device memory usage as much as possible
+# KA kernels for forward/backward solves of a matrix pencil, built on the fly (never materialized)
+# to limit device memory.
 
 include("trsm_pencil_core.jl")
 
 ## BATCHED ##
 
-# "naive" trsm
-# each pencil is solved at the WORKITEM level, with the number of workITEMS equal to the batch dimension
+# One workitem per pencil (batch dimension = number of workitems).
 @kernel function _batched_forward_solve_pencil(bV, zv, A, B)
     I = @index(Global, Linear)
     if I <= length(zv)
@@ -28,24 +27,19 @@ end
         @inline backward_solve_pencil!(b, z, A, B)
     end
 end
-# "column-oriented" trsm
-# when a diagonal element is solved for, all operations in the corresponding column are independent of one another and can be done in parallel by a workgroup
-# if the max workgroup size is less than size(P,1), workitems cycle down/up the column to complete all independent operations
-# each pencil is solved at the WORKGROUP level, with the number of workgroups equal to the batch dimension
-# Generic (B≠I) and B=I "eye" forward/backward share only the per-element pencil FORMULA, via the
-# `_piv_elem` / `_offd_elem` selectors: `Val{false}` ⇒ `zBAij`, AST-identical to the former inline
-# `(z*B)−A` so the warp-vs-column BITWISE test still holds; `Val{true}` ⇒ the reduced `z−A[j,j]` /
-# `−A[i,j]`, which never read B, so the `_eye` kernels take a SINGLE matrix and pass `B = nothing`,
-# skipping the identity-B DRAM read (~half the matrix bandwidth for B=I). The eye result matches the
-# generic to round-off (~1 ULP via FMA order).
+# One workgroup per pencil (not one workitem): off-diagonal updates in a solved column are mutually
+# independent, so the workgroup does them in parallel, cycling if the workgroup is smaller than m.
 #
-# The loop body — lane-0 pivot in @localmem, broadcast by the @synchronize block barriers — is written
-# DIRECTLY in each @kernel and NOT factored into a shared @inline helper: KA's CPU backend splits the
-# kernel at every @synchronize and can only do so when @synchronize / @localmem appear LEXICALLY inside
-# the @kernel body — hiding them in an inlined helper raises "@synchronize used outside kernel" on CPU
-# (the GPU backends inline through it fine, but CI runs CPU). So only the @synchronize-free selectors
-# are shared; the ~10-line scaffold repeats per direction × {generic, eye}. Dispatched from
-# `_column_trsm!` per `b_is_identity(P)`.
+# Generic (B≠I) and B=I ("eye") kernels share only the per-element formula, via `_piv_elem`/`_offd_elem`
+# (`Val{false}` ⇒ `zBAij`; `Val{true}` ⇒ the B-free reduction `z-A[j,j]`/`-A[i,j]`). The eye kernels take
+# a single matrix and pass `B = nothing`, so they never read B. Eye and generic results match to
+# round-off.
+#
+# The loop body (lane-0 pivot into @localmem, broadcast via @synchronize) is written directly in each
+# @kernel rather than factored into a shared helper: KA's CPU backend can only split a kernel at
+# @synchronize points that are LEXICALLY inside the @kernel body — hiding them in an inlined helper
+# raises "@synchronize used outside kernel" on CPU (GPU backends inline through it fine, but CI runs
+# CPU). Dispatched from `_column_trsm!` per `b_is_identity(P)`. See DESIGN_TRSM.md.
 @kernel function _batched_column_oriented_forward_solve_pencil(bv, zv, @Const(A), @Const(B))
     @uniform begin
         BLKSIZE = @groupsize()[1]

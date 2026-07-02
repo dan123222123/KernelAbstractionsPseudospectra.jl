@@ -2,14 +2,12 @@ module KATRSM
 
 using Preferences
 
-# Complex division for the triangular/pencil solves. The default uses Base division
-# (`x / d`), which widens `Complex{Float16/Float32}` through `double` — the most
-# accurate option. FP64-less GPUs (most Intel iGPUs, Apple Metal) can't compile that
-# `double`; on those, set the `pdiv_accurate` preference to false
-# (`set_pdiv_accurate(false)`) so `_pdiv` keeps the divide in the input precision
-# (`x·conj(d)/abs2(d)`) — a few eps less accurate on these well-conditioned
-# Schur-triangular systems, but the only form FP64-less hardware can run. Float64 is
-# unaffected. Baked at load time, so changing it recompiles the kernels (restart Julia).
+# Complex division for the triangular/pencil solves. Default (`x / d`) widens
+# `Complex{Float16/Float32}` through `double` for accuracy. FP64-less GPUs (most Intel
+# iGPUs, Apple Metal) can't compile that widening — set `pdiv_accurate` to false
+# (`set_pdiv_accurate(false)`) so `_pdiv` divides in the input precision instead
+# (`x·conj(d)/abs2(d)`), slightly less accurate but the only form such hardware can run.
+# Float64 is unaffected. Baked in at load time: changing it requires restarting Julia.
 const PDIV_ACCURATE = @load_preference("pdiv_accurate", true)
 
 if PDIV_ACCURATE
@@ -22,12 +20,11 @@ end
 """
     set_pdiv_accurate(flag::Bool)
 
-Choose how the KATRSM triangular solves divide in Float16/Float32. `true` (default)
-uses Base's division (widens through `double`; most accurate). `false` keeps the
-divide in the input precision (`x·conj(d)/abs2(d)`) — slightly less accurate, but the
+Choose how KATRSM's triangular solves divide in Float16/Float32. `true` (default) uses
+Base division (most accurate). `false` divides in the input precision instead — the
 only form FP64-less GPUs (Intel iGPUs, Apple Metal) can compile. Writes the
-`pdiv_accurate` preference to LocalPreferences.toml and triggers recompilation, so the
-change takes effect after restarting Julia. (Float64 results are identical either way.)
+`pdiv_accurate` preference to LocalPreferences.toml; restart Julia for it to take
+effect. Float64 results are identical either way.
 """
 function set_pdiv_accurate(flag::Bool)
     @set_preferences!("pdiv_accurate" => flag)

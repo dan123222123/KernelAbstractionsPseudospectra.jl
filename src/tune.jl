@@ -1,23 +1,10 @@
-# Per-device tuning of the two tiled-solve occupancy knobs, JOINTLY: the trailing-tile column width
-# `TC` (the `Val{TC}` of the trailing kernels) and the warps-per-block count `W` (the `Val{W}`) — see
-# `tiled_tc` / `tiled_w` in src/ihlpsa_trsm.jl and the occupancy note in
-# src/KATRSM.jl/trsm_tiled_kernels.jl.
-#
-# Both control occupancy and they INTERACT: TC sets the 32×TC @localmem tile size (→ shared-mem-limited
-# resident blocks/SM), W sets warps/block (→ register-limited blocks, and W× the warps per resident
-# block). The end-to-end sweet spot depends on the element type's arithmetic intensity AND the device's
-# compute:bandwidth + register/shared-mem budgets, so it is best MEASURED. `tune_trsm_tc!` times the
-# full tiled trsm (`_tiled_trsm!`, which dominates ihlpsa) over the (TC, W) grid for each (element type,
-# eye/generic), persists the fastest pair via Preferences (keyed so `tiled_tc`/`tiled_w` pick them up),
-# and skips any (TC, W) whose kernel launch fails (e.g. W too large for the register file). Run once on
-# the target hardware:
+# Per-device joint tuning of the tiled solve's two occupancy knobs: the trailing-tile column width
+# `TC` and the warps-per-block count `W` (see `tiled_tc`/`tiled_w` in src/ihlpsa_trsm.jl; occupancy
+# rationale in DESIGN_TRSM.md). `tune_trsm_tc!` times the full tiled trsm over the (TC, W) grid per
+# (element type, eye/generic) and persists the fastest pair via Preferences. Run once per target device:
 #
 #     using KAPseudospectra, CUDA
 #     KAPseudospectra.tune_trsm_tc!(CUDABackend(), collect(CUDA.devices())[1])
-#
-# A timed probe needs no occupancy MODEL — it captures the tradeoff directly — so it is the accurate
-# per-device/per-type path on ANY shuffle-capable backend (CUDA/AMDGPU, and oneAPI/Metal with the
-# opt-in), regardless of whether `device_smem_per_sm` is overridden there.
 
 # Best-of-`reps` wall-clock seconds for the device closure `f` (one warm-up, then min over reps;
 # each timing includes a device synchronize so async GPU work is actually waited on).

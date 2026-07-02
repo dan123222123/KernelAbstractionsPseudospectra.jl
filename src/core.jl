@@ -7,10 +7,8 @@ struct MatrixPencil{T} <: AbstractMatrixPencil{T}
     B::AbstractMatrix{T}
 end
 
-# User-facing constructor: always returns a `SchurMatrixPencil` (a `StandardSchurMatrixPencil`
-# for B = I, a `GeneralizedSchurMatrixPencil` for B ≠ I) so the GPU trsm path (which dispatches
-# on `SchurMatrixPencil`) just works. Direct access to the raw, non-factored MatrixPencil struct
-# is still possible via MatrixPencil{T}(A, B).
+# User-facing constructor → a Schur-factored pencil (standard for B = I, generalized for B ≠ I) so
+# the GPU trsm path just works. The raw, non-factored struct is still reachable via MatrixPencil{T}(A, B).
 function MatrixPencil(A::AbstractMatrix{T}, B::Union{AbstractMatrix{T},UniformScaling}=I) where {T<:Complex}
     if B isa UniformScaling
         return MatrixPencil(schur(A))
@@ -19,16 +17,10 @@ function MatrixPencil(A::AbstractMatrix{T}, B::Union{AbstractMatrix{T},UniformSc
     return MatrixPencil(schur(A, B))
 end
 
-# Schur-factored pencils used by the GPU trsm path. ONE parametric struct with a compile-time `STD`
-# Bool tag (true ⇒ B = I standard; false ⇒ B ≠ I generalized). `b_is_identity`, the eye-vs-generic
-# kernel selection, the tiled B-tile skip and the adapt B/Bc handling all dispatch on `STD` (a
-# compile-time branch, not a runtime flag). `const` aliases keep the old `Standard…`/`Generalized…`
-# names. (`::SchurMatrixPencil` bare still matches any instance for dispatch.)
-#
-# Z is the right Schur transform: A_orig = Z * A * Z' (standard) or A_orig = Q * A * Z',
-# B_orig = Q * B * Z' (generalized). Used by ihlpsa to bring a user-supplied x₀ from the original-A
-# basis into the Schur basis so ihlpsa's Lanczos iterates match textbook Lanczos with the same x₀.
-# Ac/Bc are lazy conjugate-transpose views on the host (shared storage); see `adapt_structure` below.
+# Schur-factored pencil for the GPU trsm path. The compile-time `STD` tag (true ⇒ B = I standard,
+# false ⇒ B ≠ I generalized) drives kernel selection and the adapt below at compile time, not via a
+# runtime flag. Z is the right Schur transform (A_orig = Z·A·Z'), used by ihlpsa to bring x₀ into the
+# Schur basis. Ac/Bc are lazy conjugate-transpose views on the host, materialized on device below.
 struct SchurMatrixPencil{T, STD} <: AbstractMatrixPencil{T}
     A::AbstractMatrix{T}
     Ac::AbstractMatrix{T}
@@ -54,17 +46,9 @@ KernelAbstractions.get_backend(x::AbstractMatrixPencil) = get_backend(x.A)
 
 Adapt.@adapt_structure MatrixPencil
 
-# Adapting a Schur pencil to a device does two memory/perf things, branched on the compile-time `STD`:
-#  * Ac (and Bc for a generalized pencil) are lazy conjugate-transpose views (`F.T'`); the GPU forward
-#    solve reads them TRANSPOSED (column-strided) → uncoalesced, ~1.4–1.8× slower. We MATERIALIZE them
-#    as dense contiguous arrays (`Matrix(P.Ac)`) so the forward read is coalesced — values unchanged,
-#    ~free in device memory (`adapt` already copies each field; this just lays the bytes out for
-#    coalescing). The host struct keeps the lazy views (the CPU solve reads `P.A'`, never Ac/Bc).
-#  * For a STANDARD pencil B = Bc = I, and after the B=I "eye" kernels NO GPU kernel reads B/Bc, so
-#    `adapt` ships a tiny `Diagonal` identity (m elements, shared between B and Bc) instead of a dense
-#    m×m — cutting the standard pencil from 5·m² to ~3·m² per device. A generalized pencil's B/Bc are
-#    real data → stay dense (Bc materialized like Ac). The host build already uses a Diagonal identity
-#    (ctor above); `ℂsvdpsa!` takes `AbstractMatrix`, so the SVD oracle / CPU solve handle the Diagonal.
+# On device, materialize the lazy Ac/Bc conjugate-transpose views as dense arrays so the GPU forward
+# read is coalesced, and for a standard (B = I) pencil ship a Diagonal identity instead of a dense m×m
+# — no kernel reads B after the eye path. (The host keeps the lazy views; the CPU solve reads `P.A'`.)
 function Adapt.adapt_structure(to, P::SchurMatrixPencil{T, STD}) where {T, STD}
     A = adapt(to, P.A); Ac = adapt(to, Matrix(P.Ac)); Z = adapt(to, P.Z)
     if STD
@@ -82,7 +66,7 @@ end
 Checks the following:
 - the grid of shifts (zg) is not empty
 - A and B are of the same size (if B!=UniformScaling)
-- γ, δ are valid (γ, δ ≥ 0 and not both zero) -- see [`_validate_weights`](@ref)
+- γ, δ are valid (γ, δ ≥ 0 and not both zero)
 """
 function validate(zg, A::AbstractMatrix, B, γ=missing, δ=missing)
     @assert !isempty(zg)
@@ -97,15 +81,9 @@ function validate(zg, P::AbstractMatrixPencil, γ=missing, δ=missing)
     validate(zg, P.A, P.B, γ, δ)
 end
 
-"""
-    _validate_weights(γ, δ)
-
-Validate the (γ,δ) perturbation weights of the Frayssé et al. pseudospectrum
-(value `σ_min(zB − A)/(γ + δ|z|)`). The set is invariant to a common scaling of
-`(γ,δ)` (it only rescales `ε`), so any `γ, δ ≥ 0` not both zero is admissible —
-e.g. the literature's `(1,0)` (standard) and `(1,1)`. Shared by `ℂsvdpsa`,
-`ihlpsa`, and the adaptive driver so all paths accept the same inputs.
-"""
+# Validate the (γ,δ) perturbation weights (value `σ_min(zB − A)/(γ + δ|z|)`): γ, δ ≥ 0, not both
+# zero. The set only depends on (γ,δ) up to a common scale. Shared by ℂsvdpsa, ihlpsa, and the
+# adaptive driver so all paths accept the same inputs.
 function _validate_weights(γ, δ)
     @assert γ ≥ 0 && δ ≥ 0 "perturbation weights must be ≥ 0 (got γ=$γ, δ=$δ)"
     @assert γ + δ > 0 "perturbation weights γ, δ must not both be zero"

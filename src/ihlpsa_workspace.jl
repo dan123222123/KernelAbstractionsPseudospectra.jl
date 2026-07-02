@@ -17,33 +17,27 @@
 end
 
 # TODO polish
-# each thread will take one grid point and do all of its calculations independently
-# v is a length g vector of m-dimensional vectors
-# βₙ₊₁v is a g-dimensional vector
-# Qₙ₊₁v is a length g vector of m-dimensional vectors
+# One thread per grid point. v is a length-g vector of m-dim vectors; βₙ₊₁ is g-dim;
+# Qₙ₊₁ is a length-g vector of m-dim vectors.
 @kernel function _qₙnext(v, βₙ₊₁, Qₙ₊₁)
     I = @index(Global, Linear)
     g = length(v)
     m = length(v[1])
     if I <= g
-        # norm of v
         vnorm = zero(real(eltype(v[I])))
         for i = 1:m
             vnorm += real(conj(v[I][i]) * v[I][i])
         end
         vnorm = sqrt(vnorm)
-        # update qₙ₊₁
         for j = 1:m
             Qₙ₊₁[I, j] = v[I][j] / vnorm
         end
-        ## set βₙ₊₁
         βₙ₊₁[I] = vnorm
     end
 end
 
 # TODO polish
-# kernel for the Lanczos 3-term recurance + qₙnext
-# each thread block will handle a grid point
+# Fused Lanczos 3-term recurrence + qₙnext, one thread per grid point.
 @kernel function _ihl_ttr_qₙnext(βₙ₋₁, Qₙ₋₁, αₙ, Qₙ, v, βₙ₊₁)
     I = @index(Global, Linear)
     g = length(v)
@@ -59,7 +53,7 @@ end
         end
         for i = 1:m
             v[I][i] -= αₙ[I] * Qₙ[I, i]
-            Qₙ₋₁[I, i] = Qₙ[I, i] # gvecv
+            Qₙ₋₁[I, i] = Qₙ[I, i]
         end
         # qₙnext
         vnorm = zero(real(eltype(v[I])))
@@ -69,19 +63,17 @@ end
         vnorm = sqrt(vnorm)
         for j = 1:m
             Qₙ[I, j] = v[I][j] / vnorm
-            v[I][j] = Qₙ[I, j] # gvecv no2
+            v[I][j] = Qₙ[I, j]
         end
         βₙ₊₁[I] = vnorm
     end
 end
 
-# Gather rows `keepd` of a (g, m, k) source into a packed (nkeep, m, k) prefix:
-# dst[i,:,:] = src[keepd[i],:,:]. Used for the adaptive survivor gather of the Qv
-# workspace. We can't use a plain `src[keep,:,:]` fancy index: GPUArrays' first-axis
-# fancy indexing of a 3-D array is miscompiled on oneAPI (silently wrong rows + device
-# out-of-bounds, even through a 2-D reshape), so we do the row copy with this explicit
-# kernel — correct and on-device on every backend, like the other gathers (`[:, keep]`
-# on the last axis) which are fine.
+# Gather rows `keepd` of a (g, m, k) source into a packed (nkeep, m, k) prefix; used
+# for the adaptive survivor gather of the Qv workspace. Do NOT replace with a plain
+# `src[keep,:,:]` fancy index: GPUArrays' first-axis fancy indexing of a 3-D array is
+# miscompiled on oneAPI (silently wrong rows + device out-of-bounds, even through a
+# 2-D reshape). Last-axis gathers (`[:, keep]`) are unaffected and fine as fancy indexing.
 @kernel function _qv_gather!(dst, @Const(src), @Const(keepd))
     i, j, k = @index(Global, NTuple)
     @inbounds dst[i, j, k] = src[keepd[i], j, k]
@@ -106,15 +98,9 @@ function IHLworkspace(P::AbstractMatrixPencil{T}, maxbatch, x₀=missing) where 
         x = randn(T, m)
         x₀ = VectorOfSimilarVectors(repeat(x / norm(x), outer=(1, maxbatch)))
     elseif !(x₀ isa VectorOfSimilarVectors)
-        # Textbook Lanczos parity: the user provides x₀ in the original-A basis,
-        # but ihlpsa applies (zI - T_schur)^{-1}(zI - T_schur)^{-H} in the Schur
-        # basis. The transformation v_T = Z' * v_A maps a vector across — so
-        # Lanczos on the Schur side starting from Z' * x₀ produces the same Ritz
-        # values per iteration as textbook Lanczos on the original side starting
-        # from x₀. P.Z is the right Schur transform (= F.Z for both Schur and
-        # GeneralizedSchur ctors), or a Diagonal(ones) identity for raw direct
-        # construction. Random x₀ skips this branch and the identity case is a
-        # no-op multiply on a Diagonal of ones.
+        # User-supplied x₀ is in the original-A basis, but ihlpsa runs Lanczos in the
+        # Schur basis; Z'x₀ maps it across (P.Z = identity for a raw, non-Schur pencil,
+        # making this a no-op) so Ritz values match textbook Lanczos on x₀ in A's basis.
         x₀ = P.Z' * x₀
         x₀ = VectorOfSimilarVectors(repeat(x₀ / norm(x₀), outer=(1, maxbatch)))
     end
@@ -133,5 +119,4 @@ function Adapt.adapt_structure(to, ihl::IHLworkspace)
     IHLworkspace{eltype(zv),get_backend(P)}(ihl.maxbatch, zv, P, x₀, Qv, v)
 end
 
-# extend get_backend for IHLworkspace
 KernelAbstractions.get_backend(x::IHLworkspace{T,B}) where {T,B} = B

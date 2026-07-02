@@ -8,11 +8,9 @@ end
 
 function batched_forward_solve_pencil(bV, zv, A, B)
     @assert length(bV) == length(zv)
-    # check that A,B are the same dimension and square
     @assert size(A) == size(B)
     m, n = size(A)
     @assert m == n
-    # launch
     xV = deepcopy(bV)
     batched_forward_solve_pencil!(xV, zv, A, B)
     synchronize(get_backend(A))
@@ -26,11 +24,9 @@ end
 
 function batched_backward_solve_pencil(bV, zv, A, B)
     @assert length(bV) == length(zv)
-    # check that A,B are the same dimension and square
     @assert size(A) == size(B)
     m, n = size(A)
     @assert m == n
-    # launch
     xV = deepcopy(bV)
     batched_backward_solve_pencil!(xV, zv, A, B)
     synchronize(get_backend(A))
