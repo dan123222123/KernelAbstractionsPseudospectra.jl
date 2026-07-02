@@ -40,8 +40,7 @@ using KAPseudospectra: findmaxbatchihl, _device_column_partition
     @testset "long-aspect grid" begin
         A = randn(ComplexF64, 8, 8)
         P = MatrixPencil(A)
-        # nx=4, ny=32. ihlpsa returns permutedims(result), so output shape is
-        # (ny, nx) = (32, 4).
+        # nx=4, ny=32; ihlpsa permutedims the result, so output shape is (ny, nx) = (32, 4).
         gx, gy, zg = qgrid(ComplexF64, (-1.0, 1.0), (-1.0, 1.0), (4, 32))
         s = ihlpsa(CPU(), zg, P, 3)
         @test size(s) == (32, 4)
@@ -69,14 +68,12 @@ end
 end
 
 @testset "_device_column_partition invariants" begin
-    # The multi-device fan-out (`_ihlpsa_fanout`) zips blocks against devices, so
-    # the partition must always yield exactly min(ndev, ncols) balanced blocks that
-    # cover 1:ncols exactly once. Default is round-robin (strided) so spatially
-    # clustered hard points spread across devices; KAPSEUDO_STRIDED=0 gives the
-    # legacy contiguous bands. Both modes satisfy the same coverage/balance
-    # invariants (host-side regression tests — there is no GPU CI). The old
-    # ceil-based Iterators.partition could yield fewer blocks than devices (e.g.
-    # 9 cols / 4 devs → 3 blocks) and BoundsError the device loop.
+    # `_ihlpsa_fanout` zips blocks against devices, so the partition must always yield exactly
+    # min(ndev, ncols) balanced blocks covering 1:ncols exactly once. Default is round-robin
+    # (strided) so clustered hard points spread across devices; KAPSEUDO_STRIDED=0 gives legacy
+    # contiguous bands. Both modes must satisfy the invariants (host-side — there is no GPU CI).
+    # Guards the old ceil-based Iterators.partition, which could yield fewer blocks than devices
+    # (e.g. 9 cols / 4 devs → 3 blocks) and BoundsError the device loop.
     for stride in ("1", "0"), ncols in 1:20, ndev in 1:6
         blocks = withenv(() -> _device_column_partition(ncols, ndev),
                          "KAPSEUDO_STRIDED" => stride)

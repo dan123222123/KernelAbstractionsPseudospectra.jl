@@ -4,8 +4,8 @@
 #
 #  1. test_multifloats_accuracy() — the inverse-Lanczos ihlpsa at Float64x2 must track an
 #     INDEPENDENT high-precision oracle (BigFloat dense SVD via ℂsvdpsa, ~77 digits) better than
-#     plain Float64 does. Migrated from examples/ihlpsa_multifloats_accuracy.jl (now a real test).
-#     CPU-runnable (the extended-precision path goes through the shuffle-free column solve).
+#     plain Float64 does. CPU-runnable (the extended-precision path goes through the shuffle-free
+#     column solve).
 #
 #  2. test_multifloats_tiled_shuffle(backend) — GPU-only (where warp_trsm_safe): the per-limb
 #     `_trsm_shfl` override (MultiFloatsPseudospectra) must make the tiled panel solve BITWISE-match

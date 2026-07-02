@@ -2,7 +2,7 @@ using LinearAlgebra
 using GridArrays
 using MAT
 
-const global tdir = (@__DIR__) * "/"
+const tdir = (@__DIR__) * "/"
 
 # read psa matfile and compute eigtool grid
 function readvars(fname)

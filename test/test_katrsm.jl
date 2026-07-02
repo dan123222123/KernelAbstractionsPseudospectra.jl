@@ -1,26 +1,15 @@
-# Correctness tests for KATRSM triangular-solve kernels.
+# Correctness tests for KATRSM triangular-solve kernels, checked against the LAPACK
+# reference (`LowerTriangular(L) \ b` / `UpperTriangular(U) \ b`, dispatching to trtrs).
+# Pencil variants are checked against `LowerTriangular(z*B - A) \ b` / `UpperTriangular(z*B - A) \ b`.
 #
-# Each algorithmic variant in KATRSM is checked against the LAPACK reference
-# obtained by solving with `LowerTriangular(L) \ b` / `UpperTriangular(U) \ b`
-# (which dispatch to LAPACK trtrs). Pencil variants are checked against
-# `LowerTriangular(z*B - A) \ b` / `UpperTriangular(z*B - A) \ b`.
+# "KATRSM core (CPU host functions)" always runs on include and exercises the pure-Julia
+# host loops in trsm_pencil_core.jl (CPU-only by definition, no KernelAbstractions dispatch).
+# test_katrsm_kernels(backend) exercises every KA kernel/wrapper KATRSM exposes; runtests.jl
+# calls it for CPU() and for each available GPU backend.
 #
-# Layout
-# ------
-#  * "KATRSM core (CPU host functions)" testset — always runs on include.
-#    Exercises the pure-Julia host loops in trsm_pencil_core.jl
-#    (forward_solve_pencil!, backward_solve_pencil!) — these don't dispatch
-#    through KernelAbstractions and are CPU-only by definition.
-#  * test_katrsm_kernels(backend) — a function over a KernelAbstractions
-#    backend. Exercises every KA kernel and wrapper KATRSM exposes (naive
-#    batched, column-oriented batched) using device-resident inputs.
-#    runtests.jl calls this for CPU() unconditionally and for each available
-#    GPU backend.
-#
-# All tolerances are 32 * eps(T): the test matrices are diagonally dominant
-# with cond(M) = O(1) and pencil shifts are biased so cond(z*B - A) = O(1)
-# too, so a backward-stable solve must agree with LAPACK to a small constant
-# multiple of eps(T) regardless of backend.
+# All tolerances are 32 * eps(T): the test matrices are diagonally dominant with cond(M) =
+# O(1), and pencil shifts are biased so cond(z*B - A) = O(1) too, so a backward-stable solve
+# must agree with LAPACK to a small constant multiple of eps(T) regardless of backend.
 
 using Test, KAPseudospectra, KernelAbstractions, LinearAlgebra
 using ArraysOfArrays
@@ -59,7 +48,6 @@ _to(backend, x) = adapt(KAPseudospectra.get_bgarray(backend), x)
 # Pull device array(s) back to host for comparison.
 _from(x) = adapt(Array, x)
 
-# CPU-only host-function tests. These don't go through KernelAbstractions.
 @testset "KATRSM core (CPU host functions)" begin
     Random.seed!(0xACE5)
 
@@ -83,8 +71,7 @@ _from(x) = adapt(Array, x)
     end
 end
 
-# Backend-parameterized KA kernel tests. Called once per available backend
-# from runtests.jl.
+# Backend-parameterized KA kernel tests; called once per available backend from runtests.jl.
 function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
     @testset "KATRSM kernels -- $(backend)" begin
         Random.seed!(0xACE5)
@@ -99,7 +86,6 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
                 zv = T(2) .+ T(0.3) * randn(T, g)
                 b0_mat = reduce(hcat, [randn(T, m) for _ = 1:g])
 
-                # Move to backend
                 bv_dev = VectorOfSimilarVectors(_to(backend, copy(b0_mat)))
                 Au_d = _to(backend, Au); Bu_d = _to(backend, Bu)
                 Al_d = _to(backend, Al); Bl_d = _to(backend, Bl)
@@ -158,7 +144,7 @@ function test_katrsm_kernels(backend; types=(ComplexF32, ComplexF64))
         @testset "batched B=I eye kernels (column)" begin
             # For a standard pencil (B = I) the eye column solve drops the B read: M = zI − A,
             # so the pivot is (z − A[j,j]) and off-diagonal updates are (−A[i,j]). They must agree
-            # with LAPACK on M = zI − {L,U} AND with the generic kernels run with B = the materialized
+            # with LAPACK on M = zI − {L,U} and with the generic kernels run with B = the materialized
             # identity, to round-off (they compute the shorter z−A / −A expressions, so NVPTX FMA
             # contraction can differ by ~1 ULP — not bit-for-bit). Column eye runs on any backend.
             # This is the path `_column_trsm!` takes for a StandardSchurMatrixPencil.
@@ -205,12 +191,11 @@ end
 # End-to-end consistency of the GPU `tiled` trsm strategy (KAPSEUDO_TRSM=tiled): it must match the
 # shuffle-free `column` baseline to element-type tolerance, across sizes incl. partial last panels
 # (m not a multiple of 32). `tiled` self-gates to `column` where the shuffle/tiles aren't usable, so
-# it's safe to request on any backend (on a shuffle-unsafe backend it simply IS column here).
+# it's safe to request on any backend (on a shuffle-unsafe backend it simply is column here).
 function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
     KernelAbstractions.isgpu(backend) || return
     @testset "trsm strategy consistency -- $(backend)" begin
-        # Run the `tiled` strategy on pencil `P` and require it to match the shuffle-free `column`
-        # baseline to element-type tolerance.
+        # Run `tiled` on pencil `P` and require it to match the `column` baseline to tolerance.
         function check(P, T)
             _, _, zg = qgrid(T, (-3, 3), (-3, 3), (40, 40))
             tol = real(T) === Float32 ? 1e-4 : 1e-10
@@ -226,7 +211,7 @@ function test_trsm_strategies(backend; types=(ComplexF32, ComplexF64))
 
         for T in types
             # Standard (B=I) pencil. Sizes span power-of-two panels and partial last panels (m not a
-            # multiple of 32), AND small m < 32 (the tiled panel solve is intrinsically 32-wide and
+            # multiple of 32), and small m < 32 (the tiled panel solve is intrinsically 32-wide and
             # masks lanes past a partial last panel — exercised here end-to-end via `tiled`).
             # 64/256 were folded in from the former bench/tiled_check.jl.
             for m in (8, 16, 31, 32, 64, 100, 128, 256, 300)

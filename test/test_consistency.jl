@@ -11,11 +11,9 @@
 using Test, KAPseudospectra, KernelAbstractions, LinearAlgebra
 using Random
 
-# Use a non-default explicit x₀ so cross-backend comparisons can match
-# bit-equivalent (modulo floating-point accumulation order). This is exactly the
-# deterministic seeded start vector the adaptive driver builds internally, so we
-# reuse the package's routine (un-exported) instead of duplicating it — the test
-# x₀ and the driver's default x₀ then can't drift apart.
+# Explicit x₀ so cross-backend comparisons can match modulo floating-point
+# accumulation order. This is the adaptive driver's internal deterministic seeded
+# start vector, reused (un-exported) so the test x₀ can't drift from the driver's default.
 const _seeded_x₀ = KAPseudospectra._adaptive_x₀
 
 @testset "ihlpsa vs ℂsvdpsa" begin
@@ -61,7 +59,7 @@ end
 end
 
 @testset "ihlpsa adaptive vs ℂsvdpsa" begin
-    # Adaptive (per-point hybrid) driver: must match the dense SVD oracle AND the
+    # Adaptive (per-point hybrid) driver: must match the dense SVD oracle and the
     # fixed-nit control (same algorithm, same x₀, run to the cap), and must stop
     # before the iteration cap on an easy grid.
     Random.seed!(0xAD0F)
@@ -185,13 +183,12 @@ function test_adaptive_backend(backend; types=(ComplexF32, ComplexF64))
             m = 32
             A = randn(T, m, m)
             P = MatrixPencil(A)
-            # A deliberately LARGER grid (40x40, not a token 16x16): the on-device
+            # A deliberately larger grid (40x40, not a token 16x16): the on-device
             # survivor gather runs once per retirement round, and a too-small grid
             # retires in a couple of rounds whose index-sets can miss a backend's
             # indexing bugs. oneAPI in particular miscompiles a first-axis fancy
             # index on the 3-D Qv backing — latent at 16x16, exposed here — which
-            # the gather kernel (`_qv_gather!`) fixes. Keep this grid non-trivial so
-            # the test actually guards that path across many gather rounds.
+            # `_qv_gather!` fixes.
             gx, gy, zg = qgrid(T, (-1.0, 1.0), (-1.0, 1.0), (40, 40))
 
             x₀ = _seeded_x₀(T, m, 0xACED)
