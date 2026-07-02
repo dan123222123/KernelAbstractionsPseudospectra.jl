@@ -250,11 +250,19 @@ in the tiled trailing-update GEMM, accumulated over the iterations.
 
 ## Dependency note
 
-`KernelIntrinsics.jl` (the portable warp shuffle) pins CUDA to 5.9–5.11, which can
-make a single environment that loads *all* GPU backends (CUDA + AMDGPU + Metal +
-oneAPI together, as the bench Project does) unsatisfiable. Resolve per-backend, or
-revisit whether the shuffle should be hand-rolled per backend, before widening the
-support matrix.
+`KernelIntrinsics.jl` (the portable warp shuffle) caps CUDA at `< 6.0` through its own
+`[compat]` (`CUDA = "5.9"`, i.e. `[5.9, 6.0)` — 5.9–5.11 in practice). That ceiling is KI's,
+not ours: we pin only `KernelIntrinsics = "0.1.7"` (`[0.1.7, 0.2)` — the 0.1.7 floor is the
+first release with a working `@shfl`/`Idx`; 0.1.8 is the current newest and that range admits
+it).
+
+KI 0.1.8 does *not* force the backends apart: its `[compat]` is `CUDA = "5.9"`,
+`AMDGPU = "1"`, `Metal = "1"`, so as far as KI is concerned CUDA 5.9–5.11, AMDGPU 1 and Metal 1
+are mutually compatible in one environment. (oneAPI is the exception: KI ships its oneAPI
+`@shfl` as a stub, so only the shuffle-free `column` path runs on Intel — see
+`ext/oneAPIPseudospectra.jl`.) The one real ceiling is CUDA `< 6.0`: if you need CUDA ≥ 6.0,
+KI's cap is the blocker, and the fix is a newer KI (none is published beyond 0.1.8) or
+hand-rolling the shuffle per backend before widening the support matrix.
 
 ## Open items
 

@@ -2,12 +2,10 @@ module KAPseudospectra
 
 using Preferences
 
-# Triangular-solve strategy for the GPU ihlpsa inner solve — a LOCAL PREFERENCE
-# (LocalPreferences.toml via Preferences.jl), with KAPSEUDO_TRSM as a no-recompile
-# runtime override. `column` is the default, always-correct baseline; `tiled` and
-# `tiled-gemm` are opt-in fast paths that self-gate back to `column` wherever they
-# aren't usable on the current backend+type. See DESIGN_TRSM.md for the full
-# strategy comparison and routing rules.
+# Triangular-solve strategy for the GPU ihlpsa inner solve — a local preference
+# (LocalPreferences.toml), with KAPSEUDO_TRSM as a no-recompile runtime override.
+# `column` is the always-correct default; `tiled`/`tiled-gemm` self-gate back to it
+# where unusable. See DESIGN_TRSM.md for the strategy comparison and routing rules.
 const _VALID_TRSM = ("column", "tiled", "tiled-gemm")
 
 function trsm_strategy()
@@ -26,13 +24,11 @@ end
 export set_trsm_strategy!
 
 # ─── opt-in GPU-kernel precompilation + on-disk caching ──────────────────────────────
-# The tiled GPU triangular-solve kernels (warp-shuffle panel solve + shared-memory trailing
-# update) have a non-trivial first-call compile cost. On Julia versions that serialize foreign
-# (GPUCompiler) CodeInstances into pkgimages (JuliaLang/julia#60747, milestone 1.13), exercising
-# them in the GPU precompile workload together with GPUCompiler's on-disk cache makes that
-# compile persist ACROSS sessions, eliminating their TTFP. Off by default: it lengthens
-# precompilation, and the cross-session payoff needs the #60747 fix (on older Julia the workload
-# still runs but the GPU code isn't retained yet).
+# The tiled GPU triangular-solve kernels have a non-trivial first-call compile cost.
+# Exercising them in the precompile workload plus GPUCompiler's disk cache can make that
+# compile persist across sessions (needs JuliaLang/julia#60747, milestone 1.13; on older
+# Julia the workload still runs but the compiled code isn't retained). Off by default
+# since it lengthens precompilation.
 const PRECOMPILE_GPU_KERNELS = @load_preference("precompile_gpu_kernels", false)
 const _GPUCOMPILER_UUID = Base.UUID("61eb1bfa-7361-4325-ad38-22787b887f55")
 
@@ -40,12 +36,10 @@ const _GPUCOMPILER_UUID = Base.UUID("61eb1bfa-7361-4325-ad38-22787b887f55")
     enable_gpu_kernel_cache!(state=true)
 
 Opt into precompiling the tiled GPU triangular-solve kernels and caching their compiled code on
-disk, so their first-call compile is paid once (at package precompile) instead of on the first
-solve of every session. Sets the `precompile_gpu_kernels` preference and enables GPUCompiler's
-`disk_cache`; **restart Julia** to take effect (re-precompiles, slower once). Full cross-session
-persistence needs Julia ≥ the release containing JuliaLang/julia#60747 (milestone 1.13); on
-older Julia the workload still runs but the compiled GPU code is not retained across sessions
-yet (harmless — it just won't cut TTFP there).
+disk, so the first-call compile is paid once at package precompile instead of every session.
+Sets the `precompile_gpu_kernels` preference and GPUCompiler's `disk_cache`; **restart Julia**
+to take effect. Cross-session persistence needs Julia ≥ the release with JuliaLang/julia#60747
+(milestone 1.13); on older Julia this is harmless but doesn't cut first-use latency.
 """
 function enable_gpu_kernel_cache!(state::Bool=true)
     @set_preferences!("precompile_gpu_kernels" => state)
@@ -124,11 +118,25 @@ function qgrid(T, tx, ty, gp)
 end
 export qgrid
 
-# Shared precompile body for the GPU extensions. Builds a small problem for each
-# element type in `Ts` and exercises the fixed and adaptive `ihlpsa` paths (both the
-# B=I and a true B≠I pencil) on one device. Called from inside each extension's
-# `@compile_workload` so the backend-specialized method instances are traced and
-# cached. `LinearAlgebra` (for `schur`) is in module scope via `svdpsa.jl`.
+"""
+    psaplot(gx, gy, σ[, eigenvalues]; levels, kwargs...)
+    psaplot!(gx, gy, σ[, eigenvalues]; ...)
+
+Plot recipe for a pseudospectra field: contours of `log10.(σ)` over the grid `(gx, gy)` (as
+returned by [`qgrid`](@ref) and [`ihlpsa`](@ref)/[`ℂsvdpsa`](@ref)), on a `log₁₀ σ` colorbar and,
+if a fourth argument is given, the `eigenvalues` overlaid as diamonds. Pass `levels` and any Plots
+attribute (`size`, `line`, `seriestype=:contourf`, …) as keywords.
+
+Requires a plotting stack: the recipe lives in an extension that activates once `RecipesBase` (pulled
+in by `Plots`) is loaded. Example: `using Plots; psaplot(gx, gy, srg, eigvals(A); levels=-6:0)`.
+"""
+function psaplot end
+function psaplot! end
+export psaplot, psaplot!
+
+# Shared precompile body for the GPU extensions: exercises the fixed and adaptive `ihlpsa`
+# paths, for both a B=I and a true B≠I pencil, on one device, so each extension's
+# `@compile_workload` traces the backend-specialized method instances.
 function _precompile_ihlpsa(backend, dev, Ts)
     for T in Ts
         _, _, zg = qgrid(T, (-4, 4), (-4, 4), (100, 100))
@@ -143,12 +151,10 @@ function _precompile_ihlpsa(backend, dev, Ts)
     return nothing
 end
 
-# Opt-in (PRECOMPILE_GPU_KERNELS) extension of the GPU precompile workload: exercise the `tiled`
-# solve (the only fast-path strategy left — the register-warp tier and its per-R recompile were
-# removed, see DESIGN_TRSM.md) so its CodeInstances are created during precompilation. With
-# JuliaLang/julia#60747 + GPUCompiler's disk cache these persist across sessions. The launch is
-# guarded: a flaky precompile-worker GPU *execution* is tolerated — the kernel still *compiles*
-# (the CI is what we need cached), so a failure degrades gracefully instead of breaking precompile.
+# Opt-in (PRECOMPILE_GPU_KERNELS) extension of the GPU precompile workload: exercises the
+# `tiled` solve so its CodeInstances get created during precompilation. Guarded: a flaky
+# precompile-worker GPU *execution* is tolerated since the kernel still *compiles* (the
+# CodeInstance is what we need cached), so a failure degrades gracefully.
 function _precompile_gpu_kernels(backend, dev, Ts)
     try
         withenv("KAPSEUDO_TRSM" => "tiled") do

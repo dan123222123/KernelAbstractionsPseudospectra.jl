@@ -1,7 +1,7 @@
 name = "KAPseudospectra"
 uuid = "8b8afa22-3073-43c5-8823-151938199226"
-authors = ["Dan Folescu"]
 version = "0.1.0"
+authors = ["Dan Folescu"]
 
 [deps]
 Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
@@ -22,19 +22,19 @@ AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
 MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
+RecipesBase = "3cdcf5f2-1ef4-517c-9805-6587b60abb01"
 oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
 
 [extensions]
 AMDGPUPseudospectra = "AMDGPU"
 CUDAPseudospectra = "CUDA"
-MultiFloatsPseudospectra = "MultiFloats"
 MetalPseudospectra = "Metal"
+MultiFloatsPseudospectra = "MultiFloats"
+RecipesBasePseudospectra = "RecipesBase"
 oneAPIPseudospectra = "oneAPI"
 
 [compat]
-# KernelIntrinsics 0.1.x is the portable @shfl source; the 0.1.7 floor is the minimum with a
-# working @shfl/Idx on the supported backends. Kept on 0.1.x deliberately: it pins CUDA to
-# 5.9–5.11, and AMDGPU's current releases need KI 1.x — so a single env that loads *all* GPU
-# backends at once is unsatisfiable (resolve per-backend; see DESIGN_TRSM.md "Dependency note").
 KernelIntrinsics = "0.1.7"
 Preferences = "1"
+RecipesBase = "1"
+oneAPI = "2"
