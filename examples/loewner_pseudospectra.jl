@@ -6,29 +6,16 @@
 #   in Realization and Model Reduction of Dynamical Systems (2022),
 #   https://doi.org/10.1007/978-3-030-95157-3_4
 #
-# Loewner realization (Mayo–Antoulas) recovers a dynamical system's poles as the
-# eigenvalues of a matrix pencil z𝕃 − 𝕃ₛ built from tangential transfer-function
-# samples. HOW the interpolation points are chosen and split into "left" (μ) and
-# "right" (λ) sets controls how *sensitive* those recovered poles are to
-# perturbation — and pseudospectra of the pencil make that sensitivity visible.
+# SISO system (n = 2): E = I, A = [-1.1 1; 1 -1.1], B = [1; 0], C = [0 1],
+# with σ(A) = {-0.1, -2.1}. Four Loewner pencils are built from four
+# interpolation-point choices (paper Table 2); all recover the same
+# eigenvalues but with visibly different pseudospectra (paper Fig. 1).
 #
-# We take the paper's small SISO system (n = 2),
+# NOTE: the paper's eq. (14) uses B = [0;1] (H = the (2,2) entry of (sI−A)⁻¹),
+# but its Table 2 / Fig. 1 only reproduce with the off-diagonal entry, i.e.
+# B = [1;0] as used here — same poles {-0.1,-2.1}, different residues.
 #
-#     E = I,   A = [-1.1  1; 1  -1.1],   B = [1; 0],   C = [0  1],
-#
-# with σ(A) = {-0.1, -2.1}, and form four Loewner pencils from four different
-# interpolation-point choices (paper Table 2). All four recover the eigenvalues
-# exactly, yet their pseudospectra differ dramatically — the more remote the
-# interpolation points, the more sensitive the recovered poles (paper Fig. 1).
-#
-# NOTE: the paper's eq. (14) writes B = [0;1], C = [0 1], i.e. H(s) = the (2,2)
-# entry of (sI−A)⁻¹ = (s+1.1)/((s+1.1)²−1). But its Table 2 singular values (and
-# hence Fig. 1) only reproduce with the OFF-diagonal entry H(s) = 1/((s+1.1)²−1)
-# (here B = [1;0], C = [0 1]) — the two share the poles {-0.1,-2.1} but not the
-# residues. 
-#
-# For these tiny n = 2 pencils we use the standard dense O(n³) SVD routine
-# This script runs on CPU out of the box (see README.md).
+# Tiny n = 2 pencils: dense O(n³) SVD, runs on CPU out of the box (see README.md).
 using LinearAlgebra
 using KAPseudospectra
 ##
@@ -49,7 +36,6 @@ function loewner(λ, μ)
 end
 
 # four interpolation-point choices (paper Table 2): right points λ, left points μ.
-# As the points march away from σ(A) = {-0.1,-2.1}, the realization gets touchier.
 cases = [
     ("a", [0.0, 1.0],   [im, -im]),
     ("b", [0.25, 0.75], [2im, -2im]),
@@ -58,9 +44,7 @@ cases = [
 ]
 ##
 
-## compute σ_ε^{(1,1)}(𝕃ₛ, 𝕃) for each case
-# The paper plots the (γ,δ)=(1,1) pseudospectrum, whose ε-level function is
-# σ_min(z𝕃 − 𝕃ₛ)/(1 + |z|) — exactly `ℂsvdpsa(zg, P, 1, 1)`.
+## compute σ_ε^{(1,1)}(𝕃ₛ, 𝕃) for each case: σ_min(z𝕃 − 𝕃ₛ)/(1+|z|) = ℂsvdpsa(zg, P, 1, 1)
 g = 1000
 gx, gy, zg = qgrid(T, (-3.0, 1.0), (-1.5, 1.5), (g, g))
 
@@ -76,14 +60,11 @@ end
 ##
 
 ## reproduce paper Fig. 1 — a 2×2 grid of pseudospectra, log10 ε contours, with
-## the recovered eigenvalues overlaid. Tighter inner contours ⇒ touchier poles.
+## the recovered eigenvalues overlaid.
 using Plots                                      # GR backend (Plots' default)
 
-# The paper draws pseudospectra *boundaries* (line contours) and colours every
-# panel on ONE shared log10 ε scale (so a given colour means the same ε in all
-# four), with a single colorbar to the right of the whole figure. We mirror that:
-# one global level set spanning all four fields, every panel coloured with the
-# same `clims`, and the colorbar drawn once in a fifth layout slot.
+# Match the paper: line-contour boundaries, one shared log10 ε scale across all
+# four panels (a single `clims`), one colorbar drawn once in a fifth layout slot.
 fields = [log10.(r.psa) for r in results]
 finite_extrema(f) = extrema(x for x in f if isfinite(x))
 gmin = floor(minimum(first(finite_extrema(f)) for f in fields) / 0.5) * 0.5

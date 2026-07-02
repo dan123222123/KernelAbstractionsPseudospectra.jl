@@ -2,12 +2,10 @@
 #
 # Shows the *adaptive depth* form of `ihlpsa` (omit the positional `nit`): each
 # grid point runs inverse-Lanczos until its σ converges, retiring early instead
-# of lockstepping every point to a fixed depth. Run blocks interactively (VS
-# Code / Pluto-style `##` cells) or `julia --project=examples ihlpsa_adaptive.jl`.
+# of lockstepping every point to a fixed depth.
 #
-# Defaults to CPU(); uncomment a backend line below to run on a GPU. The examples
-# env is CPU-only, so add the backend you have first — see "Running on a GPU" in
-# examples/README.md (Option A adds it here; Option B uses a throwaway env).
+# Defaults to CPU(); uncomment a backend line below to run on a GPU (needs
+# adding that backend package first — see "Running on a GPU" in examples/README.md).
 using LinearAlgebra, MatrixDepot
 using KernelAbstractions
 using KAPseudospectra
@@ -28,9 +26,8 @@ wgs = 256
 ## problem — use ComplexF32 so this runs as-is on an FP64-less iGPU (Intel UHD).
 T = ComplexF32
 n = 16
-g = 1000
 A = MatrixDepot.parter(T, n)
-gx, gy, zg = qgrid(T, (-2, 5), (-4.5, 4.5), (g, g))
+gx, gy, zg = qgrid(T, (-2, 5), (-4.5, 4.5), (1000, 1000))
 P = MatrixPencil(schur(A))
 ##
 
@@ -40,10 +37,9 @@ srg = ihlpsa(backend, zg, P; wgs)
 ##
 
 ## 2) read the convergence depth two ways
-# (a) verbose=true logs the deepest depth reached
-ihlpsa(backend, zg, P; wgs, verbose=true)
-# (b) the un-exported driver returns (σ, nit_grid): nit_grid[i] is the depth at
-#     which grid point i retired — a same-shape map of per-point Lanczos cost.
+ihlpsa(backend, zg, P; wgs, verbose=true)   # (a) verbose=true logs the deepest depth reached
+# (b) the un-exported driver returns (σ, nit_grid): nit_grid[i] is the depth
+#     at which grid point i retired
 srg_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; wgs)
 @info "adaptive driver" deepest = maximum(nit_grid) shallowest = minimum(nit_grid) mean_depth = sum(nit_grid) / length(nit_grid)
 ##
@@ -61,23 +57,11 @@ srg_tight, nit_grid_tight = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; wgs
 @info "tighter rtol" deepest_default = maximum(nit_grid) deepest_tight = maximum(nit_grid_tight)
 ##
 
-## 5) plot — σ (left) vs per-point Lanczos depth (right), default tolerance on
-# top, tighter tolerance (rtol=1e-6) on the bottom. The σ panels should look
-# essentially identical; the depth panels show the extra iterations the tighter
-# tolerance buys — concentrated in the hard region near the spectrum, while easy
-# regions still retire shallow. Needs Plots from examples/Project.toml.
-using Plots, LaTeXStrings
+## 5) plot — σ (left) vs per-point Lanczos depth (right); top row default rtol, bottom row rtol=1e-6
+using Plots
 
-tv = -3:0.25:0
-tl = [L"10^{%$i}" for i in tv]
-
-# σ pseudospectra contour with the eigenvalues overlaid
-function σcontour(srg, title)
-    p = contour(gx, gy, log10.(srg); color=:darkrainbow, colorbar_ticks=(tv, tl),
-        levels=tv, line=(1, :solid), clabels=false, title=title)
-    scatter!(p, eigvals(A), markershape=:diamond, label="")
-    return p
-end
+# σ pseudospectra contour (eigenvalues overlaid) via the KAPseudospectra recipe
+σcontour(srg, title) = psaplot(gx, gy, srg, eigvals(A); levels=-3:0.25:0, title=title)
 # per-point adaptive Lanczos depth map
 depthmap(nit, title) = heatmap(gx, gy, nit; color=:viridis, title=title)
 

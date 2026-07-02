@@ -1,6 +1,6 @@
 ##
 using LinearAlgebra, MatrixDepot
-using Plots, LaTeXStrings   # GR backend (Plots' default — no extra deps)
+using Plots   # GR backend (Plots' default — no extra deps)
 ##
 
 ## choose your backend
@@ -13,38 +13,24 @@ backend = CPU()
 #using AMDGPU
 #backend = ROCBackend()
 #
-#using Metal             # Apple GPUs (Float32 only — Metal has no FP64)
+#using Metal             # Apple GPUs (Float32 only — no FP64)
 #backend = MetalBackend()
 #
 #using oneAPI            # Intel GPUs (Float32 only on FP64-less iGPUs)
 #backend = oneAPIBackend()
 using KAPseudospectra
-# workgroup size of the trsm kernels -- will bake this into the package extensions at some point TODO
-wgs = 256 # good for multi-threaded CPU and CUDA
-#wgs = 16 # good for AMDGPU
-#wgs = 32 # good for Intel (one subgroup); try 16 if slower
+# trsm kernel workgroup size: 256 for CPU/CUDA, 16 for AMDGPU, 32 for Intel (one subgroup)
 ##
 
 ##
 T = ComplexF32
-n = 16
-g = 300
-nit = 8
-A = MatrixDepot.parter(T, n)
-gx, gy, zg = qgrid(T, (-2, 5), (-4.5, 4.5), (g, g))
+A = MatrixDepot.parter(T, 16)
+gx, gy, zg = qgrid(T, (-2, 5), (-4.5, 4.5), (300, 300))
 P = MatrixPencil(schur(A))
-srg = ihlpsa(backend, zg, P, nit; wgs)
+srg = ihlpsa(backend, zg, P, 8; wgs=256)
 # Adaptive nit (omit the positional `nit`): retires each grid point at its own
-# converged depth. Returns σ just like the line above; pass `verbose=true` to log
-# the depth reached. Drop-in for the line above:
-#srg = ihlpsa(backend, zg, P; wgs)
+# converged depth. Pass `verbose=true` to log the depth reached. Drop-in:
+#srg = ihlpsa(backend, zg, P; wgs=256)
 #
-tv = -3:0.25:0
-tl = [L"10^{%$i}" for i in tv]
-levels = tv
-plt = plot(size=(1000, 1000))
-color = :darkrainbow
-clabels = false
-contour!(gx, gy, log10.(srg); color, colorbar_ticks=(tv, tl), levels, line=(1, :solid), clabels)
-scatter!(eigvals(A), markershape=:diamond, label="")
+psaplot(gx, gy, srg, eigvals(A); levels=-3:0.25:0, size=(1000, 1000))
 ##
