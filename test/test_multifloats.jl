@@ -15,7 +15,10 @@ using MultiFloats, GenericSchur, GenericLinearAlgebra
 using MatrixDepot                # chebspec test matrix
 
 # Local median (avoid a Statistics dependency for one call).
-_median(v) = (s = sort(vec(v)); n = length(s); iseven(n) ? (s[n÷2] + s[n÷2+1]) / 2 : s[(n+1)÷2])
+function _median(v)
+    (s = sort(vec(v)); n = length(s);
+        iseven(n) ? (s[n ÷ 2] + s[n ÷ 2 + 1]) / 2 : s[(n + 1) ÷ 2])
+end
 
 # (1) Accuracy vs a BigFloat oracle that shares neither algorithm (dense SVD vs inverse-Lanczos)
 # nor precision (MPFR ~77 digits vs Float64x2 ~32). Small grid: each oracle point is a full
@@ -26,13 +29,13 @@ function test_multifloats_accuracy()
         M, G, NIT = 12, 11, 12
         HP = Complex{Float64x2}
         Aref = MatrixDepot.chebspec(Float64, M)           # standard non-normal example
-        mat(::Type{T}) where {T<:Complex} = T.(Aref)
+        mat(::Type{T}) where {T <: Complex} = T.(Aref)
         eigs = eigvals(mat(ComplexF64))
         pad = 1.5
         region = ((minimum(real, eigs) - pad, maximum(real, eigs) + pad),
-                  (minimum(imag, eigs) - pad, maximum(imag, eigs) + pad))
-        grid(::Type{T}) where {T<:Complex} = qgrid(T, region[1], region[2], (G, G))[3]
-        run_ihl(::Type{T}) where {T<:Complex} = ihlpsa(CPU(), grid(T), MatrixPencil(schur(mat(T))), NIT)
+            (minimum(imag, eigs) - pad, maximum(imag, eigs) + pad))
+        grid(::Type{T}) where {T <: Complex} = qgrid(T, region[1], region[2], (G, G))[3]
+        run_ihl(::Type{T}) where {T <: Complex} = ihlpsa(CPU(), grid(T), MatrixPencil(schur(mat(T))), NIT)
 
         s_oracle = Float64.(ℂsvdpsa(grid(Complex{BigFloat}), mat(Complex{BigFloat})))
         s64 = run_ihl(ComplexF64)
@@ -60,15 +63,18 @@ end
 # kernels to column for m ≤ 32. Only runs where the warp shuffle is usable for wide types (CUDA /
 # AMDGPU / Metal-opt-in); skipped on CPU and stock oneAPI (its KernelIntrinsics @shfl is a TODO stub).
 function test_multifloats_tiled_shuffle(backend)
-    (KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, true)) || return
+    (KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, true)) ||
+        return
     @testset "MultiFloats per-limb tiled shuffle (bitwise vs column) -- $(backend)" begin
         T = Complex{Float64x2}
         for m in (16, 31, 32)            # single panel (≤32): the tiled panel solve is the full solve
             g = 4
             # Build well-conditioned triangular pencils by promoting Float64 randoms (MultiFloats
             # has no native randn); same dominant-diagonal trick as _rand_*tri keeps cond O(1).
-            up(s) = (Mr = s .* triu(randn(ComplexF64, m, m), 1); [Mr[i, i] = 1 + s * randn(ComplexF64) for i in 1:m]; T.(Mr))
-            lo(s) = (Mr = s .* tril(randn(ComplexF64, m, m), -1); [Mr[i, i] = 1 + s * randn(ComplexF64) for i in 1:m]; T.(Mr))
+            up(s) = (Mr = s .* triu(randn(ComplexF64, m, m), 1);
+                [Mr[i, i] = 1 + s * randn(ComplexF64) for i in 1:m]; T.(Mr))
+            lo(s) = (Mr = s .* tril(randn(ComplexF64, m, m), -1);
+                [Mr[i, i] = 1 + s * randn(ComplexF64) for i in 1:m]; T.(Mr))
             s = 1 / (2m + 1)
             Au, Bu, Al, Bl = up(s), up(s), lo(s), lo(s)
             zv = T.(2 .+ 0.3 .* randn(ComplexF64, g))
@@ -76,19 +82,23 @@ function test_multifloats_tiled_shuffle(backend)
 
             # forward (lower-tri): tiled panel (one panel = full solve) vs column, bitwise identical
             bt = VectorOfSimilarVectors(_to(backend, copy(b0)))
-            KATRSM._tiled_panel_forward(backend, 32, (32, g))(bt, _to(backend, zv), _to(backend, Al), _to(backend, Bl), 0, m)
+            KATRSM._tiled_panel_forward(backend, 32, (32, g))(
+                bt, _to(backend, zv), _to(backend, Al), _to(backend, Bl), 0, m)
             KernelAbstractions.synchronize(backend)
             bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
-            KATRSM._batched_column_oriented_forward_solve_pencil(backend, 32, (32, g))(bc, _to(backend, zv), _to(backend, Al), _to(backend, Bl))
+            KATRSM._batched_column_oriented_forward_solve_pencil(backend, 32, (32, g))(
+                bc, _to(backend, zv), _to(backend, Al), _to(backend, Bl))
             KernelAbstractions.synchronize(backend)
             @test _from(bt.data) == _from(bc.data)
 
             # backward (upper-tri): exercises the same per-limb _trsm_shfl in the descending panel solve
             bt = VectorOfSimilarVectors(_to(backend, copy(b0)))
-            KATRSM._tiled_panel_backward(backend, 32, (32, g))(bt, _to(backend, zv), _to(backend, Au), _to(backend, Bu), 0, m)
+            KATRSM._tiled_panel_backward(backend, 32, (32, g))(
+                bt, _to(backend, zv), _to(backend, Au), _to(backend, Bu), 0, m)
             KernelAbstractions.synchronize(backend)
             bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
-            KATRSM._batched_column_oriented_backward_solve_pencil(backend, 32, (32, g))(bc, _to(backend, zv), _to(backend, Au), _to(backend, Bu))
+            KATRSM._batched_column_oriented_backward_solve_pencil(backend, 32, (32, g))(
+                bc, _to(backend, zv), _to(backend, Au), _to(backend, Bu))
             KernelAbstractions.synchronize(backend)
             @test _from(bt.data) == _from(bc.data)
         end
@@ -101,14 +111,17 @@ end
 # tile-able and the full multi-panel tiled driver matches the column driver to round-off (m > 32 so
 # the trailing update actually runs). GPU + usable wide shuffle only.
 function test_multifloats_tiled_generic(backend)
-    (KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, true)) || return
+    (KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, true)) ||
+        return
     @testset "MultiFloats wide generic tiled (TC-aware fit, vs column) -- $(backend)" begin
         T = Complex{Float64x2}
         m, g = 64, 64
         s = 1 / (2m + 1)
-        up() = (Mr = s .* triu(randn(ComplexF64, m, m), 1); [Mr[i, i] = 1 + s * randn(ComplexF64) for i in 1:m]; T.(Mr))
+        up() = (Mr = s .* triu(randn(ComplexF64, m, m), 1);
+            [Mr[i, i] = 1 + s * randn(ComplexF64) for i in 1:m]; T.(Mr))
         A, B = up(), up()        # upper-tri ⇒ Ac=A', Bc=B' are lower-tri for the forward sweep
-        P = KAPseudospectra.SchurMatrixPencil{T, false}(A, collect(A'), B, collect(B'), Matrix{T}(I, m, m))
+        P = KAPseudospectra.SchurMatrixPencil{T, false}(
+            A, collect(A'), B, collect(B'), Matrix{T}(I, m, m))
         @test KAPseudospectra.tiled_tiles_fit(backend, P)            # narrow TC fits → tiled, not column
         @test KAPseudospectra.tiled_tc(backend, P) in KAPseudospectra._TC_CANDIDATES
         Pdev = _to(backend, P)
@@ -116,9 +129,11 @@ function test_multifloats_tiled_generic(backend)
         b0 = reduce(hcat, [T.(randn(ComplexF64, m)) for _ in 1:g])
         wgs = KAPseudospectra.default_wgs(backend, m)
         bt = VectorOfSimilarVectors(_to(backend, copy(b0)))
-        KAPseudospectra._tiled_trsm!(backend, bt, zv, Pdev, wgs); KernelAbstractions.synchronize(backend)
+        KAPseudospectra._tiled_trsm!(backend, bt, zv, Pdev, wgs);
+        KernelAbstractions.synchronize(backend)
         bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
-        KAPseudospectra._column_trsm!(backend, bc, zv, Pdev, wgs); KernelAbstractions.synchronize(backend)
+        KAPseudospectra._column_trsm!(backend, bc, zv, Pdev, wgs);
+        KernelAbstractions.synchronize(backend)
         xt, xc = _from(bt.data), _from(bc.data)
         @test maximum(Float64.(abs.(xt .- xc))) / maximum(Float64.(abs.(xc))) < 1e-25
     end

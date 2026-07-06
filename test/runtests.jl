@@ -1,9 +1,16 @@
 using Test, KAPseudospectra
+using Aqua
 
 if isempty(ARGS) || "all" in ARGS
     all_tests = true
 else
     all_tests = false
+end
+
+# Package hygiene: method ambiguities, unbound type params, compat coverage on every
+# dep, stale deps, type piracy.
+@testset "quality (Aqua)" begin
+    Aqua.test_all(KAPseudospectra)
 end
 
 include("eigtool_core.jl")
@@ -19,7 +26,7 @@ include("eigtool_core.jl")
     end
 end
 
-function test_ihlpsa_parter16(backend; types=(ComplexF32, ComplexF64))
+function test_ihlpsa_parter16(backend; types = (ComplexF32, ComplexF64))
     @testset "ihlpsa parter16 -- $(backend)" begin
         if ComplexF32 in types
             @testset "F32" begin
@@ -83,6 +90,8 @@ if "cuda" in ARGS
         test_trsm_strategies(CUDABackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(CUDABackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_generic(CUDABackend())
+    else
+        @warn "cuda tests requested but CUDA.functional() == false — GPU testsets skipped"
     end
 end
 
@@ -97,6 +106,8 @@ if "amdgpu" in ARGS
         test_trsm_strategies(ROCBackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(ROCBackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_generic(ROCBackend())
+    else
+        @warn "amdgpu tests requested but AMDGPU.functional() == false — GPU testsets skipped"
     end
 end
 
@@ -106,14 +117,17 @@ if "oneapi" in ARGS
     if oneAPI.functional()
         # Most Intel iGPUs lack native FP64; restrict to ComplexF32 there, and
         # auto-enable ComplexF64 on FP64-capable Intel GPUs (Arc, Data Center Max).
-        Ts = KAPseudospectra.supports_fp64(oneAPIBackend()) ? (ComplexF32, ComplexF64) : (ComplexF32,)
-        test_ihlpsa_parter16(oneAPIBackend(); types=Ts)
-        test_cross_backend(oneAPIBackend(); types=Ts)
-        test_adaptive_backend(oneAPIBackend(); types=Ts)
-        test_katrsm_kernels(oneAPIBackend(); types=Ts)
-        test_trsm_strategies(oneAPIBackend(); types=Ts)
+        Ts = KAPseudospectra.supports_fp64(oneAPIBackend()) ? (ComplexF32, ComplexF64) :
+             (ComplexF32,)
+        test_ihlpsa_parter16(oneAPIBackend(); types = Ts)
+        test_cross_backend(oneAPIBackend(); types = Ts)
+        test_adaptive_backend(oneAPIBackend(); types = Ts)
+        test_katrsm_kernels(oneAPIBackend(); types = Ts)
+        test_trsm_strategies(oneAPIBackend(); types = Ts)
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(oneAPIBackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_generic(oneAPIBackend())
+    else
+        @warn "oneapi tests requested but oneAPI.functional() == false — GPU testsets skipped"
     end
 end
 
@@ -121,13 +135,16 @@ end
 if "metal" in ARGS
     using Metal
     if Metal.functional()
-        Ts = KAPseudospectra.supports_fp64(MetalBackend()) ? (ComplexF32, ComplexF64) : (ComplexF32,)
-        test_ihlpsa_parter16(MetalBackend(); types=Ts)
-        test_cross_backend(MetalBackend(); types=Ts)
-        test_adaptive_backend(MetalBackend(); types=Ts)
-        test_katrsm_kernels(MetalBackend(); types=Ts)
-        test_trsm_strategies(MetalBackend(); types=Ts)
+        Ts = KAPseudospectra.supports_fp64(MetalBackend()) ? (ComplexF32, ComplexF64) :
+             (ComplexF32,)
+        test_ihlpsa_parter16(MetalBackend(); types = Ts)
+        test_cross_backend(MetalBackend(); types = Ts)
+        test_adaptive_backend(MetalBackend(); types = Ts)
+        test_katrsm_kernels(MetalBackend(); types = Ts)
+        test_trsm_strategies(MetalBackend(); types = Ts)
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(MetalBackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_generic(MetalBackend())
+    else
+        @warn "metal tests requested but Metal.functional() == false — GPU testsets skipped"
     end
 end

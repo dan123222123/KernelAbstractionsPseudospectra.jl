@@ -34,11 +34,11 @@ run_fixed(P, zg, flag) = withenv("KAPSEUDO_TRSM" => flag) do
     ihlpsa(backend, zg, P, NIT; devs)
 end
 run_adapt(P, zg, flag) = withenv("KAPSEUDO_TRSM" => flag) do
-    ihlpsa(backend, zg, P; nit_max=NIT, devs)
+    ihlpsa(backend, zg, P; nit_max = NIT, devs)
 end
 
 @printf("%-6s %-9s %-9s | %-9s %-9s  %-9s\n",
-        "m", "tiled", "column", "tiled-adp", "col-adp", "maxdiff")
+    "m", "tiled", "column", "tiled-adp", "col-adp", "maxdiff")
 for m in MS
     rng = Random.seed!(0xBEEF)
     P = MatrixPencil(schur(randn(rng, T, m, m)))
@@ -47,14 +47,15 @@ for m in MS
     # warm-up + correctness: the fixed-driver tiled solve must match the column baseline
     σc = run_fixed(P, zg, "column")
     σt = run_fixed(P, zg, "tiled")
-    run_adapt(P, zg, "tiled"); run_adapt(P, zg, "column")   # warm adaptive
+    run_adapt(P, zg, "tiled");
+    run_adapt(P, zg, "column")   # warm adaptive
     maxdiff = maximum(abs.(σt .- σc))
 
-    timed(f) = (reclaim_all(backend); bestof(f; reps=REPS))
-    tt  = timed(() -> run_fixed(P, zg, "tiled"))
-    tc  = timed(() -> run_fixed(P, zg, "column"))
+    timed(f) = (reclaim_all(backend); bestof(f; reps = REPS))
+    tt = timed(() -> run_fixed(P, zg, "tiled"))
+    tc = timed(() -> run_fixed(P, zg, "column"))
     tta = timed(() -> run_adapt(P, zg, "tiled"))
     tca = timed(() -> run_adapt(P, zg, "column"))
     @printf("%-6d %-9.4f %-9.4f | %-9.4f %-9.4f  %.2e\n",
-            m, tt, tc, tta, tca, maxdiff)
+        m, tt, tc, tta, tca, maxdiff)
 end

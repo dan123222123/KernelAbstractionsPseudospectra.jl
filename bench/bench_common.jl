@@ -19,7 +19,7 @@ function bench_logger(path)
 end
 
 # best-of-`reps` wall-clock seconds for `f` (assumes its kernels are already warmed up).
-function bestof(f; reps=2)
+function bestof(f; reps = 2)
     best = Inf
     for _ in 1:reps
         GC.gc()
@@ -42,12 +42,13 @@ function reclaim_all(backend)
     else
         KAPseudospectra.device_reclaim(backend)
     end
-    GC.gc(); GC.gc()
+    GC.gc();
+    GC.gc()
 end
 
 # Backend from `args[1]` (cuda|amdgpu|oneapi|metal|cpu), loading the matching GPU
 # package on demand; defaults to `default` when no arg is given.
-function select_backend(args=ARGS; default="cpu")
+function select_backend(args = ARGS; default = "cpu")
     which = isempty(args) ? default : lowercase(first(args))
     which == "cpu" && return CPU()
     if which == "cuda"

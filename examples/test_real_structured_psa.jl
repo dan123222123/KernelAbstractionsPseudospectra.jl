@@ -22,6 +22,6 @@ ssrg = ℝsvdpsa(zg, P)
 ##
 
 ## structured (solid) vs unstructured (dash-dot) σ_ε, eigenvalues overlaid
-psaplot(gx, gy, srg; levels=-10:1:-2, line=(1, :dashdot), size=(1000, 1000))
-psaplot!(gx, gy, ssrg, eigvals(A); levels=-10:1:-2, line=(1, :solid))
+psaplot(gx, gy, srg; levels = -10:1:-2, line = (1, :dashdot), size = (1000, 1000))
+psaplot!(gx, gy, ssrg, eigvals(A); levels = -10:1:-2, line = (1, :solid))
 ##

@@ -9,14 +9,14 @@ end
 # z·B term reduces to `z` on the diagonal, 0 off it), so `Val` dispatch (not a runtime `if`) means the
 # eye-specialized kernel's IR has no `B[...]` index — B may even be `nothing` there.
 @inline _piv_elem(::Val{false}, j, z, A, B) = @inline zBAij(j, j, z, A, B)
-@inline _piv_elem(::Val{true},  j, z, A, B) = z - A[j, j]
+@inline _piv_elem(::Val{true}, j, z, A, B) = z - A[j, j]
 @inline _offd_elem(::Val{false}, i, j, z, A, B) = @inline zBAij(i, j, z, A, B)
-@inline _offd_elem(::Val{true},  i, j, z, A, B) = -A[i, j]
+@inline _offd_elem(::Val{true}, i, j, z, A, B) = -A[i, j]
 
 function forward_solve_pencil!(b, z, A, B)
     m = size(A, 1)
-    for i = 1:m
-        for j = 1:i-1
+    for i in 1:m
+        for j in 1:(i - 1)
             b[i] -= b[j] * @inline zBAij(i, j, z, A, B)
         end
         b[i] = _pdiv(b[i], @inline zBAij(i, i, z, A, B))
@@ -25,8 +25,8 @@ end
 
 function backward_solve_pencil!(b, z, A, B)
     m = size(A, 1)
-    for i = m:-1:1
-        for j = i+1:m
+    for i in m:-1:1
+        for j in (i + 1):m
             b[i] -= b[j] * @inline zBAij(i, j, z, A, B)
         end
         b[i] = _pdiv(b[i], @inline zBAij(i, i, z, A, B))

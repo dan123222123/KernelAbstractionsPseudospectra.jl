@@ -1,4 +1,4 @@
-# Trsm strategy routing (`trsmIHL`) + the three solve drivers + the `lockstep_ihl!` inner Lanczos
+# Trsm strategy routing (`trsmIHL!`) + the three solve drivers + the `lockstep_ihl!` inner Lanczos
 # loop. The per-backend device hooks these consume — the device/array/memory interface plus
 # `warp_width` / `device_smem_bytes` / `warp_trsm_safe` — all live in src/backend.jl (overridden by
 # the GPU extensions). Split out of ihlpsa.jl; included after ihlpsa_workspace.jl.
@@ -6,7 +6,9 @@
 # Workgroup size for the column trsm kernel: the warp width (capped at m) on GPU, 1 on CPU. Override
 # via the `wgs` kwarg to ihlpsa. (`warp_width` is a per-backend hook in src/backend.jl.) The tiled
 # shuffle solve does not use this — its kernels are intrinsically 32-wide.
-default_wgs(backend, m) = KernelAbstractions.isgpu(backend) ? min(m, warp_width(backend)) : 1
+function default_wgs(backend, m)
+    KernelAbstractions.isgpu(backend) ? min(m, warp_width(backend)) : 1
+end
 
 # Whether the tiled solve can run for pencil `P` on this device. Each trailing tile is
 # 32 × TC × sizeof(ET); the generic (B≠I) kernels use two tiles (sA+sB), the B=I kernels one. TC is a
@@ -19,7 +21,7 @@ function tiled_tiles_fit(backend, P)
     return ntiles * tile <= device_smem_bytes(backend)
 end
 
-# Trailing-tile column width — the `Val{TC}` of the trailing kernels (src/KATRSM.jl/trsm_tiled_kernels.jl).
+# Trailing-tile column width — the `Val{TC}` of the trailing kernels (src/KATRSM/trsm_tiled_kernels.jl).
 # A shared-memory occupancy knob, decoupled from the 32-wide panel solve. See DESIGN_TRSM.md
 # "Trailing-tile width and occupancy" for the tradeoff.
 #
@@ -36,14 +38,15 @@ _tc_pref_key(T, eye::Bool) = "trsm_tc_$(T)_$(eye ? "eye" : "gen")"
 # can force a value per call); the probe empties this after persisting so a same-session tune takes
 # effect. Lock-guarded: the multi-GPU driver may resolve concurrently (idempotent; the lock just
 # protects the Dict). Keyed by type+eye, not device: assumes one GPU model per session.
-const _TC_CACHE = Dict{Tuple{DataType,Bool},Int}()
+const _TC_CACHE = Dict{Tuple{DataType, Bool}, Int}()
 const _TC_CACHE_LOCK = ReentrantLock()
 _clear_tc_cache!() = (@lock _TC_CACHE_LOCK empty!(_TC_CACHE); nothing)
 
 function tiled_tc(backend, P)
     if haskey(ENV, "KAPSEUDO_TRSM_TC")
         tc = parse(Int, ENV["KAPSEUDO_TRSM_TC"])
-        tc in _TC_CANDIDATES || error("KAPSEUDO_TRSM_TC must be one of $(_TC_CANDIDATES) (got $tc)")
+        tc in _TC_CANDIDATES ||
+            error("KAPSEUDO_TRSM_TC must be one of $(_TC_CANDIDATES) (got $tc)")
         return tc
     end
     @lock _TC_CACHE_LOCK get!(_TC_CACHE, (eltype(P.A), b_is_identity(P))) do
@@ -61,7 +64,7 @@ end
 const _W_CANDIDATES = (1, 2, 4, 8)
 const _DEFAULT_W = 4                        # zero-setup default; the tuner refines per device+type
 _w_pref_key(T, eye::Bool) = "trsm_w_$(T)_$(eye ? "eye" : "gen")"
-const _W_CACHE = Dict{Tuple{DataType,Bool},Int}()
+const _W_CACHE = Dict{Tuple{DataType, Bool}, Int}()
 const _W_CACHE_LOCK = ReentrantLock()
 _clear_w_cache!() = (@lock _W_CACHE_LOCK empty!(_W_CACHE); nothing)
 
@@ -96,9 +99,10 @@ function _auto_tiled_tc(backend, P)
     return best == 0 ? last(_TC_CANDIDATES) : best                               # nothing fit (shouldn't happen post tiled_tiles_fit) → narrowest
 end
 
-# Non-CPU solve step in lockstep_ihl! — routes to column / tiled / tiled-gemm per `trsm_strategy()`.
+# Non-CPU solve step in lockstep_ihl! — solves in place into bV, routing to column /
+# tiled / tiled-gemm per `trsm_strategy()`.
 # See DESIGN_TRSM.md "Choosing a solve" for the full routing rationale.
-function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
+function trsmIHL!(backend, bV, zv, P::SchurMatrixPencil; wgs = missing)
     wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
     # The default `column` needs no routing info, so return early — this keeps the per-iteration
     # device-property queries (`device_smem_bytes`, etc.) off the default path.
@@ -108,8 +112,8 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
     end
     # `tiled`/`tiled-gemm` need both a trailing-tile width that fits shared memory (`tiled_tiles_fit`)
     # and a usable warp shuffle (`warp_trsm_safe`); otherwise self-gate to `column`.
-    wide       = !(real(eltype(P.A)) <: Base.IEEEFloat)  # non-IEEE (MultiFloats/BigFloat)
-    tiled_ok   = tiled_tiles_fit(backend, P)             # tiled's @localmem tiles fit device shared memory
+    wide = !(real(eltype(P.A)) <: Base.IEEEFloat)  # non-IEEE (MultiFloats/BigFloat)
+    tiled_ok = tiled_tiles_fit(backend, P)             # tiled's @localmem tiles fit device shared memory
     shuffle_ok = warp_trsm_safe(backend, wide)           # tiled shuffle usable for this backend+type
     if shuffle_ok && tiled_ok
         # `tiled-gemm` replaces the trailing kernel with a vendor-BLAS `mul!` where `tiled_gemm_safe`;
@@ -122,10 +126,10 @@ function trsmIHL(backend, bV, zv, P::SchurMatrixPencil; wgs=missing)
 end
 
 # Tiled / blocked solve: right-looking panel sweep with shared-memory A,B-tile reuse across
-# the grid-point batch (see src/KATRSM.jl/trsm_tiled_kernels.jl). `z` is conjugated once for
+# the grid-point batch (see src/KATRSM/trsm_tiled_kernels.jl). `z` is conjugated once for
 # the forward (lower-tri Ac,Bc) sweep; the backward sweep uses (A,B,z) directly. `gt` (grid
 # points per trailing tile = the A,B reuse factor) is tunable via KAPSEUDO_TRSM_GT.
-function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool=false)
+function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool = false)
     m = size(P, 1)
     g = length(zv)
     ET = eltype(P.A)
@@ -149,9 +153,11 @@ function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool=false)
         koff = (k - 1) * 32
         plen = min(32, m - koff)
         if eye
-            @views _tiled_panel_forward_eye(backend, 32)(bV, zc, P.Ac, koff, plen; ndrange=(32, g))
+            @views _tiled_panel_forward_eye(backend, 32)(
+                bV, zc, P.Ac, koff, plen; ndrange = (32, g))
         else
-            @views _tiled_panel_forward(backend, 32)(bV, zc, P.Ac, P.Bc, koff, plen; ndrange=(32, g))
+            @views _tiled_panel_forward(backend, 32)(
+                bV, zc, P.Ac, P.Bc, koff, plen; ndrange = (32, g))
         end
         rbase = koff + plen
         ntrail = m - rbase
@@ -161,19 +167,27 @@ function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool=false)
             if eye && gemm
                 # trailing update as a GEMM (grid points = wide dim): b[rbase+1:m] += Ac[rbase+1:m, panel]·b[panel].
                 # Matches the eye kernel formula (z-independent off-diagonal for B=I); α=β=+1.
-                @views mul!(Xc[rbase+1:m, :], P.Ac[rbase+1:m, koff+1:koff+plen], Xc[koff+1:koff+plen, :], one(ET), one(ET))
+                @views mul!(
+                    Xc[(rbase + 1):m, :], P.Ac[(rbase + 1):m, (koff + 1):(koff + plen)],
+                    Xc[(koff + 1):(koff + plen), :], one(ET), one(ET))
             elseif gemm
                 # B≠I: b[rbase+1:m] += Ac·x[panel] − zc⊙(Bc·x[panel]). Scale the panel by zc first so the
                 # Bc GEMM yields zc⊙(Bc·x) directly (matches the generic forward kernel's z·Bc − Ac formula).
                 pan = (koff + 1):(koff + plen)
-                @views mul!(Xc[rbase+1:m, :], P.Ac[rbase+1:m, pan], Xc[pan, :], one(ET), one(ET))
+                @views mul!(Xc[(rbase + 1):m, :], P.Ac[(rbase + 1):m, pan],
+                    Xc[pan, :], one(ET), one(ET))
                 @views Xz[1:plen, :] .= Xc[pan, :] .* transpose(zc)
-                @views mul!(Xc[rbase+1:m, :], P.Bc[rbase+1:m, pan], Xz[1:plen, :], -one(ET), one(ET))
+                @views mul!(Xc[(rbase + 1):m, :], P.Bc[(rbase + 1):m, pan],
+                    Xz[1:plen, :], -one(ET), one(ET))
             elseif eye
                 # tiled kernel trailing update (multi-warp): W warps/block share one tile
-                @views _tiled_trailing_forward_eye(backend, 32 * W)(bV, P.Ac, koff, plen, rbase, m, gt, rtiles, vtc, vw; ndrange=32 * W * rtiles * ggrid)
+                @views _tiled_trailing_forward_eye(backend, 32 * W)(
+                    bV, P.Ac, koff, plen, rbase, m, gt, rtiles,
+                    vtc, vw; ndrange = 32 * W * rtiles * ggrid)
             else
-                @views _tiled_trailing_forward(backend, 32 * W)(bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt, rtiles, vtc, vw; ndrange=32 * W * rtiles * ggrid)
+                @views _tiled_trailing_forward(backend, 32 * W)(
+                    bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt,
+                    rtiles, vtc, vw; ndrange = 32 * W * rtiles * ggrid)
             end
         end
     end
@@ -182,26 +196,34 @@ function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool=false)
         koff = (k - 1) * 32
         plen = min(32, m - koff)
         if eye
-            @views _tiled_panel_backward_eye(backend, 32)(bV, zv, P.A, koff, plen; ndrange=(32, g))
+            @views _tiled_panel_backward_eye(backend, 32)(
+                bV, zv, P.A, koff, plen; ndrange = (32, g))
         else
-            @views _tiled_panel_backward(backend, 32)(bV, zv, P.A, P.B, koff, plen; ndrange=(32, g))
+            @views _tiled_panel_backward(backend, 32)(
+                bV, zv, P.A, P.B, koff, plen; ndrange = (32, g))
         end
         if koff > 0
             rtiles = cld(koff, 32)
             ggrid = cld(g, W * gt)
             if eye && gemm
                 # b[1:koff] += A[1:koff, panel]·b[panel], all grid points at once.
-                @views mul!(Xc[1:koff, :], P.A[1:koff, koff+1:koff+plen], Xc[koff+1:koff+plen, :], one(ET), one(ET))
+                @views mul!(Xc[1:koff, :], P.A[1:koff, (koff + 1):(koff + plen)],
+                    Xc[(koff + 1):(koff + plen), :], one(ET), one(ET))
             elseif gemm
                 # B≠I: b[1:koff] += A·x[panel] − z⊙(B·x[panel]).
                 pan = (koff + 1):(koff + plen)
                 @views mul!(Xc[1:koff, :], P.A[1:koff, pan], Xc[pan, :], one(ET), one(ET))
                 @views Xz[1:plen, :] .= Xc[pan, :] .* transpose(zv)
-                @views mul!(Xc[1:koff, :], P.B[1:koff, pan], Xz[1:plen, :], -one(ET), one(ET))
+                @views mul!(
+                    Xc[1:koff, :], P.B[1:koff, pan], Xz[1:plen, :], -one(ET), one(ET))
             elseif eye
-                @views _tiled_trailing_backward_eye(backend, 32 * W)(bV, P.A, koff, plen, gt, rtiles, vtc, vw; ndrange=32 * W * rtiles * ggrid)
+                @views _tiled_trailing_backward_eye(backend, 32 * W)(
+                    bV, P.A, koff, plen, gt, rtiles, vtc,
+                    vw; ndrange = 32 * W * rtiles * ggrid)
             else
-                @views _tiled_trailing_backward(backend, 32 * W)(bV, zv, P.A, P.B, koff, plen, gt, rtiles, vtc, vw; ndrange=32 * W * rtiles * ggrid)
+                @views _tiled_trailing_backward(backend, 32 * W)(
+                    bV, zv, P.A, P.B, koff, plen, gt, rtiles,
+                    vtc, vw; ndrange = 32 * W * rtiles * ggrid)
             end
         end
     end
@@ -209,20 +231,24 @@ end
 function _column_trsm!(backend, bV, zv, P, wgs)
     g = length(zv)
     if b_is_identity(P)   # B = I ⇒ skip the identity-B reads (the eye column kernels)
-        @views _batched_column_oriented_forward_solve_eye(backend, wgs)(bV, conj(zv), P.Ac; ndrange=(wgs, g))
-        @views _batched_column_oriented_backward_solve_eye(backend, wgs)(bV, zv, P.A; ndrange=(wgs, g))
+        @views _batched_column_oriented_forward_solve_eye(backend, wgs)(bV, conj(zv), P.Ac; ndrange = (
+            wgs, g))
+        @views _batched_column_oriented_backward_solve_eye(backend, wgs)(bV, zv, P.A; ndrange = (
+            wgs, g))
     else
-        @views _batched_column_oriented_forward_solve_pencil(backend, wgs)(bV, conj(zv), P.Ac, P.Bc; ndrange=(wgs, g))
-        @views _batched_column_oriented_backward_solve_pencil(backend, wgs)(bV, zv, P.A, P.B; ndrange=(wgs, g))
+        @views _batched_column_oriented_forward_solve_pencil(backend, wgs)(
+            bV, conj(zv), P.Ac, P.Bc; ndrange = (wgs, g))
+        @views _batched_column_oriented_backward_solve_pencil(backend, wgs)(
+            bV, zv, P.A, P.B; ndrange = (wgs, g))
     end
 end
 
 # cpu solve step in lockstep_ihl!. `wgs` is accepted and ignored so this CPU method
-# isn't shadowed by the generic (column-oriented) trsmIHL when called with `; wgs`.
-function trsmIHL(backend::CPU, bV, zv, P::SchurMatrixPencil; wgs=missing)
+# isn't shadowed by the generic (column-oriented) trsmIHL! when called with `; wgs`.
+function trsmIHL!(backend::CPU, bV, zv, P::SchurMatrixPencil; wgs = missing)
     g = length(zv)
-    _batched_forward_solve_pencil(backend)(bV, conj(zv), P.A', P.B', ndrange=g)
-    _batched_backward_solve_pencil(backend)(bV, zv, P.A, P.B, ndrange=g)
+    _batched_forward_solve_pencil(backend)(bV, conj(zv), P.A', P.B', ndrange = g)
+    _batched_backward_solve_pencil(backend)(bV, zv, P.A, P.B, ndrange = g)
 end
 
 # Runs Lanczos iterations `start:nit` on the first g grid points of the batch.
@@ -232,18 +258,20 @@ end
 # contract: same `ihl` instance (Qv/v/zv untouched since the previous call), the
 # same `α`/`β` arrays (sized for the deepest nit up front), the same g, and the
 # previous call ended at iteration start-1.
-function lockstep_ihl!(α, β, ihl::IHLworkspace, nit, g; wgs=missing, start::Integer=1)
+function lockstep_ihl!(α, β, ihl::IHLworkspace, nit, g; wgs = missing, start::Integer = 1)
     backend = get_backend(ihl)
     if start == 1
-        # `_qₙnext` writes Qv[2] (= q₁); `_v2v` then copies all m elements of
+        # `_qₙnext!` writes Qv[2] (= q₁); `_v2v!` then copies all m elements of
         # each q₁ into v[1:g] before the trsm loop runs. v[1:g] is fully
         # overwritten there, so no separate seed copy is needed.
-        _qₙnext(backend)(view(ihl.x₀, 1:g), view(β, 2, 1:g), view(ihl.Qv[2], 1:g, :), ndrange=g)
-        _v2v(backend)(view(ihl.Qv[2], 1:g, :), view(ihl.v, 1:g), ndrange=g)
+        _qₙnext!(backend)(view(ihl.Qv[2], 1:g, :), view(β, 2, 1:g), view(ihl.x₀, 1:g), ndrange = g)
+        _v2v!(backend)(view(ihl.v, 1:g), view(ihl.Qv[2], 1:g, :), ndrange = g)
     end
-    for n = start:nit
-        trsmIHL(backend, view(ihl.v, 1:g), view(ihl.zv, 1:g), ihl.P; wgs)
-        _ihl_ttr_qₙnext(backend)(view(β, n, 1:g), view(ihl.Qv[1], 1:g, :), view(α, n, 1:g), view(ihl.Qv[2], 1:g, :), view(ihl.v, 1:g), view(β, n + 1, 1:g), ndrange=g)
+    for n in start:nit
+        trsmIHL!(backend, view(ihl.v, 1:g), view(ihl.zv, 1:g), ihl.P; wgs)
+        _ihl_ttr_qₙnext!(backend)(
+            view(β, n, 1:g), view(ihl.Qv[1], 1:g, :), view(α, n, 1:g),
+            view(ihl.Qv[2], 1:g, :), view(ihl.v, 1:g), view(β, n + 1, 1:g), ndrange = g)
     end
     synchronize(backend)
 end

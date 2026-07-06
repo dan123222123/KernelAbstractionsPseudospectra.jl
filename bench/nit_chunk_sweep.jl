@@ -25,39 +25,42 @@
 # the same script runs on any backend — e.g. the Intel iGPU via oneAPI.
 #
 # Usage:  unset LD_LIBRARY_PATH; JULIA_NUM_THREADS=auto \
-#           julia --project=test bench/nit_chunk_sweep.jl oneapi
+#           julia --project=bench bench/nit_chunk_sweep.jl oneapi
 
 include(joinpath(@__DIR__, "bench_common.jl"))   # deps + shared helpers
 
-const BACKEND = select_backend(ARGS; default="cuda")
+const BACKEND = select_backend(ARGS; default = "cuda")
 
 const RESULTS = joinpath(@__DIR__, "results_adaptive")
 mkpath(RESULTS)
-const T       = ComplexF32
-const REGION  = ((-1, 3), (-3, 3))
+const T = ComplexF32
+const REGION = ((-1, 3), (-3, 3))
 # Discrete-GPU defaults; shrink for a weak iGPU via env, e.g.
 #   NSWEEP_G=120 NSWEEP_MS=32,64,128,256 julia ... bench/nit_chunk_sweep.jl oneapi
-const G       = parse(Int, get(ENV, "NSWEEP_G", "300"))    # G×G grid points
-const MS      = parse.(Int, split(get(ENV, "NSWEEP_MS", "64,128,256,512,1024"), ","))
-const CHUNKS  = [1, 2, 3, 4, 6, 8, 12, 16]                 # nit_chunk values to sweep
-const REPS    = parse(Int, get(ENV, "NSWEEP_REPS", "3"))
+const G = parse(Int, get(ENV, "NSWEEP_G", "300"))    # G×G grid points
+const MS = parse.(Int, split(get(ENV, "NSWEEP_MS", "64,128,256,512,1024"), ","))
+const CHUNKS = [1, 2, 3, 4, 6, 8, 12, 16]                 # nit_chunk values to sweep
+const REPS = parse(Int, get(ENV, "NSWEEP_REPS", "3"))
 
 logln, logio = bench_logger(joinpath(RESULTS, "nit_chunk_sweep_log.txt"))
 
 # Device count for the header; `reclaim_all` (from bench_common) resets the per-device
 # allocator state between configs so none inherits another's.
-const NDEV = KernelAbstractions.isgpu(BACKEND) ? length(collect(KAPseudospectra.devices(BACKEND))) : 1
+const NDEV = KernelAbstractions.isgpu(BACKEND) ?
+             length(collect(KAPseudospectra.devices(BACKEND))) : 1
 
 # best-of-REPS adaptive run at a given nit_chunk. The internal _ihlpsa_adaptive
 # driver returns (σ, nit_grid) — we report maximum(nit_grid) as the depth reached;
 # the public ihlpsa returns only σ. nit_max is held
 # fixed across the chunk sweep so only the chunking granularity varies.
 function best_adaptive(zg, P, nit_chunk, nit_max)
-    best = Inf; nu = 0
+    best = Inf;
+    nu = 0
     for _ in 1:REPS
-        reclaim_all(BACKEND); local ng = nothing
+        reclaim_all(BACKEND);
+        local ng = nothing
         t = @elapsed ((_, ng) = KAPseudospectra._ihlpsa_adaptive(
-            BACKEND, zg, P; nit_chunk=nit_chunk, nit_max=nit_max))
+            BACKEND, zg, P; nit_chunk = nit_chunk, nit_max = nit_max))
         t < best && (best = t; nu = maximum(ng))
     end
     (best, nu)
@@ -68,7 +71,7 @@ _, _, zg = qgrid(T, REGION[1], REGION[2], (G, G))
 logln("="^88)
 logln("ADAPTIVE nit_chunk crossover sweep (best-of-", REPS, ")   ", Dates.now())
 logln("Grcar  grid=", G, "x", G, " (", G*G, " pts)  T=", T, "  backend=", BACKEND,
-      "  ndev=", NDEV)
+    "  ndev=", NDEV)
 logln("="^88)
 
 csv = open(joinpath(RESULTS, "nit_chunk_sweep.csv"), "w")
@@ -79,15 +82,18 @@ for m in MS
     nit_max = 8 * ceil(Int, log2(m))        # = the ihlpsa default cap
     logln("")
     logln("[", clock(), "] m=", m, "  nit_max=", nit_max)
-    logln(@sprintf("  %-9s %-11s %-12s %-8s %-9s %-10s", "nit_chunk", "time(s)", "gridpts/s", "nit", "chunks", "rel(c=2)"))
+    logln(@sprintf("  %-9s %-11s %-12s %-8s %-9s %-10s",
+        "nit_chunk", "time(s)", "gridpts/s", "nit", "chunks", "rel(c=2)"))
 
     # warmup this m (compile + allocator) before timing
     best_adaptive(zg, P, 2, nit_max)
 
-    times = Dict{Int,Float64}(); nuses = Dict{Int,Int}()
+    times = Dict{Int, Float64}();
+    nuses = Dict{Int, Int}()
     for c in CHUNKS
         t, nu = best_adaptive(zg, P, c, nit_max)
-        times[c] = t; nuses[c] = nu
+        times[c] = t;
+        nuses[c] = nu
     end
     base = get(times, 2, minimum(values(times)))   # reference = default nit_chunk=2
     bestc = argmin(times)                            # winning chunk size for this m
@@ -96,9 +102,11 @@ for m in MS
         chunks = cld(nu, c)                          # ≈ host round-trips over a point's life
         rel = t / base                               # <1 means faster than the default
         flag = c == bestc ? "  <-- best" : ""
-        logln(@sprintf("  %-9d %-11.4f %-12.1f %-8d %-9d %-10.3f%s", c, t, (G*G)/t, nu, chunks, rel, flag))
-        println(csv, @sprintf("%d,%d,%d,%.6f,%.3f,%d,%d,%.4f,%d",
-            m, c, nit_max, t, (G*G)/t, nu, chunks, rel, c == bestc ? 1 : 0))
+        logln(@sprintf("  %-9d %-11.4f %-12.1f %-8d %-9d %-10.3f%s",
+            c, t, (G*G)/t, nu, chunks, rel, flag))
+        println(csv,
+            @sprintf("%d,%d,%d,%.6f,%.3f,%d,%d,%.4f,%d",
+                m, c, nit_max, t, (G*G)/t, nu, chunks, rel, c == bestc ? 1 : 0))
         flush(csv)
     end
     logln(@sprintf("  best nit_chunk for m=%d: %d  (%.1f%% vs default c=2)",

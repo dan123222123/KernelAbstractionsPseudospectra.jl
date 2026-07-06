@@ -20,5 +20,5 @@ Pluto.run(;
     host = get(ENV, "PSA_HOST", "127.0.0.1"),
     port = parse(Int, get(ENV, "PSA_PORT", "1234")),
     notebook = joinpath(@__DIR__, "pseudospectra_explorer.jl"),
-    launch_browser = false,
+    launch_browser = false
 )

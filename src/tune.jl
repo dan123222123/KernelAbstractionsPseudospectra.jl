@@ -9,7 +9,8 @@
 # Best-of-`reps` wall-clock seconds for the device closure `f` (one warm-up, then min over reps;
 # each timing includes a device synchronize so async GPU work is actually waited on).
 function _bestof_solve(f, backend, reps)
-    f(); KernelAbstractions.synchronize(backend)        # warm up (JIT compile + caches)
+    f();
+    KernelAbstractions.synchronize(backend)        # warm up (JIT compile + caches)
     best = Inf
     for _ in 1:reps
         GC.gc()
@@ -19,19 +20,20 @@ function _bestof_solve(f, backend, reps)
     return best
 end
 
-function tune_trsm_tc!(backend, dev=missing;
-        types=(ComplexF32, ComplexF64), m=512, g=2048, reps=3, persist=true)
+function tune_trsm_tc!(backend, dev = missing;
+        types = (ComplexF32, ComplexF64), m = 512, g = 2048, reps = 3, persist = true)
     KernelAbstractions.isgpu(backend) ||
         error("tune_trsm_tc! needs a GPU backend (the tiled solve is GPU-only); got $(backend).")
     ismissing(dev) || device!(backend, dev)
     bg = get_bgarray(backend)
-    chosen = Dict{String,Int}()
+    chosen = Dict{String, Int}()
     @info "tuning tiled trailing-tile width TC + warps-per-block W (joint)" backend types m g reps _TC_CANDIDATES _W_CANDIDATES
     for T in types, eye in (true, false)
+
         wide = !(real(T) <: Base.IEEEFloat)
         # representative pencil: standard (B=I) for eye, a diagonally-dominant generalized one otherwise
         Phost = eye ? MatrixPencil(schur(randn(T, m, m))) :
-                      MatrixPencil(randn(T, m, m), randn(T, m, m) + T(5) * I)
+                MatrixPencil(randn(T, m, m), randn(T, m, m) + T(5) * I)
         P = adapt(bg, Phost)
         if !(warp_trsm_safe(backend, wide) && tiled_tiles_fit(backend, P))
             @info "  skipping $(T) $(eye ? "eye" : "gen") — tiled not usable on this backend+type"
@@ -48,7 +50,8 @@ function tune_trsm_tc!(backend, dev=missing;
             for w in _W_CANDIDATES
                 flatview(bV) .= bV0
                 t = try
-                    withenv("KAPSEUDO_TRSM_TC" => string(tc), "KAPSEUDO_TRSM_W" => string(w)) do  # force this (TC,W)
+                    withenv("KAPSEUDO_TRSM_TC" => string(tc), "KAPSEUDO_TRSM_W" =>
+                        string(w)) do  # force this (TC,W)
                         _bestof_solve(() -> _tiled_trsm!(backend, bV, zv, P, wgs), backend, reps)
                     end
                 catch e   # e.g. W too large for the register file → launch failure; skip this combo
@@ -69,7 +72,8 @@ function tune_trsm_tc!(backend, dev=missing;
         end
     end
     if persist
-        _clear_tc_cache!(); _clear_w_cache!()   # so the just-persisted values are picked up this session
+        _clear_tc_cache!();
+        _clear_w_cache!()   # so the just-persisted values are picked up this session
         @info "persisted tiled TC widths + W (warps/block) to LocalPreferences.toml — `tiled_tc`/`tiled_w` " *
               "read them now (this session) and in future sessions; ENV overrides still win" chosen
     end

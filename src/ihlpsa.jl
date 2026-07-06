@@ -4,8 +4,17 @@ using ProgressBars
 using Random
 
 # triangular solves using kernel abstractions
-include("KATRSM.jl/KATRSM.jl")
-using .KATRSM
+include("KATRSM/KATRSM.jl")
+using .KATRSM: set_pdiv_accurate!,
+               _batched_forward_solve_pencil, _batched_backward_solve_pencil,
+               _batched_column_oriented_forward_solve_pencil,
+               _batched_column_oriented_backward_solve_pencil,
+               _batched_column_oriented_forward_solve_eye,
+               _batched_column_oriented_backward_solve_eye,
+               _tiled_panel_forward, _tiled_panel_backward,
+               _tiled_panel_forward_eye, _tiled_panel_backward_eye,
+               _tiled_trailing_forward, _tiled_trailing_backward,
+               _tiled_trailing_forward_eye, _tiled_trailing_backward_eye
 
 # Split out for readability (this file was the largest in src/):
 include("ihlpsa_workspace.jl")   # Lanczos KA kernels + IHLworkspace (device-resident state)
@@ -17,9 +26,12 @@ include("ihlpsa_trsm.jl")        # device hooks + trsm_strategy routing + lockst
 # LAPACK `eigmax`; extended-precision types use GenericLinearAlgebra's `eigen`, which stays reliable
 # near a true eigenvalue (σ_min → 0 ⇒ λmax spans a huge range) where `eigmax`'s square-root-free
 # algorithm is not.
-_eigmax_tridiag(d::AbstractVector{Float64}, e::AbstractVector{Float64}) = eigmax(SymTridiagonal(d, e))
-_eigmax_tridiag(d::AbstractVector{<:AbstractFloat}, e::AbstractVector{<:AbstractFloat}) =
+function _eigmax_tridiag(d::AbstractVector{Float64}, e::AbstractVector{Float64})
+    eigmax(SymTridiagonal(d, e))
+end
+function _eigmax_tridiag(d::AbstractVector{<:AbstractFloat}, e::AbstractVector{<:AbstractFloat})
     maximum(eigen(SymTridiagonal(d, e)).values)
+end
 
 # σ_min = 1/√(eigmax) of [(zB−A)(zB−A)ᴴ]⁻¹; the (γ,δ)-pseudospectral value is
 # σ_min/(γ+δ|z|) (Frayssé et al.). Work type `R = promote_type(Float64, real(eltype(α)))` floors
@@ -31,7 +43,7 @@ function ihlsrg!(sr, zv, γ, δ, α, β)
     R = promote_type(Float64, real(eltype(α)))
     Threads.@threads for i in eachindex(zv)
         αi = R.(real.(α[:, i]))
-        βi = R.(real.(β[2:end-1, i]))
+        βi = R.(real.(β[2:(end - 1), i]))
         if all(isfinite, αi) && all(isfinite, βi)
             sr[i] = 1 / ((γ + δ * abs(zv[i])) * sqrt(_eigmax_tridiag(αi, βi)))
         else
@@ -57,17 +69,17 @@ end
 # `_sdihlpsa_adaptive` (adaptive) are those workers. Neither is exported — the sole
 # public entry point is `ihlpsa`.
 function _sdihlpsa(
-    backend,
-    zg::AbstractArray{T,2},
-    P::AbstractMatrixPencil{T},
-    γ,
-    δ,
-    zpd::Integer,
-    nit::Integer=max(1, ceil(Integer, log2(size(P, 1)))),
-    x₀::Union{Missing,AbstractVector{T},AbstractArrayOfSimilarArrays{T}}=missing,
-    pchnl::Union{Missing,Channel}=missing,
-    wgs=missing
-) where {T<:Complex}
+        backend,
+        zg::AbstractArray{T, 2},
+        P::AbstractMatrixPencil{T},
+        γ,
+        δ,
+        zpd::Integer,
+        nit::Integer = max(1, ceil(Integer, log2(size(P, 1)))),
+        x₀::Union{Missing, AbstractVector{T}, AbstractArrayOfSimilarArrays{T}} = missing,
+        pchnl::Union{Missing, Channel} = missing,
+        wgs = missing
+) where {T <: Complex}
     dev = device(backend)
     bgarray = get_bgarray(backend)
     zv, idxbatches = _grid_batches(zg, zpd)
@@ -86,7 +98,8 @@ function _sdihlpsa(
             if !ismissing(pchnl)
                 put!(pchnl, length(idxb) * nit)
             end
-            ihlsrg!(view(sr, idxb), view(zv, idxb), γ, δ, adapt(Array, α[:, idxb]), adapt(Array, β[:, idxb]))
+            ihlsrg!(view(sr, idxb), view(zv, idxb), γ, δ,
+                adapt(Array, α[:, idxb]), adapt(Array, β[:, idxb]))
         end
     end
     return Matrix{real(T)}(reshape(sr, size(zg)))
@@ -94,9 +107,11 @@ end
 
 # Largest zpd that fits the target device memory within margin `moe`. Accounts for 4*m*m pencil
 # bytes (A, Ac, B, Bc), and per-grid (1 zv + 4*m workspace + (2*nit+1) α/β) bytes.
-function findmaxbatchihl(backend, T, m, nit; moe=0.1)
+function findmaxbatchihl(backend, T, m, nit; moe = 0.1)
     device_reclaim(backend)
-    floor(Integer, (device_bytes_available(backend) * (1 - moe) - (sizeof(T) * (4 * m * m + 1))) / (sizeof(T) * (1 + 4 * m + 2 * nit + 1)))
+    floor(Integer,
+        (device_bytes_available(backend) * (1 - moe) - (sizeof(T) * (4 * m * m + 1))) /
+        (sizeof(T) * (1 + 4 * m + 2 * nit + 1)))
 end
 
 # Partition 1:ncols into min(ndev, ncols) balanced blocks (sizes differ by ≤ 1),
@@ -105,13 +120,13 @@ function _device_column_partition(ncols::Integer, ndev::Integer)
     ndev ≥ 1 || throw(ArgumentError("ndev must be ≥ 1, got $ndev"))
     ncols ≥ 0 || throw(ArgumentError("ncols must be ≥ 0, got $ncols"))
     nblocks = min(Int(ndev), Int(ncols))
-    nblocks == 0 && return StepRange{Int,Int}[]
+    nblocks == 0 && return StepRange{Int, Int}[]
     # Round-robin (strided) assignment: device b takes columns b, b+nblocks, …, so clustered
     # hard/deep regions spread across devices (load-balances the adaptive driver, whose per-point
     # work varies). Results are scattered back to original columns afterward. KAPSEUDO_STRIDED=0
     # selects the legacy contiguous bands.
     if get(ENV, "KAPSEUDO_STRIDED", "1") == "0"
-        blocks = Vector{StepRange{Int,Int}}(undef, nblocks)
+        blocks = Vector{StepRange{Int, Int}}(undef, nblocks)
         q, r = divrem(Int(ncols), nblocks)
         lo = 1
         for b in 1:nblocks
@@ -130,8 +145,8 @@ end
 # device! is process-global on CUDA/AMDGPU and findmaxbatchihl queries the *current*
 # device, so racing it across spawns could read the wrong device's budget. `zip`
 # truncates to the shorter side, so surplus devices (ncols < ndev) go untouched.
-function _ihlpsa_fanout(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T},
-    budget_nit, zpd, devs, worker; pbar=nothing) where {T<:Complex}
+function _ihlpsa_fanout(backend, zg::AbstractArray{T, 2}, P::AbstractMatrixPencil{T},
+        budget_nit, zpd, devs, worker; pbar = nothing) where {T <: Complex}
     m = size(P, 1)
     ismissing(devs) && (devs = devices(backend))
     blocks = _device_column_partition(size(zg, 2), length(devs))
@@ -156,8 +171,10 @@ end
 
 # Scatter each device's columns back to their original grid positions (strided partition ⇒
 # results aren't in column order). `extract` pulls the array out of each device's result.
-function _scatter_columns!(dest::AbstractMatrix, results, blocks, extract=identity)
+function _scatter_columns!(dest::AbstractMatrix, results, blocks, extract = identity)
     for (r, blk) in zip(results, blocks)
+        # @inbounds: blocks is a _device_column_partition of 1:size(dest, 2), so every
+        # blk index is within dest's column range by construction.
         @inbounds dest[:, blk] = extract(r)
     end
 end
@@ -165,22 +182,23 @@ end
 # Fixed-nit engine: multi-device batched inverse-Lanczos at a caller-given depth.
 # The public `ihlpsa(..., nit::Integer, ...)` method forwards here.
 function _ihlpsa_fixed(
-    backend,
-    zg::AbstractArray{T,2},
-    P::AbstractMatrixPencil{T},
-    nit::Integer,
-    γ=1,
-    δ=0;
-    x₀::Union{Missing,AbstractVector{T}}=missing,
-    progress=false,
-    zpd=missing,
-    devs=missing,
-    wgs=missing
-) where {T<:Complex}
+        backend,
+        zg::AbstractArray{T, 2},
+        P::AbstractMatrixPencil{T},
+        nit::Integer,
+        γ = 1,
+        δ = 0;
+        x₀::Union{Missing, AbstractVector{T}} = missing,
+        progress = false,
+        zpd = missing,
+        devs = missing,
+        wgs = missing
+) where {T <: Complex}
     _validate_weights(γ, δ)
     # progress bar + consumer task only when caller asks for one — otherwise the consumer blocks
     # forever on an empty channel and the spawn leaks at precompile time.
-    pbar = progress ? ProgressBar(total=nit * length(zg), printing_delay=0.001) : nothing
+    pbar = progress ? ProgressBar(total = nit * length(zg), printing_delay = 0.001) :
+           nothing
     pchnl = progress ? Channel() : nothing
     if progress
         Threads.@spawn begin
@@ -201,7 +219,8 @@ function _ihlpsa_fixed(
         # per-batch buffers. (The adaptive driver does batch on CPU — its resident workers run
         # batches sequentially, no shared-state race.)
         progress && set_description(pbar, "CPU device, grid points * nit:")
-        result = _sdihlpsa(backend, zg, P, γ, δ, length(zg), nit, x₀, progress ? pchnl : missing, wgs)
+        result = _sdihlpsa(
+            backend, zg, P, γ, δ, length(zg), nit, x₀, progress ? pchnl : missing, wgs)
     end
     progress && close(pchnl)
     return permutedims(result)
@@ -211,19 +230,20 @@ end
 # across chunks so successive σ are one Lanczos run sampled at increasing depth — a fresh x₀ per
 # chunk would compare independent runs and make convergence meaningless. Aliased as `_seeded_x₀`
 # in the tests so the test default can't drift from the driver's.
-function _adaptive_x₀(::Type{T}, m, seed) where {T<:Complex}
+function _adaptive_x₀(::Type{T}, m, seed) where {T <: Complex}
     rng = MersenneTwister(seed)
     x = randn(rng, T, m)
     return x ./ norm(x)
 end
 
-_adaptive_default_rtol(::Type{T}) where {T<:Complex} = real(T) == Float32 ? 1.0f-4 : 1e-6
-_adaptive_default_atol(::Type{T}) where {T<:Complex} = eps(real(T))
+_adaptive_default_rtol(::Type{T}) where {T <: Complex} = real(T) == Float32 ? 1.0f-4 : 1e-6
+_adaptive_default_atol(::Type{T}) where {T <: Complex} = eps(real(T))
 
 # Combined absolute+relative convergence test on consecutive chunk σ values. eps short-circuit:
 # `ihlsrg!` pins a point at/near a true eigenvalue to `eps(real(T))` (already physically converged),
 # and a bare |Δ|/|σ| there would divide by ~eps and never retire the point.
-@inline function _adaptive_converged(σ_new::R, σ_prev::R, rtol::R, atol::R) where {R<:Real}
+@inline function _adaptive_converged(σ_new::R, σ_prev::R, rtol::R, atol::R) where {R <:
+                                                                                   Real}
     σ_new <= eps(R) && return true
     return abs(σ_new - σ_prev) <= atol + rtol * abs(σ_new)
 end
@@ -272,26 +292,26 @@ srg = ihlpsa(CUDABackend(), zg, P; rtol=1e-8, verbose=true)  # tighter tol, logs
 See also [`MatrixPencil`](@ref), [`qgrid`](@ref), [`ℂsvdpsa`](@ref).
 """
 function ihlpsa(
-    backend,
-    zg::AbstractArray{T,2},
-    P::AbstractMatrixPencil{T},
-    nit::Integer;
-    γ=1,
-    δ=0,
-    x₀::Union{Missing,AbstractVector{T}}=missing,
-    progress=false,
-    zpd=missing,
-    devs=missing,
-    wgs=missing
-) where {T<:Complex}
+        backend,
+        zg::AbstractArray{T, 2},
+        P::AbstractMatrixPencil{T},
+        nit::Integer;
+        γ = 1,
+        δ = 0,
+        x₀::Union{Missing, AbstractVector{T}} = missing,
+        progress = false,
+        zpd = missing,
+        devs = missing,
+        wgs = missing
+) where {T <: Complex}
     return _ihlpsa_fixed(backend, zg, P, nit, γ, δ; x₀, progress, zpd, devs, wgs)
 end
 
 # Adaptive form — omit `nit`. Mirrors the fixed-nit form: returns just `srg::Matrix`; the
 # convergence depth is available via `verbose=true` or by calling the un-exported
 # `_ihlpsa_adaptive` driver below, which returns `(srg, nit_grid)`.
-function ihlpsa(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T};
-    kwargs...) where {T<:Complex}
+function ihlpsa(backend, zg::AbstractArray{T, 2}, P::AbstractMatrixPencil{T};
+        kwargs...) where {T <: Complex}
     return first(_ihlpsa_adaptive(backend, zg, P; kwargs...))
 end
 
@@ -302,23 +322,23 @@ end
 # converged depth rather than lockstepping to the global worst point. `nit_grid[i]` is point i's
 # retirement depth; `maximum(nit_grid)` is the deepest.
 function _ihlpsa_adaptive(
-    backend,
-    zg::AbstractArray{T,2},
-    P::AbstractMatrixPencil{T};
-    γ=1,
-    δ=0,
-    nit_chunk::Integer=2,
-    nit_max::Integer=8 * max(1, ceil(Integer, log2(size(P, 1)))),
-    rtol::Real=_adaptive_default_rtol(T),
-    atol::Real=_adaptive_default_atol(T),
-    nconfirm::Integer=2,
-    x₀::Union{Missing,AbstractVector{T}}=missing,
-    seed::Integer=0x61646170,
-    zpd=missing,
-    devs=missing,
-    wgs=missing,
-    verbose=false
-) where {T<:Complex}
+        backend,
+        zg::AbstractArray{T, 2},
+        P::AbstractMatrixPencil{T};
+        γ = 1,
+        δ = 0,
+        nit_chunk::Integer = 2,
+        nit_max::Integer = 8 * max(1, ceil(Integer, log2(size(P, 1)))),
+        rtol::Real = _adaptive_default_rtol(T),
+        atol::Real = _adaptive_default_atol(T),
+        nconfirm::Integer = 2,
+        x₀::Union{Missing, AbstractVector{T}} = missing,
+        seed::Integer = 0x61646170,
+        zpd = missing,
+        devs = missing,
+        wgs = missing,
+        verbose = false
+) where {T <: Complex}
     _validate_weights(γ, δ)
     R = real(T)
     m = size(P, 1)
@@ -357,7 +377,7 @@ function _gather_rows(backend, A, keep)
     g, m, k = size(A)
     dst = similar(A, length(keep), m, k)
     keepd = adapt(get_bgarray(backend), keep)
-    _qv_gather!(backend)(dst, A, keepd; ndrange=(length(keep), m, k))
+    _qv_gather!(backend)(dst, A, keepd; ndrange = (length(keep), m, k))
     return dst
 end
 
@@ -367,8 +387,8 @@ end
 # subsequent chunks run kernels over live points only. `idx_glob` maps packed position → original
 # flat grid index. Returns (sr_matrix, nit_grid, unconverged::Bool); nit_grid[i] is grid point i's
 # retirement depth (or nit_max if it never converged).
-function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPencil{T},
-    γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, wgs) where {T<:Complex}
+function _sdihlpsa_adaptive(backend, zg::AbstractArray{T, 2}, P::AbstractMatrixPencil{T},
+        γ, δ, nit_chunk, nit_max, rtol, atol, nconfirm, x₀, zpd, wgs) where {T <: Complex}
     R = real(T)
     bgarray = get_bgarray(backend)
     zv_h, idxbatches = _grid_batches(zg, zpd)
@@ -388,10 +408,11 @@ function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPe
         nit_done = 0
         while g > 0 && nit_done < nit_max
             nit_new = min(nit_done + nit_chunk, nit_max)
-            lockstep_ihl!(view(α, :, 1:g), view(β, :, 1:g), ihl, nit_new, g; wgs, start=nit_done + 1)
+            lockstep_ihl!(view(α, :, 1:g), view(β, :, 1:g), ihl,
+                nit_new, g; wgs, start = nit_done + 1)
             sr_a = zeros(R, g)
             ihlsrg!(sr_a, view(zv_h, idx_glob), γ, δ,
-                adapt(Array, α[1:nit_new, 1:g]), adapt(Array, β[1:nit_new+1, 1:g]))
+                adapt(Array, α[1:nit_new, 1:g]), adapt(Array, β[1:(nit_new + 1), 1:g]))
             if nit_done == 0
                 for k in 1:g
                     σ_prev[idx_glob[k]] = sr_a[k]
@@ -429,7 +450,8 @@ function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPe
                         v = VectorOfSimilarVectors(flatview(ihl.v)[:, keep])
                         x₀p = VectorOfSimilarVectors(flatview(ihl.x₀)[:, keep])
                         zvp = ihl.zv[keep]
-                        ihl = IHLworkspace{T,get_backend(ihl)}(length(keep), zvp, ihl.P, x₀p, Qv, v)
+                        ihl = IHLworkspace{T, get_backend(ihl)}(
+                            length(keep), zvp, ihl.P, x₀p, Qv, v)
                         α = α[:, keep]
                         β = β[:, keep]
                         idx_glob = idx_glob[keep]
@@ -449,7 +471,7 @@ function _sdihlpsa_adaptive(backend, zg::AbstractArray{T,2}, P::AbstractMatrixPe
         end
     end
     return Matrix{R}(reshape(σ_out, size(zg))),
-        Matrix{Int}(reshape(nit_at, size(zg))), unconverged
+    Matrix{Int}(reshape(nit_at, size(zg))), unconverged
 end
 
 ## END WRAPPER FUNCTIONS ##

@@ -19,6 +19,7 @@
 # Trailing-update workgroups use a flat 1-D group index decoded into (row-tile, grid-pt-tile)
 # to avoid relying on KA 2-D group indexing.
 
+using KernelAbstractions
 using KernelIntrinsics: @shfl, Idx
 
 # Warp-shuffle broadcast of each solved pivot lane→lane (also synchronizes the warp). For IEEE
@@ -38,7 +39,7 @@ using KernelIntrinsics: @shfl, Idx
     j0 = koff + lane
     valid = lane <= plen
     bl = valid ? b[j0] : zero(ET)
-    for jj = 1:plen
+    for jj in 1:plen
         j = koff + jj
         piv = (lane == jj) ? _pdiv(bl, @inline _piv_elem(veye, j, z, A, B)) : zero(ET)
         xj = _trsm_shfl(piv, jj)
@@ -55,7 +56,7 @@ end
     j0 = koff + lane
     valid = lane <= plen
     bl = valid ? b[j0] : zero(ET)
-    for jj = plen:-1:1
+    for jj in plen:-1:1
         j = koff + jj
         piv = (lane == jj) ? _pdiv(bl, @inline _piv_elem(veye, j, z, A, B)) : zero(ET)
         xj = _trsm_shfl(piv, jj)
@@ -68,19 +69,23 @@ end
     valid && (b[j0] = bl)
 end
 @kernel function _tiled_panel_forward(bv, zv, @Const(A), @Const(B), koff, plen)
-    lane = @index(Local); gi = @index(Group)
+    lane = @index(Local);
+    gi = @index(Group)
     @inline _panel_fwd_body!(bv[gi], zv[gi], A, B, koff, plen, lane, Val(false))
 end
 @kernel function _tiled_panel_backward(bv, zv, @Const(A), @Const(B), koff, plen)
-    lane = @index(Local); gi = @index(Group)
+    lane = @index(Local);
+    gi = @index(Group)
     @inline _panel_bwd_body!(bv[gi], zv[gi], A, B, koff, plen, lane, Val(false))
 end
 @kernel function _tiled_panel_forward_eye(bv, zv, @Const(A), koff, plen)   # B = I: single matrix
-    lane = @index(Local); gi = @index(Group)
+    lane = @index(Local);
+    gi = @index(Group)
     @inline _panel_fwd_body!(bv[gi], zv[gi], A, nothing, koff, plen, lane, Val(true))
 end
 @kernel function _tiled_panel_backward_eye(bv, zv, @Const(A), koff, plen)  # B = I: single matrix
-    lane = @index(Local); gi = @index(Group)
+    lane = @index(Local);
+    gi = @index(Group)
     @inline _panel_bwd_body!(bv[gi], zv[gi], A, nothing, koff, plen, lane, Val(true))
 end
 
@@ -95,7 +100,7 @@ end
 
 # Forward: subtract panel k from trailing rows rbase+1 … m.
 @kernel function _tiled_trailing_forward(bv, zv, @Const(A), @Const(B),
-                                         koff, plen, rbase, m, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
+        koff, plen, rbase, m, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC, W}
     li = @index(Local)                # 1..32W
     grp = @index(Group)               # 1..rtiles*ggrid
     @uniform ET = eltype(A)
@@ -108,7 +113,7 @@ end
     i = rbase + (bi - 1) * 32 + t
     g = length(zv)
     gp0 = (bg - 1) * (W * gt) + (w - 1) * gt
-    for c0 = 0:TC:plen-1
+    for c0 in 0:TC:(plen - 1)
         clen = min(TC, plen - c0)
         jj = w                        # warp w loads columns jj ≡ w (mod W)
         while jj <= clen
@@ -119,13 +124,13 @@ end
         end
         @synchronize()
         if i <= m
-            for gg = 1:gt
+            for gg in 1:gt
                 gp = gp0 + gg
                 if gp <= g
                     z = zv[gp]
                     b = bv[gp]
                     acc = b[i]
-                    for jj2 = 1:clen
+                    for jj2 in 1:clen
                         acc -= (z * sB[t, jj2] - sA[t, jj2]) * b[koff + c0 + jj2]
                     end
                     b[i] = acc
@@ -138,7 +143,7 @@ end
 
 # Backward: subtract panel k from rows above it, 1 … koff.
 @kernel function _tiled_trailing_backward(bv, zv, @Const(A), @Const(B),
-                                          koff, plen, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
+        koff, plen, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC, W}
     li = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
@@ -151,7 +156,7 @@ end
     i = (bi - 1) * 32 + t
     g = length(zv)
     gp0 = (bg - 1) * (W * gt) + (w - 1) * gt
-    for c0 = 0:TC:plen-1
+    for c0 in 0:TC:(plen - 1)
         clen = min(TC, plen - c0)
         jj = w
         while jj <= clen
@@ -162,13 +167,13 @@ end
         end
         @synchronize()
         if i <= koff
-            for gg = 1:gt
+            for gg in 1:gt
                 gp = gp0 + gg
                 if gp <= g
                     z = zv[gp]
                     b = bv[gp]
                     acc = b[i]
-                    for jj2 = 1:clen
+                    for jj2 in 1:clen
                         acc -= (z * sB[t, jj2] - sA[t, jj2]) * b[koff + c0 + jj2]
                     end
                     b[i] = acc
@@ -189,7 +194,8 @@ end
 # Dispatch happens at the host call site (the `eye` branch in `_tiled_trsm!`, src/ihlpsa_trsm.jl),
 # which picks the right kernel symbol.
 
-@kernel function _tiled_trailing_forward_eye(bv, @Const(A), koff, plen, rbase, m, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
+@kernel function _tiled_trailing_forward_eye(
+        bv, @Const(A), koff, plen, rbase, m, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC, W}
     li = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
@@ -201,7 +207,7 @@ end
     i = rbase + (bi - 1) * 32 + t
     g = length(bv)
     gp0 = (bg - 1) * (W * gt) + (w - 1) * gt
-    for c0 = 0:TC:plen-1
+    for c0 in 0:TC:(plen - 1)
         clen = min(TC, plen - c0)
         jj = w
         while jj <= clen
@@ -210,12 +216,12 @@ end
         end
         @synchronize()
         if i <= m
-            for gg = 1:gt
+            for gg in 1:gt
                 gp = gp0 + gg
                 if gp <= g
                     b = bv[gp]
                     acc = b[i]
-                    for jj2 = 1:clen
+                    for jj2 in 1:clen
                         acc += sA[t, jj2] * b[koff + c0 + jj2]
                     end
                     b[i] = acc
@@ -226,7 +232,8 @@ end
     end
 end
 
-@kernel function _tiled_trailing_backward_eye(bv, @Const(A), koff, plen, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC,W}
+@kernel function _tiled_trailing_backward_eye(
+        bv, @Const(A), koff, plen, gt, rtiles, ::Val{TC}, ::Val{W}) where {TC, W}
     li = @index(Local)
     grp = @index(Group)
     @uniform ET = eltype(A)
@@ -238,7 +245,7 @@ end
     i = (bi - 1) * 32 + t
     g = length(bv)
     gp0 = (bg - 1) * (W * gt) + (w - 1) * gt
-    for c0 = 0:TC:plen-1
+    for c0 in 0:TC:(plen - 1)
         clen = min(TC, plen - c0)
         jj = w
         while jj <= clen
@@ -247,12 +254,12 @@ end
         end
         @synchronize()
         if i <= koff
-            for gg = 1:gt
+            for gg in 1:gt
                 gp = gp0 + gg
                 if gp <= g
                     b = bv[gp]
                     acc = b[i]
-                    for jj2 = 1:clen
+                    for jj2 in 1:clen
                         acc += sA[t, jj2] * b[koff + c0 + jj2]
                     end
                     b[i] = acc

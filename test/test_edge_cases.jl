@@ -48,6 +48,32 @@ using KAPseudospectra: findmaxbatchihl, _device_column_partition
     end
 end
 
+@testset "error paths" begin
+    A = randn(ComplexF64, 4, 4)
+    gx, gy, zg = qgrid(ComplexF64, (-1.0, 1.0), (-1.0, 1.0), (3, 3))
+    # (γ, δ) weights scale the perturbation norm ε(γ + δ|z|): each must be ≥ 0, not both 0.
+    @test_throws ArgumentError ℂsvdpsa(zg, A, I, -1, 0)
+    @test_throws ArgumentError ℂsvdpsa(zg, A, I, 0, 0)
+    @test_throws ArgumentError ℂsvdpsa(Matrix{ComplexF64}(undef, 0, 0), A)
+    @test_throws DimensionMismatch ℂsvdpsa(zg, A, randn(ComplexF64, 3, 3))
+    @test_throws DimensionMismatch MatrixPencil(A, randn(ComplexF64, 3, 3))
+    # The trsm strategy is validated both when persisted and on every ENV read.
+    @test_throws ErrorException set_trsm_strategy!("bogus")
+    withenv("KAPSEUDO_TRSM" => "bogus") do
+        @test_throws ErrorException KAPseudospectra.trsm_strategy()
+    end
+end
+
+@testset "scaled UniformScaling pencil" begin
+    # MatrixPencil(A, cI) must keep the scale (generalized pencil), matching the
+    # explicit dense-B path — it used to silently drop c and build a B = I pencil.
+    A = randn(ComplexF64, 4, 4)
+    gx, gy, zg = qgrid(ComplexF64, (-1.0, 1.0), (-1.0, 1.0), (3, 3))
+    P3 = MatrixPencil(A, 3I)
+    @test !KAPseudospectra.b_is_identity(P3)
+    @test ℂsvdpsa(zg, P3) ≈ ℂsvdpsa(zg, A, Matrix{ComplexF64}(3I, size(A))) rtol = 1e-12
+end
+
 @testset "findmaxbatchihl sanity" begin
     # CPU path uses Sys.free_memory(); should be >> any reasonable single-pencil
     # workspace, so the returned batch should be huge but finite.
@@ -76,8 +102,8 @@ end
     # (e.g. 9 cols / 4 devs → 3 blocks) and BoundsError the device loop.
     for stride in ("1", "0"), ncols in 1:20, ndev in 1:6
         blocks = withenv(() -> _device_column_partition(ncols, ndev),
-                         "KAPSEUDO_STRIDED" => stride)
-        @test blocks isa Vector{StepRange{Int,Int}}
+            "KAPSEUDO_STRIDED" => stride)
+        @test blocks isa Vector{StepRange{Int, Int}}
         @test length(blocks) == min(ndev, ncols)
         # coverage + disjointness as a SET (strided blocks are interleaved, not
         # ordered, so compare sorted)
@@ -87,11 +113,16 @@ end
     end
 
     # Pinned cases. Strided (default): device b takes columns b, b+nblocks, …
-    @test withenv(() -> _device_column_partition(1, 4), "KAPSEUDO_STRIDED" => "1") == [1:1:1]
-    @test withenv(() -> _device_column_partition(9, 4), "KAPSEUDO_STRIDED" => "1") == [1:4:9, 2:4:9, 3:4:9, 4:4:9]
-    @test withenv(() -> _device_column_partition(2, 4), "KAPSEUDO_STRIDED" => "1") == [1:2:2, 2:2:2]
+    @test withenv(() -> _device_column_partition(1, 4), "KAPSEUDO_STRIDED" => "1") ==
+          [1:1:1]
+    @test withenv(() -> _device_column_partition(9, 4), "KAPSEUDO_STRIDED" => "1") ==
+          [1:4:9, 2:4:9, 3:4:9, 4:4:9]
+    @test withenv(() -> _device_column_partition(2, 4), "KAPSEUDO_STRIDED" => "1") ==
+          [1:2:2, 2:2:2]
     # Contiguous (legacy): balanced bands, exactly min(ndev, ncols) of them.
-    @test withenv(() -> _device_column_partition(9, 4), "KAPSEUDO_STRIDED" => "0") == [1:1:3, 4:1:5, 6:1:7, 8:1:9]
+    @test withenv(() -> _device_column_partition(9, 4), "KAPSEUDO_STRIDED" => "0") ==
+          [1:1:3, 4:1:5, 6:1:7, 8:1:9]
     @test isempty(_device_column_partition(0, 4))
+    @test_throws ArgumentError _device_column_partition(-1, 4)
     @test_throws ArgumentError _device_column_partition(4, 0)
 end

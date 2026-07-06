@@ -16,7 +16,8 @@ psaplot!(args...; kw...) = RecipesBase.plot!(PsaPlot(args); kw...)
 
 @recipe function f(h::PsaPlot)
     n = length(h.args)
-    n in (3, 4) || throw(ArgumentError("psaplot(gx, gy, σ[, eigenvalues]); got $n positional args"))
+    n in (3, 4) ||
+        throw(ArgumentError("psaplot(gx, gy, σ[, eigenvalues]); got $n positional args"))
     gx, gy, σ = h.args[1], h.args[2], h.args[3]
     logσ = log10.(σ)
 

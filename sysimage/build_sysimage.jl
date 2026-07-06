@@ -27,8 +27,9 @@ bake = Symbol[]
 for p in ("CUDA", "AMDGPU", "oneAPI", "Metal", "KAPseudospectra")
     p in deps && push!(bake, Symbol(p))
 end
-isempty(bake) && error("active project has none of CUDA/AMDGPU/oneAPI/Metal/KAPseudospectra " *
-                       "as direct deps — activate the project that uses KAPseudospectra")
+isempty(bake) &&
+    error("active project has none of CUDA/AMDGPU/oneAPI/Metal/KAPseudospectra " *
+          "as direct deps — activate the project that uses KAPseudospectra")
 
 # PackageCompiler lives in a throwaway env so the user's Project.toml is left untouched.
 let t = mktempdir()
@@ -37,14 +38,14 @@ let t = mktempdir()
 end
 using PackageCompiler
 
-@info "Building sysimage (~10–20 min, ~1 GB output)" project = USER_PROJ output = OUT bake
+@info "Building sysimage (~10–20 min, ~1 GB output)" project=USER_PROJ output=OUT bake
 create_sysimage(bake;
     sysimage_path = OUT,
     project = USER_PROJ,
-    precompile_execution_file = joinpath(@__DIR__, "precompile_workload.jl"),
+    precompile_execution_file = joinpath(@__DIR__, "precompile_workload.jl")
 )
 
-println("\n✔ sysimage built: ", OUT, "  (", round(filesize(OUT) / 2^30, digits=2), " GB)")
+println("\n✔ sysimage built: ", OUT, "  (", round(filesize(OUT) / 2^30, digits = 2), " GB)")
 println("\nLaunch with one of:")
 println("  julia --sysimage $OUT")
 println("  alias jl='julia --sysimage $OUT'        # add to ~/.bashrc")

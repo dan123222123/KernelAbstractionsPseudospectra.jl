@@ -17,10 +17,12 @@ KAPseudospectra.device_bytes_available(B::CUDA.CUDABackend) = CUDA.free_memory()
 KAPseudospectra.device_reclaim(B::CUDA.CUDABackend) = CUDA.reclaim()
 # Per-device queries for the trsm routing (replace the hardcoded warp width / 48 KB smem proxy).
 KAPseudospectra.warp_width(B::CUDA.CUDABackend) = Int(CUDA.warpsize(CUDA.device()))   # 32 on all current NVIDIA HW
-KAPseudospectra.device_smem_bytes(B::CUDA.CUDABackend) =
+function KAPseudospectra.device_smem_bytes(B::CUDA.CUDABackend)
     Int(CUDA.attribute(CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK))
-KAPseudospectra.device_smem_per_sm(B::CUDA.CUDABackend) =
+end
+function KAPseudospectra.device_smem_per_sm(B::CUDA.CUDABackend)
     Int(CUDA.attribute(CUDA.device(), CUDA.DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR))
+end
 
 ## precompile gpu code (only when a device is actually usable)
 if CUDA.functional()
@@ -34,14 +36,16 @@ if CUDA.functional()
             # execution is least reliable.
             dev = collect(CUDA.devices())[1]
             withenv("KAPSEUDO_TRSM" => "column") do
-                KAPseudospectra._precompile_ihlpsa(CUDABackend(), dev, [ComplexF32, ComplexF64])
+                KAPseudospectra._precompile_ihlpsa(CUDABackend(), dev, [
+                    ComplexF32, ComplexF64])
             end
             # Opt-in (`enable_gpu_kernel_cache!()`): also compile the warp/tiled kernels so their
             # code persists across sessions via GPUCompiler's disk cache. Needs Julia ≥ 1.13
             # (JuliaLang/julia#60747) for cross-session reuse; the launches are individually
             # guarded so this never breaks precompilation on stacks where it isn't yet supported.
             KAPseudospectra.PRECOMPILE_GPU_KERNELS &&
-                KAPseudospectra._precompile_gpu_kernels(CUDABackend(), dev, [ComplexF32, ComplexF64])
+                KAPseudospectra._precompile_gpu_kernels(CUDABackend(), dev, [
+                    ComplexF32, ComplexF64])
         end
     end
 end

@@ -46,8 +46,9 @@ end
         m = size(A, 1)
     end
     sbj = @localmem eltype(A) 1
-    i = @index(Local); gi = @index(Group)
-    for j = 1:1:m
+    i = @index(Local);
+    gi = @index(Group)
+    for j in 1:1:m
         if i == 1
             sbj[1] = _pdiv(bv[gi][j], @inline _piv_elem(Val(false), j, zv[gi], A, B))
             bv[gi][j] = sbj[1]
@@ -67,8 +68,9 @@ end
         m = size(A, 1)
     end
     sbj = @localmem eltype(A) 1
-    i = @index(Local); gi = @index(Group)
-    for j = m:-1:1
+    i = @index(Local);
+    gi = @index(Group)
+    for j in m:-1:1
         if i == 1
             sbj[1] = _pdiv(bv[gi][j], @inline _piv_elem(Val(false), j, zv[gi], A, B))
             bv[gi][j] = sbj[1]
@@ -88,8 +90,9 @@ end
         m = size(A, 1)
     end
     sbj = @localmem eltype(A) 1
-    i = @index(Local); gi = @index(Group)
-    for j = 1:1:m
+    i = @index(Local);
+    gi = @index(Group)
+    for j in 1:1:m
         if i == 1
             sbj[1] = _pdiv(bv[gi][j], @inline _piv_elem(Val(true), j, zv[gi], A, nothing))
             bv[gi][j] = sbj[1]
@@ -109,8 +112,9 @@ end
         m = size(A, 1)
     end
     sbj = @localmem eltype(A) 1
-    i = @index(Local); gi = @index(Group)
-    for j = m:-1:1
+    i = @index(Local);
+    gi = @index(Group)
+    for j in m:-1:1
         if i == 1
             sbj[1] = _pdiv(bv[gi][j], @inline _piv_elem(Val(true), j, zv[gi], A, nothing))
             bv[gi][j] = sbj[1]
@@ -124,4 +128,3 @@ end
         @synchronize()
     end
 end
-

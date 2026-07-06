@@ -28,11 +28,11 @@ const _seeded_x₀ = KAPseudospectra._adaptive_x₀
         gx, gy, zg = qgrid(T, (-1.5, 1.5), (-1.5, 1.5), (12, 12))
 
         x₀ = _seeded_x₀(T, m, 0xBEEF)
-        s_ihl = ihlpsa(CPU(), zg, P, nit; x₀=x₀)
+        s_ihl = ihlpsa(CPU(), zg, P, nit; x₀ = x₀)
         s_svd = ℂsvdpsa(zg, P)
         # Tolerance: F32 ~ 1e-4 (Lanczos + F32 roundoff in σ_min); F64 ~ 1e-10.
         rtol = T == ComplexF32 ? 1e-4 : 1e-10
-        @test isapprox(s_ihl, s_svd; rtol=rtol)
+        @test isapprox(s_ihl, s_svd; rtol = rtol)
     end
 end
 
@@ -51,10 +51,10 @@ end
         γ, δ = T <: Complex ? (0.5, 0.5) : (0.5, 0.5)
 
         x₀ = _seeded_x₀(T, m, 0xFEED)
-        s_ihl = ihlpsa(CPU(), zg, P, nit; γ=γ, δ=δ, x₀=x₀)
+        s_ihl = ihlpsa(CPU(), zg, P, nit; γ = γ, δ = δ, x₀ = x₀)
         s_svd = ℂsvdpsa(zg, P, γ, δ)
         rtol = T == ComplexF32 ? 1e-4 : 1e-10
-        @test isapprox(s_ihl, s_svd; rtol=rtol)
+        @test isapprox(s_ihl, s_svd; rtol = rtol)
     end
 end
 
@@ -71,17 +71,17 @@ end
 
         x₀ = _seeded_x₀(T, m, 0xBEEF)
         nit_max = 8 * ceil(Int, log2(m))                  # adaptive cap (= default)
-        s_fixed = ihlpsa(CPU(), zg, P, nit_max; x₀=x₀)    # over-converged control
+        s_fixed = ihlpsa(CPU(), zg, P, nit_max; x₀ = x₀)    # over-converged control
         # Public `ihlpsa(…; …)` returns only σ; the internal driver also returns the
         # per-point convergence depth grid this testset asserts on.
-        s_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀=x₀)
+        s_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
         s_svd = ℂsvdpsa(zg, P)
 
         # Comparison tol ~10× the adaptive stopping rtol (default 1e-4 F32 /
         # 1e-6 F64) to absorb the successive-change criterion's slack on slow points.
         rtol = T == ComplexF32 ? 1e-3 : 1e-5
-        @test isapprox(s_adp, s_svd; rtol=rtol)           # vs dense SVD oracle
-        @test isapprox(s_adp, s_fixed; rtol=rtol)         # vs fixed-nit control
+        @test isapprox(s_adp, s_svd; rtol = rtol)           # vs dense SVD oracle
+        @test isapprox(s_adp, s_fixed; rtol = rtol)         # vs fixed-nit control
         @test size(nit_grid) == size(s_adp)               # per-point depth grid
         @test maximum(nit_grid) < nit_max                  # genuinely stopped early
     end
@@ -99,10 +99,11 @@ end
         γ, δ = 0.5, 0.5
 
         x₀ = _seeded_x₀(T, m, 0xFEED)
-        s_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; γ=γ, δ=δ, x₀=x₀)
+        s_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(
+            CPU(), zg, P; γ = γ, δ = δ, x₀ = x₀)
         s_svd = ℂsvdpsa(zg, P, γ, δ)
         rtol = T == ComplexF32 ? 1e-3 : 1e-5
-        @test isapprox(s_adp, s_svd; rtol=rtol)
+        @test isapprox(s_adp, s_svd; rtol = rtol)
         @test maximum(nit_grid) < 8 * ceil(Int, log2(m))
     end
 end
@@ -119,9 +120,9 @@ end
         gx, gy, zg = qgrid(T, (-1.5, 1.5), (-1.5, 1.5), (12, 12))
         x₀ = _seeded_x₀(T, m, 0xBEEF)
 
-        s_one = ihlpsa(CPU(), zg, P; x₀=x₀)
-        s_many = ihlpsa(CPU(), zg, P; x₀=x₀, zpd=37)      # 144 = 3·37 + 33 → 4 batches
-        @test isapprox(s_one, s_many; rtol=(T == ComplexF32 ? 1e-3 : 1e-5))
+        s_one = ihlpsa(CPU(), zg, P; x₀ = x₀)
+        s_many = ihlpsa(CPU(), zg, P; x₀ = x₀, zpd = 37)      # 144 = 3·37 + 33 → 4 batches
+        @test isapprox(s_one, s_many; rtol = (T == ComplexF32 ? 1e-3 : 1e-5))
     end
 end
 
@@ -139,19 +140,20 @@ end
         x₀ = _seeded_x₀(T, m, 0xBEEF)
         nit_cap = 3
 
-        s_adp, nit_grid = @test_logs (:warn,) match_mode = :any KAPseudospectra._ihlpsa_adaptive(
-            CPU(), zg, P; x₀=x₀, nit_max=nit_cap, rtol=1e-12)
-        s_fix = ihlpsa(CPU(), zg, P, nit_cap; x₀=x₀)
+        s_adp,
+        nit_grid = @test_logs (:warn,) match_mode = :any KAPseudospectra._ihlpsa_adaptive(
+            CPU(), zg, P; x₀ = x₀, nit_max = nit_cap, rtol = 1e-12)
+        s_fix = ihlpsa(CPU(), zg, P, nit_cap; x₀ = x₀)
 
         @test all(==(nit_cap), nit_grid)
         @test all(isfinite, s_adp)
-        @test isapprox(s_adp, s_fix; rtol=(T == ComplexF32 ? 1e-4 : 1e-10))
+        @test isapprox(s_adp, s_fix; rtol = (T == ComplexF32 ? 1e-4 : 1e-10))
     end
 end
 
 # Cross-backend: same problem, same explicit x₀, results agree element-wise.
 # `types` lets FP64-less backends (Intel iGPUs) restrict to ComplexF32.
-function test_cross_backend(backend; types=(ComplexF32, ComplexF64))
+function test_cross_backend(backend; types = (ComplexF32, ComplexF64))
     @testset "cross-backend: CPU vs $(backend)" begin
         Random.seed!(0xDADA)
         for T in types
@@ -162,12 +164,12 @@ function test_cross_backend(backend; types=(ComplexF32, ComplexF64))
             gx, gy, zg = qgrid(T, (-1.0, 1.0), (-1.0, 1.0), (16, 16))
 
             x₀ = _seeded_x₀(T, m, 0xACED)
-            s_cpu = ihlpsa(CPU(), zg, P, nit; x₀=x₀)
-            s_gpu = ihlpsa(backend, zg, P, nit; x₀=x₀)
+            s_cpu = ihlpsa(CPU(), zg, P, nit; x₀ = x₀)
+            s_gpu = ihlpsa(backend, zg, P, nit; x₀ = x₀)
             # Different reduction orders across backends can perturb σ_min by
             # ~few×eps(T)·κ. F32: 1e-3 generous; F64: 1e-10.
             rtol = T == ComplexF32 ? 1e-3 : 1e-10
-            @test isapprox(s_cpu, s_gpu; rtol=rtol)
+            @test isapprox(s_cpu, s_gpu; rtol = rtol)
         end
     end
 end
@@ -176,7 +178,7 @@ end
 # adaptive stopping tolerance; the converged nit agrees within one chunk
 # (cross-backend reduction-order differences can flip a borderline point across
 # the rtol boundary at a chunk edge, changing where it stops).
-function test_adaptive_backend(backend; types=(ComplexF32, ComplexF64))
+function test_adaptive_backend(backend; types = (ComplexF32, ComplexF64))
     @testset "ihlpsa adaptive: CPU vs $(backend)" begin
         Random.seed!(0xADDA)
         for T in types
@@ -196,9 +198,9 @@ function test_adaptive_backend(backend; types=(ComplexF32, ComplexF64))
 
             # Adaptive (per-point hybrid) across the device fan-out: exercises the
             # on-device state gather (custom `_qv_gather!` kernel) and multi-device partition.
-            s_cpu, grid_cpu = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀=x₀)
-            s_gpu, grid_gpu = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀=x₀)
-            @test isapprox(s_cpu, s_gpu; rtol=rtol)
+            s_cpu, grid_cpu = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
+            s_gpu, grid_gpu = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀ = x₀)
+            @test isapprox(s_cpu, s_gpu; rtol = rtol)
             @test abs(maximum(grid_cpu) - maximum(grid_gpu)) <= ceil(Int, log2(m))   # within one chunk
         end
     end
