@@ -19,13 +19,13 @@ are **~76% of GPU compute at m=512 and ~85% at m=1024** — the dominant cost.
 
 The pencil is built on the fly (`zBAij`, never materialised) to save memory, and
 divided with `_pdiv` (a precision-preserving complex divide that keeps F32/F16 in
-their own precision instead of widening to F64 — see `src/KATRSM.jl/KATRSM.jl`).
+their own precision instead of widening to F64 — see `src/KATRSM/KATRSM.jl`).
 
 ## The two solves
 
 Both produce numerically equivalent results (same `_pdiv`, same `zBAij`); they
 differ in how the work is mapped onto the warp and the memory hierarchy. They
-live in `src/KATRSM.jl/` and are selected at runtime by `trsmIHL`
+live in `src/KATRSM/` and are selected at runtime by `trsmIHL!`
 (`src/ihlpsa_trsm.jl`).
 
 ### 1. Column-oriented (`column`) — the baseline
@@ -50,7 +50,7 @@ each grid point pays full DRAM bandwidth for `A,B`. This is why large `A,B` are
 the worst case.
 
 The tiled solve is a right-looking blocked algorithm, panel width = warp size
-(kernel-level implementation: `src/KATRSM.jl/trsm_tiled_kernels.jl`, which has an
+(kernel-level implementation: `src/KATRSM/trsm_tiled_kernels.jl`, which has an
 ASCII block-layout diagram in its header):
 
 1. **Panel solve** — solve the ≤32×32 *triangular* diagonal tile for every grid
@@ -66,7 +66,7 @@ ASCII block-layout diagram in its header):
 
 Its per-panel launch overhead makes it lose to `column` at small m and win
 increasingly at large m. The panel solve broadcasts pivots with `_trsm_shfl` (a
-warp shuffle, `src/KATRSM.jl/trsm_tiled_kernels.jl`); the MultiFloats per-limb
+warp shuffle, `src/KATRSM/trsm_tiled_kernels.jl`); the MultiFloats per-limb
 shuffle override (`MultiFloatsPseudospectra`) applies here so wide IEEE-free
 types still tile on a shuffle-capable backend.
 
@@ -232,10 +232,10 @@ in the tiled trailing-update GEMM, accumulated over the iterations.
 
 ## Implementation map
 
-- `src/KATRSM.jl/trsm_pencil_kernels.jl` — column-oriented baseline kernels.
-- `src/KATRSM.jl/trsm_tiled_kernels.jl` — KA/KI tiled panel + trailing kernels;
+- `src/KATRSM/trsm_pencil_kernels.jl` — column-oriented baseline kernels.
+- `src/KATRSM/trsm_tiled_kernels.jl` — KA/KI tiled panel + trailing kernels;
   also home to `_trsm_shfl` (the panel-solve warp shuffle).
-- `src/ihlpsa_trsm.jl` — `trsmIHL` strategy dispatch; `_tiled_trsm!`,
+- `src/ihlpsa_trsm.jl` — `trsmIHL!` strategy dispatch; `_tiled_trsm!`,
   `_column_trsm!` drivers; `default_wgs`, `tiled_tiles_fit`, `tiled_tc`; `lockstep_ihl!`.
 - `src/tune.jl` — `tune_trsm_tc!`, the per-device trailing-tile-width probe.
 - `src/backend.jl` — per-backend device interface (CPU defaults; GPU extensions override):

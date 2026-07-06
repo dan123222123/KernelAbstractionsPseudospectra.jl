@@ -31,7 +31,7 @@ Adaptive convergence is tunable with keyword arguments (`rtol`, `atol`, `nit_chu
 `nit_max`, …) and `γ`,`δ` for perturbation scaling — see the `ihlpsa` docstring for
 the full list. Pass `devs` to restrict which GPUs are used.
 
-On FP64-less GPUs (Intel iGPUs, Apple Metal) call `set_pdiv_accurate(false)` so the
+On FP64-less GPUs (Intel iGPUs, Apple Metal) call `set_pdiv_accurate!(false)` so the
 Float32 solves compile — the default uses Base's more accurate division, which needs FP64.
 
 # Examples

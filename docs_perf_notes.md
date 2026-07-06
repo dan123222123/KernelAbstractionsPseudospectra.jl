@@ -50,7 +50,7 @@ Organized by source file. Each entry: what the number/table was attached to.
 
 ---
 
-## src/KATRSM.jl/trsm_tiled_kernels.jl
+## src/KATRSM/trsm_tiled_kernels.jl
 
 **`_tiled_trailing_forward` / `_tiled_trailing_backward` — trailing-tile width `TC` and occupancy**
 - A half-warp row tile wastes lanes and is slower (row tile is fixed at a full warp = 32 rows).
@@ -91,7 +91,7 @@ Note: the concrete per-type / eye-vs-generic `TC` optima, the ~1.1–1.4× end-t
 
 ---
 
-## src/KATRSM.jl/trsm_pencil_kernels.jl
+## src/KATRSM/trsm_pencil_kernels.jl
 
 **Column-oriented kernel — accuracy & bandwidth**
 - The eye (B = I) result matches the generic kernel to round-off (**~1 ULP**, via FMA order).

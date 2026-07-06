@@ -5,6 +5,17 @@ All notable changes to KAPseudospectra.jl are documented here.
 ## [Unreleased]
 
 ### Added
+- **`psaplot` / `psaplot!` plot recipe.** Contour plots of a pseudospectra field
+  (`log₁₀ σ` colorbar, optional eigenvalue overlay) via a `RecipesBase` package
+  extension: `using Plots; psaplot(gx, gy, σ, eigvals(A); levels=-6:0)`.
+- **`MatrixPencil(A, cI)` with a scaled `UniformScaling` now keeps the scale**,
+  materializing `cI` and building a generalized pencil (it used to silently drop
+  `c` and build a `B = I` pencil, disagreeing with `ℂsvdpsa`'s handling of the
+  same input).
+- Aqua.jl quality testset (ambiguities, unbound params, compat coverage, piracy)
+  plus `@test_throws` coverage for the input-validation error paths.
+- `[compat]` bounds for every dependency and weak dependency, and a `julia = "1.10"`
+  floor matching CI.
 - **Adaptive `nit` in `ihlpsa`.** Calling `ihlpsa(backend, zg, P)` **without** a
   `nit` argument now runs the adaptive (per-point hybrid) inverse-Lanczos driver:
   each grid point retires at its own converged depth (relative `rtol` / absolute
@@ -35,6 +46,21 @@ All notable changes to KAPseudospectra.jl are documented here.
   retirement depth; `maximum(nit_grid)` is the deepest).
 - **Breaking:** perturbation scaling `γ`,`δ` are now **keyword** arguments in both
   forms (previously positional in the fixed form): `ihlpsa(b, zg, P, nit; γ, δ)`.
+- **Breaking:** `set_pdiv_accurate` is renamed `set_pdiv_accurate!`, following the
+  mutating-`!` convention of the other preference setters (`ihlpsa`'s internal solve
+  router `trsmIHL` is likewise now `trsmIHL!`).
+- `ℂsvdpsa`/`ℝsvdpsa` return a concrete `Matrix` (via `permutedims`) instead of a
+  lazy `Adjoint` wrapper, matching `ihlpsa`.
+- Invalid user input (empty grid, mismatched pencil sizes, bad `(γ, δ)` weights)
+  now throws `ArgumentError`/`DimensionMismatch` instead of `AssertionError`.
+- `set_trsm_strategy!` takes effect immediately in the running session (the
+  persisted preference is now cached and updated in place; `KAPSEUDO_TRSM` still
+  overrides), and the per-iteration preference re-read is gone from the solve loop.
+- Internal reorganization: `src/KAPseudospectra.jl` is now a thin module index
+  (preferences API → `src/preferences.jl`, precompile workloads →
+  `src/precompile.jl`, `qgrid`/`psaplot` stubs → `src/grid.jl`); the KATRSM
+  submodule directory is `src/KATRSM/` (was `src/KATRSM.jl/`); struct fields of
+  `MatrixPencil`/`SchurMatrixPencil`/`IHLworkspace` are concretely parametrized.
 
 ### Fixed
 - **Breaking (δ≠0 only):** the `(γ,δ)` pseudospectral value is now
@@ -48,3 +74,9 @@ All notable changes to KAPseudospectra.jl are documented here.
   set is invariant to a common scaling of `(γ,δ)`. The check is now applied
   uniformly across `ℂsvdpsa`, `ihlpsa`, and the adaptive driver (previously only
   `ℂsvdpsa` validated, and it rejected `(1,1)`).
+- **MultiFloats on FP64-less GPUs**: `examples/ihlpsa_multifloats.jl` restored to
+  its portable CPU default and its documented Float32/double-single precision pair.
+- `src/KATRSM/trsm_tiled_kernels.jl` now declares its own `using KernelAbstractions`
+  (previously load-order dependent through a sibling include).
+- Metal `device_bytes_available` is floored at 0 so batch sizing never sees a
+  negative budget under memory pressure.

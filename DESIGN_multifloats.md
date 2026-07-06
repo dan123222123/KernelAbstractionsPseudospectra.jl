@@ -37,12 +37,12 @@ levels.
 ## Why it works with no core changes
 
 - The inverse-Lanczos kernels (`src/ihlpsa.jl`) and the KATRSM triangular-solve kernels
-  (`src/KATRSM.jl/`) use only `+ - * / conj sqrt real abs2` — all provided by MultiFloats.
+  (`src/KATRSM/`) use only `+ - * / conj sqrt real abs2` — all provided by MultiFloats.
 - `MultiFloat{Float64,N}` is an immutable isbits struct, so it passes into KA/CUDA kernels
   by value; arrays of `Complex{Float64xN}` adapt to `CuArray` element-wise.
 - `KATRSM._pdiv` uses full-precision generic complex division for `Complex{Float64xN}` (it
   only special-cases `Complex{Float16/Float32}`). The pivoting/division strategy is also
-  selectable at runtime via the exported `set_pdiv_accurate`.
+  selectable at runtime via the exported `set_pdiv_accurate!`.
 
 ## Getting a Schur form in extended precision
 
