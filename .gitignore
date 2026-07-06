@@ -1,6 +1,15 @@
 Manifest.toml
 test/Manifest.toml
 
+# Machine-local preferences (AMDGPU tuning, pdiv_accurate on FP64-less iGPUs) —
+# never commit: they'd silently apply one machine's workarounds everywhere.
+LocalPreferences.toml
+test/LocalPreferences.toml
+
+# LaTeX build artifacts if the writeup is ever built from this branch's working
+# tree (sources live on the writeup branch)
+writeup/
+
 # benchmark scratch: generated outputs only. bench/Project.toml IS tracked so the
 # GPU backends used for cross-backend perf comparison are reproducible (the
 # resolved bench/Manifest.toml stays local, like the others above).

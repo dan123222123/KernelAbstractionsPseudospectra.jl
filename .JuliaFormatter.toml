@@ -1,0 +1,3 @@
+# SciML style guide: https://github.com/SciML/SciMLStyle
+style = "sciml"
+margin = 92
