@@ -34,6 +34,11 @@ The scripts:
   showing how interpolation-point placement controls the sensitivity of the recovered
   poles. Uses the dense `ℂsvdpsa` (as the paper does for small examples).
 - `ihlpsa_backends.jl` — the same pseudospectra computed on a selectable backend.
+- `ihlpsa_multifloats.jl` — extended-precision pseudospectra with MultiFloats.jl (double-single
+  `Complex{Float32x2}` by default, so it also runs on FP64-less GPUs); the isbits extended floats
+  run inside the GPU kernels unchanged.
+- `ihlpsa_chebspec_oracle.jl` — the accuracy-validation MVE: Float64 vs Float64x2
+  inverse-Lanczos against an independent BigFloat dense-SVD oracle on chebspec (CPU-only).
 - `test_ihlpsa_large.jl` — large-`n` timing sweep (wants an accelerator).
 - `test_real_structured_psa.jl` — real/structured pseudospectra.
 
@@ -86,7 +91,3 @@ Backend ↔ hardware ↔ caveats:
 
 On FP64-less GPUs (Metal, Intel iGPUs) keep matrices in `ComplexF32` — the
 example scripts already default to `ComplexF32` for exactly this reason.
-
-> Aside: the per-device backend selection currently lives as commented `using`
-> lines in each script. A package preference (`Preferences.jl`) could carry a
-> default backend instead — noted as a possible future change, not done here.

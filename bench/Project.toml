@@ -1,19 +1,24 @@
 name = "KAPseudospectraBench"
-authors = ["Dan Folescu"]
 version = "0.1.0"
+authors = ["Dan Folescu"]
 
 [deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+ArraysOfArrays = "65a8f2f4-9b39-5baf-92e2-a9cc46fdf018"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
+GenericSchur = "c145ed77-6b09-5dd9-b285-bf645a82121e"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 KAPseudospectra = "8b8afa22-3073-43c5-8823-151938199226"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MatrixDepot = "b51810bb-c9f3-55da-ae3c-350fc1fbce05"
+MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
+NVTX = "5da4648a-3479-48b8-97b9-01cb529c0a1f"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
-Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
-# GPU backends are optional but listed here so the bench scripts can `using CUDA`
-# (etc.) to compare per-backend performance without a separate `]add` step. Mirror
-# the examples/ environment: instantiate, then add a device's package if needed.
-AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
-CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
-Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
-oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
+[sources]
+KAPseudospectra = {path = ".."}

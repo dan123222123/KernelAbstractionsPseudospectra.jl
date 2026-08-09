@@ -1,9 +1,9 @@
 # pseudospectra calculations using the svd (LAPACK GESDD)
 # svdpsa computations are multi-threaded, but run solely on the CPU
 
-# In-place kernel behind ℂsvdpsa. A, B are `AbstractMatrix` (not `Matrix`) so a standard
-# pencil's `Diagonal` identity B — and any other lazy/wrapped operand — works: the body
-# only needs `z*B - A` and `svdvals`, both generic.
+# In-place kernel behind ℂsvdpsa. A, B are `AbstractMatrix` (not `Matrix`) so a standard pencil's
+# `Diagonal` identity B — and any lazy/wrapped operand — works: the body only needs `z*B - A`
+# and `svdvals`, both generic.
 function ℂsvdpsa!(
         srg::Matrix{S}, zg::Matrix{T}, A::AbstractMatrix{T}, B::AbstractMatrix{T},
         γ::Real, δ::Real) where {T <: Complex{S}} where {S <: Real}
@@ -49,9 +49,9 @@ end
 
 ## structured (real) pseudospectra ##
 
-# 2-norm of the smallest *real* E making z an eigenvalue of (A, B) — the real stability
-# radius (Qiu et al., 1995) at s = z; essentially verbatim from §50 of Trefethen &
-# Embree, "Spectra and Pseudospectra" (2005).
+# 2-norm of the smallest *real* E making z an eigenvalue of (A, B) — the real stability radius
+# (Qiu et al., 1995) at s = z; verbatim from §50 of Trefethen & Embree, "Spectra and
+# Pseudospectra" (2005).
 function distzeigAB(z::T, A::AbstractMatrix{T}, B::AbstractMatrix{T}) where {T <: Complex}
     R = (z * B - A) \ Matrix{T}(I, size(A))
     Rr, Ri = real(R), imag(R)

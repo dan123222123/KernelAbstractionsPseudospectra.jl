@@ -1,11 +1,9 @@
 module MultiFloatsPseudospectra
 
-# Per-limb warp-shuffle broadcast for MultiFloats. The tiled panel solve broadcasts pivots with
-# `KATRSM._trsm_shfl`. The core fallback shuffles the whole value with a single `@shfl`, which is
-# exact for IEEE hardware floats but MISCOMPILES for a multi-limb `MultiFloat` shuffled as one wide
-# composite inside the solve loop (it returns garbage). Shuffling each underlying hardware-float limb
-# separately and reconstructing the value is exact, so this extension overrides `_trsm_shfl` for
-# MultiFloat element types.
+# Per-limb warp-shuffle broadcast for MultiFloats. The core `_trsm_shfl` fallback shuffles a
+# `MultiFloat` as one wide composite via a single `@shfl`, which MISCOMPILES (returns
+# garbage) for multi-limb values. This extension overrides `_trsm_shfl` to shuffle each
+# hardware-float limb separately and reconstruct the value, which is exact.
 
 using MultiFloats: MultiFloat
 using KernelIntrinsics: @shfl, Idx

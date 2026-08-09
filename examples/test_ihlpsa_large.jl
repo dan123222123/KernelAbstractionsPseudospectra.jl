@@ -19,10 +19,10 @@ mkpath(pltdir)
 ##
 open(pltdir * "timing", "w") do f
     T = ComplexF32
-    gx, gy, zg = qgrid(T, (-1, 1), (-1, 1), (300, 300))
+    gx, gy, zg = qgrid(T, (-1, 3), (-3, 3), (300, 300))   # grcar's spectral box
     #for n in [2^m for m = 8:14] # ambitious range...best for multi-device computations
     for n in [2^m for m in 8:12]
-        A = MatrixDepot.golub(T, n)
+        A = MatrixDepot.grcar(T, n)
         # note the first run takes longer to run than subsequent ones -- likely an issue with precompilation
         timschur = @elapsed P = MatrixPencil(schur(A))
         timsrg = @elapsed begin
@@ -32,7 +32,7 @@ open(pltdir * "timing", "w") do f
         write(f, "$(n),$(timschur),$(timsrg)\n")
         flush(f)
         display(psaplot(gx, gy, srg; levels = -6:0.2:-1, size = (1000, 1000)))
-        savefig(pltdir * "golub$(n).svg")
+        savefig(pltdir * "grcar$(n).svg")
     end
 end
 ##

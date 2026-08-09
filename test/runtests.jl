@@ -32,16 +32,15 @@ function test_ihlpsa_parter16(backend; types = (ComplexF32, ComplexF64))
             @testset "F32" begin
                 @test testihlpsa(tdir * "F32parter16.mat", backend, 1e-6)
                 # adaptive (per-point hybrid) vs the same eigtool reference; stops
-                # at the adaptive rtol (measured 3.9e-7 normed — matches fixed run).
+                # at the adaptive rtol, looser than the fixed-nit tol above.
                 @test testihlpsa_adaptive(tdir * "F32parter16.mat", backend, 1e-5)
             end
         end
         if ComplexF64 in types
             @testset "F64" begin
                 @test testihlpsa(tdir * "F64parter16.mat", backend, 1e-14)
-                # adaptive stops at the default F64 rtol=1e-6 (not at eps), so it
-                # lands ~6.1e-11 normed vs the eigtool reference — orders of
-                # magnitude inside plotting accuracy. Tighten `rtol` for more.
+                # adaptive stops at the default F64 rtol=1e-6 (not at eps), well inside
+                # plotting accuracy. Tighten `rtol` for more.
                 @test testihlpsa_adaptive(tdir * "F64parter16.mat", backend, 1e-10)
             end
         end
@@ -54,6 +53,7 @@ include("test_consistency.jl")
 include("test_realsvdpsa.jl")
 include("test_edge_cases.jl")
 include("test_katrsm.jl")
+include("test_tuning_profile.jl")
 
 # Extended-precision (MultiFloats) tests are opt-in ("multifloats" in ARGS — NOT part of `all`),
 # same bring-your-own pattern as the GPU backends below: add the deps, then run
@@ -66,6 +66,8 @@ include("test_katrsm.jl")
 if "multifloats" in ARGS
     include("test_multifloats.jl")
     test_multifloats_accuracy()
+    test_multifloats_f32limb_range()
+    test_multifloats_residual_stop()
 end
 
 # --- backend dispatch ---
@@ -88,6 +90,7 @@ if "cuda" in ARGS
         test_adaptive_backend(CUDABackend())
         test_katrsm_kernels(CUDABackend())
         test_trsm_strategies(CUDABackend())
+        test_tiled_trailing_kernels(CUDABackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(CUDABackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_generic(CUDABackend())
     else
@@ -104,6 +107,7 @@ if "amdgpu" in ARGS
         test_adaptive_backend(ROCBackend())
         test_katrsm_kernels(ROCBackend())
         test_trsm_strategies(ROCBackend())
+        test_tiled_trailing_kernels(ROCBackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(ROCBackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_generic(ROCBackend())
     else
@@ -124,6 +128,7 @@ if "oneapi" in ARGS
         test_adaptive_backend(oneAPIBackend(); types = Ts)
         test_katrsm_kernels(oneAPIBackend(); types = Ts)
         test_trsm_strategies(oneAPIBackend(); types = Ts)
+        test_tiled_trailing_kernels(oneAPIBackend(); types = Ts)
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(oneAPIBackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_generic(oneAPIBackend())
     else
@@ -142,6 +147,7 @@ if "metal" in ARGS
         test_adaptive_backend(MetalBackend(); types = Ts)
         test_katrsm_kernels(MetalBackend(); types = Ts)
         test_trsm_strategies(MetalBackend(); types = Ts)
+        test_tiled_trailing_kernels(MetalBackend(); types = Ts)
         ("multifloats" in ARGS) && test_multifloats_tiled_shuffle(MetalBackend())
         ("multifloats" in ARGS) && test_multifloats_tiled_generic(MetalBackend())
     else

@@ -1,111 +1,181 @@
 # Trsm strategy routing (`trsmIHL!`) + the three solve drivers + the `lockstep_ihl!` inner Lanczos
-# loop. The per-backend device hooks these consume — the device/array/memory interface plus
-# `warp_width` / `device_smem_bytes` / `warp_trsm_safe` — all live in src/backend.jl (overridden by
-# the GPU extensions). Split out of ihlpsa.jl; included after ihlpsa_workspace.jl.
 
-# Workgroup size for the column trsm kernel: the warp width (capped at m) on GPU, 1 on CPU. Override
-# via the `wgs` kwarg to ihlpsa. (`warp_width` is a per-backend hook in src/backend.jl.) The tiled
-# shuffle solve does not use this — its kernels are intrinsically 32-wide.
-function default_wgs(backend, m)
-    KernelAbstractions.isgpu(backend) ? min(m, warp_width(backend)) : 1
+# Workgroup size for the column trsm kernel (1 on CPU). Override via the `wgs` kwarg to ihlpsa.
+# Resolution order: `KAPSEUDO_TRSM_WGS` env > schedule persisted by `tune_trsm_wgs!` (per type+eye,
+# via `tuned_knob`) > `_auto_wgs`.
+const _WGS_CANDIDATES = (32, 64, 128, 256)
+_wgs_pref_key(T, eye::Bool) = "trsm_wgs_$(T)_$(eye ? "eye" : "gen")"
+const _WGS_CACHE = Dict{Tuple{DataType, Bool}, Vector{Tuple{Int, Int}}}()
+const _WGS_CACHE_LOCK = ReentrantLock()
+_clear_wgs_cache!() = (@lock _WGS_CACHE_LOCK empty!(_WGS_CACHE); nothing)
+
+# Zero-setup estimate via the warp width
+function _auto_wgs(backend, m)
+    KernelAbstractions.isgpu(backend) || return 1
+    w = warp_width(backend)
+    m >= 1024 && return min(m, 4w)
+    m >= 512 && return min(m, 2w)
+    return min(m, w)
 end
 
-# Whether the tiled solve can run for pencil `P` on this device. Each trailing tile is
-# 32 × TC × sizeof(ET); the generic (B≠I) kernels use two tiles (sA+sB), the B=I kernels one. TC is a
-# tunable knob (`tiled_tc`), so this checks the narrowest candidate: tiled is usable as long as some TC
-# fits `device_smem_bytes`, so wide non-IEEE types (MultiFloats etc.) can still tile at a narrow TC
-# instead of dropping to `column`. `tiled_tc` then picks the actual (fitting) width.
+# A tuned `wgs` is a piecewise-constant schedule over `m`: "m₀:wgs₀,m₁:wgs₁,…" ascending;
+# resolves to the wgs of the last threshold ≤ m. Malformed input returns `nothing`.
+function _parse_wgs_schedule(s::AbstractString)
+    sched = Tuple{Int, Int}[]
+    for entry in split(s, ',')
+        isempty(strip(entry)) && continue
+        kv = split(entry, ':')
+        length(kv) == 2 || return nothing
+        mth, w = tryparse(Int, strip(kv[1])), tryparse(Int, strip(kv[2]))
+        (mth === nothing || w === nothing || mth < 1 || w < 1) && return nothing
+        push!(sched, (mth, w))
+    end
+    return isempty(sched) ? nothing : sort!(sched; by = first)
+end
+
+_format_wgs_schedule(sched) = join(("$mth:$w" for (mth, w) in sched), ",")
+
+function _wgs_from_schedule(sched, m)
+    wgs = last(first(sched))               # below the first threshold: the schedule's floor
+    for (mth, w) in sched
+        mth <= m || break
+        wgs = w
+    end
+    return wgs
+end
+
+function column_wgs(backend, P)
+    if haskey(ENV, "KAPSEUDO_TRSM_WGS")
+        wgs = parse(Int, ENV["KAPSEUDO_TRSM_WGS"])
+        wgs >= 1 || error("KAPSEUDO_TRSM_WGS must be a positive integer (got $wgs)")
+        return wgs
+    end
+    m = size(P, 1)
+    sched = @lock _WGS_CACHE_LOCK get!(_WGS_CACHE, (eltype(P.A), b_is_identity(P))) do
+        tuned = tuned_knob(_wgs_pref_key(eltype(P.A), b_is_identity(P)))
+        s = tuned === nothing ? nothing : _parse_wgs_schedule(tuned)
+        s === nothing ? Tuple{Int, Int}[] : s
+    end
+    return isempty(sched) ? _auto_wgs(backend, m) : min(m, _wgs_from_schedule(sched, m))
+end
+
+# Whether the tiled solve can run for pencil `P` on this device: true iff the narrowest `TC`
+# candidate's tile(s) fit `device_smem_bytes` (two tiles for B≠I, one for B=I). Lets wide
+# non-IEEE types fall back to a narrow TC instead of `column`; `tile_cols` picks the actual width.
 function tiled_tiles_fit(backend, P)
     ntiles = b_is_identity(P) ? 1 : 2
-    tile = sizeof(eltype(P.A)) * 32 * minimum(_TC_CANDIDATES)
+    tile = sizeof(eltype(P.A)) * tile_warp_rows(backend) * minimum(_TILECOLS_CANDIDATES)
     return ntiles * tile <= device_smem_bytes(backend)
 end
 
-# Trailing-tile column width — the `Val{TC}` of the trailing kernels (src/KATRSM/trsm_tiled_kernels.jl).
-# A shared-memory occupancy knob, decoupled from the 32-wide panel solve. See DESIGN_TRSM.md
-# "Trailing-tile width and occupancy" for the tradeoff.
-#
-# Resolution order: `KAPSEUDO_TRSM_TC` env var > a value persisted by the `tune_trsm_tc!` probe
-# (src/tune.jl), keyed per element type + eye/generic > the analytic estimate `_auto_tiled_tc`. Only
-# called for pencils that passed `tiled_tiles_fit`, so TC=32 is always a valid fallback.
-const _TC_CANDIDATES = (32, 16, 8)         # largest → smallest
+# Trailing tile row count — one warp's worth, so consecutive lanes take consecutive rows and the
+# column-major A/b loads coalesce. Same hook as the panel width, but a distinct role: constrained by
+# memory layout here, not by `@shfl` reach (no shuffle in the trailing kernel).
+tile_warp_rows(backend) = warp_width(backend)
+
+const _TILECOLS_CANDIDATES = (32, 16, 8)         # largest → smallest
 const _MAX_BLOCKS_PER_SM = 32              # per-SM resident-block cap
-const _TARGET_BLOCKS = 3 * _MAX_BLOCKS_PER_SM ÷ 4   # occupancy target for `_auto_tiled_tc`
-_tc_pref_key(T, eye::Bool) = "trsm_tc_$(T)_$(eye ? "eye" : "gen")"
+const _TARGET_BLOCKS = 3 * _MAX_BLOCKS_PER_SM ÷ 4   # occupancy target for `_auto_tile_cols`
+_tilecols_pref_key(T, eye::Bool) = "trsm_tilecols_$(T)_$(eye ? "eye" : "gen")"
 
-# `@load_preference` is a TOML read — too slow to repeat on every `_tiled_trsm!` call, so resolve once
-# per (element type, eye) and cache. The env override is never cached (so `tune_trsm_tc!` / experiments
-# can force a value per call); the probe empties this after persisting so a same-session tune takes
-# effect. Lock-guarded: the multi-GPU driver may resolve concurrently (idempotent; the lock just
-# protects the Dict). Keyed by type+eye, not device: assumes one GPU model per session.
-const _TC_CACHE = Dict{Tuple{DataType, Bool}, Int}()
-const _TC_CACHE_LOCK = ReentrantLock()
-_clear_tc_cache!() = (@lock _TC_CACHE_LOCK empty!(_TC_CACHE); nothing)
+# Cached per (element type, eye): `@load_preference` is a TOML read, too slow per call. Env override
+# is never cached; the tuning probe clears this cache after persisting a new value. Lock-guarded for
+# the concurrent multi-GPU driver. Keyed by type+eye only — assumes one GPU model per session.
+const _TILECOLS_CACHE = Dict{Tuple{DataType, Bool}, Int}()
+const _TILECOLS_CACHE_LOCK = ReentrantLock()
+_clear_tilecols_cache!() = (@lock _TILECOLS_CACHE_LOCK empty!(_TILECOLS_CACHE); nothing)
 
-function tiled_tc(backend, P)
-    if haskey(ENV, "KAPSEUDO_TRSM_TC")
-        tc = parse(Int, ENV["KAPSEUDO_TRSM_TC"])
-        tc in _TC_CANDIDATES ||
-            error("KAPSEUDO_TRSM_TC must be one of $(_TC_CANDIDATES) (got $tc)")
+# Trailing-tile column width — the `Val{NumTileCols}` of the trailing kernels
+# (src/KATRSM/trsm_tiled_kernels.jl). Resolution order: `KAPSEUDO_TRSM_TILECOLS` env >
+# `tune_trsm_tiled!`-persisted value (via `tuned_knob`, keyed by type+eye) > `_auto_tile_cols`.
+# `tiled_tiles_fit` only guarantees the NARROWEST candidate fits shared memory, so `_auto_tile_cols`
+# re-checks the width it picks; the env override is validated for membership only and bypasses both.
+function tile_cols(backend, P)
+    if haskey(ENV, "KAPSEUDO_TRSM_TILECOLS")
+        tc = parse(Int, ENV["KAPSEUDO_TRSM_TILECOLS"])
+        tc in _TILECOLS_CANDIDATES ||
+            error("KAPSEUDO_TRSM_TILECOLS must be one of $(_TILECOLS_CANDIDATES) (got $tc)")
         return tc
     end
-    @lock _TC_CACHE_LOCK get!(_TC_CACHE, (eltype(P.A), b_is_identity(P))) do
-        tuned = @load_preference(_tc_pref_key(eltype(P.A), b_is_identity(P)), nothing)
+    @lock _TILECOLS_CACHE_LOCK get!(_TILECOLS_CACHE, (eltype(P.A), b_is_identity(P))) do
+        tuned = tuned_knob(_tilecols_pref_key(eltype(P.A), b_is_identity(P)))
         tc = tuned === nothing ? nothing : tryparse(Int, tuned)
-        (tc !== nothing && tc in _TC_CANDIDATES) ? tc : _auto_tiled_tc(backend, P)
+        (tc !== nothing && tc in _TILECOLS_CANDIDATES) ? tc : _auto_tile_cols(backend, P)
     end
 end
 
-# Warps per trailing-update block — the `Val{W}` of the trailing kernels. The W warps share one
-# 32×TC @localmem tile and split the `gt` grid points across warps (shared mem/block is unchanged, so
-# `tiled_tiles_fit` doesn't depend on W). Result is bit-identical across W: per-(row,grid-point) FMA
-# order is unchanged. Resolution order mirrors `tiled_tc`: `KAPSEUDO_TRSM_W` env > a value persisted by
-# `tune_trsm_tc!` (per type+eye) > `_DEFAULT_W`.
-const _W_CANDIDATES = (1, 2, 4, 8)
-const _DEFAULT_W = 4                        # zero-setup default; the tuner refines per device+type
-_w_pref_key(T, eye::Bool) = "trsm_w_$(T)_$(eye ? "eye" : "gen")"
-const _W_CACHE = Dict{Tuple{DataType, Bool}, Int}()
-const _W_CACHE_LOCK = ReentrantLock()
-_clear_w_cache!() = (@lock _W_CACHE_LOCK empty!(_W_CACHE); nothing)
+# Warps per trailing-update block. Not a kernel argument: the trailing kernels recover it from the
+# launch as `@groupsize()[1] ÷ NumTileWarpRows`, so it cannot disagree with the geometry. The warps
+# share one `warp_width × TC` @localmem tile and split the `gt` grid points between them.
+# Bit-identical across the count (FMA order per row/grid-point is unchanged). Resolution:
+# `KAPSEUDO_TRSM_BLOCKWARPS` env > `tuned_knob` (per type+eye, persisted by `tune_trsm_tiled!`) >
+# `_DEFAULT_BLOCKWARPS`.
+const _BLOCKWARPS_CANDIDATES = (1, 2, 4, 8)
+const _DEFAULT_BLOCKWARPS = 4                        # zero-setup default; the tuner refines per device+type
+_blockwarps_pref_key(T, eye::Bool) = "trsm_blockwarps_$(T)_$(eye ? "eye" : "gen")"
+const _BLOCKWARPS_CACHE = Dict{Tuple{DataType, Bool}, Int}()
+const _BLOCKWARPS_CACHE_LOCK = ReentrantLock()
+_clear_blockwarps_cache!() = (@lock _BLOCKWARPS_CACHE_LOCK empty!(_BLOCKWARPS_CACHE); nothing)
 
-function tiled_w(backend, P)
-    if haskey(ENV, "KAPSEUDO_TRSM_W")
-        w = parse(Int, ENV["KAPSEUDO_TRSM_W"])
-        w >= 1 || error("KAPSEUDO_TRSM_W must be a positive integer (got $w)")
+function block_warps(backend, P)
+    if haskey(ENV, "KAPSEUDO_TRSM_BLOCKWARPS")
+        w = parse(Int, ENV["KAPSEUDO_TRSM_BLOCKWARPS"])
+        w >= 1 || error("KAPSEUDO_TRSM_BLOCKWARPS must be a positive integer (got $w)")
         return w
     end
-    @lock _W_CACHE_LOCK get!(_W_CACHE, (eltype(P.A), b_is_identity(P))) do
-        tuned = @load_preference(_w_pref_key(eltype(P.A), b_is_identity(P)), nothing)
+    @lock _BLOCKWARPS_CACHE_LOCK get!(_BLOCKWARPS_CACHE, (eltype(P.A), b_is_identity(P))) do
+        tuned = tuned_knob(_blockwarps_pref_key(eltype(P.A), b_is_identity(P)))
         w = tuned === nothing ? nothing : tryparse(Int, tuned)
-        (w !== nothing && w >= 1) ? w : _DEFAULT_W
+        (w !== nothing && w >= 1) ? w : _DEFAULT_BLOCKWARPS
     end
 end
 
-# Analytic per-device+type estimate — no benchmark run. Targets `_TARGET_BLOCKS` resident blocks/SM
-# and picks the largest TC (least narrowing) that reaches it, falling back to the narrowest that fits
-# a block if none do. `tune_trsm_tc!` measures the tradeoff directly instead of using this heuristic.
-function _auto_tiled_tc(backend, P)
+# Grid points per warp per trailing tile — the tile's reuse factor, and (with W) the block count
+# g/(W·gt) of the trailing launch. Resolution: `KAPSEUDO_TRSM_WARPGRIDPTS` env > `tuned_knob`
+# (per type+eye) > `_DEFAULT_WARPGRIDPTS`.
+const _WARPGRIDPTS_CANDIDATES = (32, 16, 8, 4)
+const _DEFAULT_WARPGRIDPTS = 32                      # zero-setup default; the tuner refines per device+type
+_warpgridpts_pref_key(T, eye::Bool) = "trsm_warpgridpts_$(T)_$(eye ? "eye" : "gen")"
+const _WARPGRIDPTS_CACHE = Dict{Tuple{DataType, Bool}, Int}()
+const _WARPGRIDPTS_CACHE_LOCK = ReentrantLock()
+_clear_warpgridpts_cache!() = (@lock _WARPGRIDPTS_CACHE_LOCK empty!(_WARPGRIDPTS_CACHE); nothing)
+
+function warp_gridpts(backend, P)
+    if haskey(ENV, "KAPSEUDO_TRSM_WARPGRIDPTS")
+        n = parse(Int, ENV["KAPSEUDO_TRSM_WARPGRIDPTS"])
+        n >= 1 || error("KAPSEUDO_TRSM_WARPGRIDPTS must be a positive integer (got $n)")
+        return n
+    end
+    @lock _WARPGRIDPTS_CACHE_LOCK get!(_WARPGRIDPTS_CACHE, (eltype(P.A), b_is_identity(P))) do
+        tuned = tuned_knob(_warpgridpts_pref_key(eltype(P.A), b_is_identity(P)))
+        n = tuned === nothing ? nothing : tryparse(Int, tuned)
+        (n !== nothing && n >= 1) ? n : _DEFAULT_WARPGRIDPTS
+    end
+end
+
+# Analytic per-device+type estimate (no benchmark run): targets `_TARGET_BLOCKS` resident blocks/SM,
+# picking the largest TC that reaches it, or the narrowest that fits a block if none do.
+function _auto_tile_cols(backend, P)
     ntiles = b_is_identity(P) ? 1 : 2
     elt = sizeof(eltype(P.A))
     smem_block = device_smem_bytes(backend)        # per-block shared-memory limit
     smem_sm = device_smem_per_sm(backend)          # per-SM shared memory (occupancy estimate)
     best = 0
-    for tc in _TC_CANDIDATES                        # largest first: take the least narrowing that suffices
-        tile = ntiles * 32 * tc * elt
+    for tc in _TILECOLS_CANDIDATES                        # largest first: take the least narrowing that suffices
+        tile = ntiles * tile_warp_rows(backend) * tc * elt
         tile <= smem_block || continue              # must fit a single block
         best = tc
         min(smem_sm ÷ tile, _MAX_BLOCKS_PER_SM) >= _TARGET_BLOCKS && return tc   # hit the occupancy target
     end
-    return best == 0 ? last(_TC_CANDIDATES) : best                               # nothing fit (shouldn't happen post tiled_tiles_fit) → narrowest
+    return best == 0 ? last(_TILECOLS_CANDIDATES) : best                               # nothing fit (shouldn't happen post tiled_tiles_fit) → narrowest
 end
 
 # Non-CPU solve step in lockstep_ihl! — solves in place into bV, routing to column /
 # tiled / tiled-gemm per `trsm_strategy()`.
-# See DESIGN_TRSM.md "Choosing a solve" for the full routing rationale.
 function trsmIHL!(backend, bV, zv, P::SchurMatrixPencil; wgs = missing)
-    wgs = ismissing(wgs) ? default_wgs(backend, size(P, 1)) : wgs
-    # The default `column` needs no routing info, so return early — this keeps the per-iteration
-    # device-property queries (`device_smem_bytes`, etc.) off the default path.
+    wgs = ismissing(wgs) ? column_wgs(backend, P) : wgs
+    # `column` needs no routing info; return early to keep per-iteration device-property
+    # queries (`device_smem_bytes`, etc.) off the default path.
     strat = trsm_strategy()
     if strat == "column"
         return _column_trsm!(backend, bV, zv, P, wgs)
@@ -128,102 +198,104 @@ end
 # Tiled / blocked solve: right-looking panel sweep with shared-memory A,B-tile reuse across
 # the grid-point batch (see src/KATRSM/trsm_tiled_kernels.jl). `z` is conjugated once for
 # the forward (lower-tri Ac,Bc) sweep; the backward sweep uses (A,B,z) directly. `gt` (grid
-# points per trailing tile = the A,B reuse factor) is tunable via KAPSEUDO_TRSM_GT.
+# points per trailing tile = the A,B reuse factor) is tunable via KAPSEUDO_TRSM_WARPGRIDPTS.
 function _tiled_trsm!(backend, bV, zv, P, wgs; gemm::Bool = false)
     m = size(P, 1)
-    g = length(zv)
+    zpd = length(zv)          # grid points in this batch — the driver's zpd
     ET = eltype(P.A)
     Xc = flatview(bV)   # the m×g RHS as a matrix (for the `gemm` trailing `mul!`); shares storage with bV
-    gt = parse(Int, get(ENV, "KAPSEUDO_TRSM_GT", "32"))
-    gt >= 1 || error("KAPSEUDO_TRSM_GT must be a positive integer (got $gt)")
-    # W = warps per trailing-update block (occupancy knob; see `tiled_w`). Each block then covers
-    # W*gt grid points (warp w handles the w-th gt-chunk). Resolution: KAPSEUDO_TRSM_W env >
-    # tuned preference > default.
-    W = tiled_w(backend, P)
-    vw = Val(W)
-    vtc = Val(tiled_tc(backend, P))   # trailing-tile column width (shared-mem occupancy knob, per device+type)
-    nblk = cld(m, 32)
+    gridpts = warp_gridpts(backend, P)   # env > tuned preference > default
+    # Warps per trailing-update block; each covers nwarps*gridpts grid points, warp w the w-th chunk.
+    nwarps = block_warps(backend, P)
+    vcols = Val(tile_cols(backend, P))   # trailing-tile column width (shared-mem knob)
+    # Panel width = the hardware warp width: the panel solve broadcasts each pivot via `@shfl`, so
+    # hardcoding 32 would idle half the lanes on wave64 (CDNA). Trailing tile rows use the same hook
+    # for an unrelated reason (lane→row coalescing, no shuffle) — via `tile_warp_rows`.
+    wp = warp_width(backend)
+    vrows = Val(tile_warp_rows(backend))
+    nblk = cld(m, wp)
     zc = conj(zv)
     eye = b_is_identity(P)   # B = I ⇒ sB-free trailing kernels (half the shared memory)
-    # B≠I gemm scratch: the z-scaled panel (≤32 rows). Scaling x[panel] columns by z before the B GEMM
-    # gives B·(z⊙x) = z⊙(B·x), avoiding a full m×g temp. Only allocated for the generalized gemm path.
-    Xz = gemm && !eye ? similar(Xc, 32, g) : Xc
+    # B≠I gemm scratch (≤ wp rows): scaling x[panel] by z before the B GEMM gives B·(z⊙x) = z⊙(B·x),
+    # avoiding a full m×g temp. Only allocated for the generalized gemm path.
+    Xz = gemm && !eye ? similar(Xc, wp, zpd) : Xc
     # forward (lower-triangular), panels ascending
     for k in 1:nblk
-        koff = (k - 1) * 32
-        plen = min(32, m - koff)
+        poff = (k - 1) * wp
+        psize = min(wp, m - poff)
         if eye
-            @views _tiled_panel_forward_eye(backend, 32)(
-                bV, zc, P.Ac, koff, plen; ndrange = (32, g))
+            @views _tiled_panel_forward_eye(backend, wp)(
+                bV, zc, P.Ac, poff, psize; ndrange = (wp, zpd))
         else
-            @views _tiled_panel_forward(backend, 32)(
-                bV, zc, P.Ac, P.Bc, koff, plen; ndrange = (32, g))
+            @views _tiled_panel_forward(backend, wp)(
+                bV, zc, P.Ac, P.Bc, poff, psize; ndrange = (wp, zpd))
         end
-        rbase = koff + plen
-        ntrail = m - rbase
-        if ntrail > 0
-            rtiles = cld(ntrail, 32)
-            ggrid = cld(g, W * gt)
+        rows = (poff + psize + 1):m
+        if !isempty(rows)
+            rtiles = cld(length(rows), wp)
+            ggrid = cld(zpd, nwarps * gridpts)
             if eye && gemm
-                # trailing update as a GEMM (grid points = wide dim): b[rbase+1:m] += Ac[rbase+1:m, panel]·b[panel].
+                # trailing update as a GEMM (grid points = wide dim): b[rows] += Ac[rows, panel]·b[panel].
                 # Matches the eye kernel formula (z-independent off-diagonal for B=I); α=β=+1.
                 @views mul!(
-                    Xc[(rbase + 1):m, :], P.Ac[(rbase + 1):m, (koff + 1):(koff + plen)],
-                    Xc[(koff + 1):(koff + plen), :], one(ET), one(ET))
+                    Xc[rows, :], P.Ac[rows, (poff + 1):(poff + psize)],
+                    Xc[(poff + 1):(poff + psize), :], one(ET), one(ET))
             elseif gemm
-                # B≠I: b[rbase+1:m] += Ac·x[panel] − zc⊙(Bc·x[panel]). Scale the panel by zc first so the
+                # B≠I: b[rows] += Ac·x[panel] − zc⊙(Bc·x[panel]). Scale the panel by zc first so the
                 # Bc GEMM yields zc⊙(Bc·x) directly (matches the generic forward kernel's z·Bc − Ac formula).
-                pan = (koff + 1):(koff + plen)
-                @views mul!(Xc[(rbase + 1):m, :], P.Ac[(rbase + 1):m, pan],
+                pan = (poff + 1):(poff + psize)
+                @views mul!(Xc[rows, :], P.Ac[rows, pan],
                     Xc[pan, :], one(ET), one(ET))
-                @views Xz[1:plen, :] .= Xc[pan, :] .* transpose(zc)
-                @views mul!(Xc[(rbase + 1):m, :], P.Bc[(rbase + 1):m, pan],
-                    Xz[1:plen, :], -one(ET), one(ET))
+                @views Xz[1:psize, :] .= Xc[pan, :] .* transpose(zc)
+                @views mul!(Xc[rows, :], P.Bc[rows, pan],
+                    Xz[1:psize, :], -one(ET), one(ET))
             elseif eye
-                # tiled kernel trailing update (multi-warp): W warps/block share one tile
-                @views _tiled_trailing_forward_eye(backend, 32 * W)(
-                    bV, P.Ac, koff, plen, rbase, m, gt, rtiles,
-                    vtc, vw; ndrange = 32 * W * rtiles * ggrid)
+                # tiled kernel trailing update: the block's warps share one tile, and their count
+                # comes from the launch's workgroupsize rather than an argument (see `_tiled_trailing`).
+                @views _tiled_trailing_eye(backend, (wp * nwarps, 1))(
+                    bV, P.Ac, poff, psize, rows, gridpts,
+                    vrows, vcols; ndrange = (wp * nwarps * rtiles, ggrid))
             else
-                @views _tiled_trailing_forward(backend, 32 * W)(
-                    bV, zc, P.Ac, P.Bc, koff, plen, rbase, m, gt,
-                    rtiles, vtc, vw; ndrange = 32 * W * rtiles * ggrid)
+                @views _tiled_trailing(backend, (wp * nwarps, 1))(
+                    bV, zc, P.Ac, P.Bc, poff, psize, rows, gridpts,
+                    vrows, vcols; ndrange = (wp * nwarps * rtiles, ggrid))
             end
         end
     end
     # backward (upper-triangular), panels descending
     for k in nblk:-1:1
-        koff = (k - 1) * 32
-        plen = min(32, m - koff)
+        poff = (k - 1) * wp
+        psize = min(wp, m - poff)
         if eye
-            @views _tiled_panel_backward_eye(backend, 32)(
-                bV, zv, P.A, koff, plen; ndrange = (32, g))
+            @views _tiled_panel_backward_eye(backend, wp)(
+                bV, zv, P.A, poff, psize; ndrange = (wp, zpd))
         else
-            @views _tiled_panel_backward(backend, 32)(
-                bV, zv, P.A, P.B, koff, plen; ndrange = (32, g))
+            @views _tiled_panel_backward(backend, wp)(
+                bV, zv, P.A, P.B, poff, psize; ndrange = (wp, zpd))
         end
-        if koff > 0
-            rtiles = cld(koff, 32)
-            ggrid = cld(g, W * gt)
+        rows = 1:poff
+        if !isempty(rows)
+            rtiles = cld(length(rows), wp)
+            ggrid = cld(zpd, nwarps * gridpts)
             if eye && gemm
-                # b[1:koff] += A[1:koff, panel]·b[panel], all grid points at once.
-                @views mul!(Xc[1:koff, :], P.A[1:koff, (koff + 1):(koff + plen)],
-                    Xc[(koff + 1):(koff + plen), :], one(ET), one(ET))
+                # b[1:poff] += A[1:poff, panel]·b[panel], all grid points at once.
+                @views mul!(Xc[1:poff, :], P.A[1:poff, (poff + 1):(poff + psize)],
+                    Xc[(poff + 1):(poff + psize), :], one(ET), one(ET))
             elseif gemm
-                # B≠I: b[1:koff] += A·x[panel] − z⊙(B·x[panel]).
-                pan = (koff + 1):(koff + plen)
-                @views mul!(Xc[1:koff, :], P.A[1:koff, pan], Xc[pan, :], one(ET), one(ET))
-                @views Xz[1:plen, :] .= Xc[pan, :] .* transpose(zv)
+                # B≠I: b[1:poff] += A·x[panel] − z⊙(B·x[panel]).
+                pan = (poff + 1):(poff + psize)
+                @views mul!(Xc[1:poff, :], P.A[1:poff, pan], Xc[pan, :], one(ET), one(ET))
+                @views Xz[1:psize, :] .= Xc[pan, :] .* transpose(zv)
                 @views mul!(
-                    Xc[1:koff, :], P.B[1:koff, pan], Xz[1:plen, :], -one(ET), one(ET))
+                    Xc[1:poff, :], P.B[1:poff, pan], Xz[1:psize, :], -one(ET), one(ET))
             elseif eye
-                @views _tiled_trailing_backward_eye(backend, 32 * W)(
-                    bV, P.A, koff, plen, gt, rtiles, vtc,
-                    vw; ndrange = 32 * W * rtiles * ggrid)
+                @views _tiled_trailing_eye(backend, (wp * nwarps, 1))(
+                    bV, P.A, poff, psize, rows, gridpts,
+                    vrows, vcols; ndrange = (wp * nwarps * rtiles, ggrid))
             else
-                @views _tiled_trailing_backward(backend, 32 * W)(
-                    bV, zv, P.A, P.B, koff, plen, gt, rtiles,
-                    vtc, vw; ndrange = 32 * W * rtiles * ggrid)
+                @views _tiled_trailing(backend, (wp * nwarps, 1))(
+                    bV, zv, P.A, P.B, poff, psize, rows, gridpts,
+                    vrows, vcols; ndrange = (wp * nwarps * rtiles, ggrid))
             end
         end
     end
@@ -251,19 +323,17 @@ function trsmIHL!(backend::CPU, bV, zv, P::SchurMatrixPencil; wgs = missing)
     _batched_backward_solve_pencil(backend)(bV, zv, P.A, P.B, ndrange = g)
 end
 
-# Runs Lanczos iterations `start:nit` on the first g grid points of the batch.
-# `start == 1` (the default) seeds q₁ from x₀ first; `start > 1` resumes a prior
-# call: the loop body at iteration n only reads β[n] plus the Qv[1]/Qv[2]/v state
-# left in the workspace, so continuing is just running more iterations. Resume
-# contract: same `ihl` instance (Qv/v/zv untouched since the previous call), the
-# same `α`/`β` arrays (sized for the deepest nit up front), the same g, and the
-# previous call ended at iteration start-1.
+# Runs Lanczos iterations `start:nit` on the first g grid points of the batch. `start == 1`
+# (default) seeds q₁ from x₀; `start > 1` resumes a prior call — only valid with the same `ihl`
+# instance (Qv/v/zv untouched since), the same sized `α`/`β` arrays, the same g, and the previous
+# call having ended at iteration start-1.
 function lockstep_ihl!(α, β, ihl::IHLworkspace, nit, g; wgs = missing, start::Integer = 1)
     backend = get_backend(ihl)
     if start == 1
-        # `_qₙnext!` writes Qv[2] (= q₁); `_v2v!` then copies all m elements of
-        # each q₁ into v[1:g] before the trsm loop runs. v[1:g] is fully
-        # overwritten there, so no separate seed copy is needed.
+        # Qv[1] (= q₀) is read at n=1 scaled by β[1] ≡ 0, canceling any finite residue from a
+        # reused workspace — but not a Lanczos-breakdown NaN (0·NaN = NaN), so q₀ must be reset.
+        fill!(view(ihl.Qv[1], 1:g, :), zero(eltype(ihl.zv)))
+        # `_qₙnext!` writes Qv[2] (= q₁); `_v2v!` copies it into v[1:g], fully overwriting it.
         _qₙnext!(backend)(view(ihl.Qv[2], 1:g, :), view(β, 2, 1:g), view(ihl.x₀, 1:g), ndrange = g)
         _v2v!(backend)(view(ihl.v, 1:g), view(ihl.Qv[2], 1:g, :), ndrange = g)
     end

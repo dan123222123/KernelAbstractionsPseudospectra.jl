@@ -60,3 +60,18 @@ then run any example as:
 ```sh
 julia --project=examples examples/ihlpsa_backends.jl
 ```
+
+# Benchmarking
+
+The benchmark experiments (per-device parameter sweeps, roofline, driver comparisons)
+live in `bench/`. A single command runs the applicable sweeps for a backend:
+
+```sh
+julia --project=bench -e 'using Pkg; Pkg.instantiate(); Pkg.add("CUDA")'   # backend per device
+julia --project=bench bench/gpu.jl cuda                                    # or amdgpu / oneapi / cpu
+```
+
+Sizes are controlled with `BENCH_MS` / `BENCH_GRIDN` / `BENCH_REPS` (or `KAPSEUDO_BENCH_FULL=1`).
+GPU benchmarks also run on Buildkite (`.buildkite/pipeline.yml`), with experiment selection
+and sizes carried in as build environment variables. See **`bench/README.md`** for the full
+rundown.

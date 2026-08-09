@@ -1,0 +1,103 @@
+# Buildkite benchmarks for KAPseudospectra.jl. What each experiment does, the suite policy,
+# and every sizing knob: bench/README.md (the single home for that documentation).
+#
+# Selection is by build env vars, set in New Build → Environment Variables:
+#   BENCH_EXP       comma list of sections, or "all" (each box's benchmark umbrella).
+#                   Sections: kernels drivers cpu_gpu schur stopping batching baseline
+#                   multigpu nsys counters tune golub repro correctness.
+#   BENCH_ONLY_BOX  a100 | 1080ti — restrict the CUDA jobs to one box.
+# Unset BENCH_EXP ⇒ no jobs run. The box scripts re-read the same list per
+# section (lib/prelude.sh `has_exp`); the `if:` conditions here only decide whether a box's
+# job spins up at all. Long step bodies live in .buildkite/scripts/; they run in the job
+# env, so build-level sizing knobs (BENCH_MS etc.) reach their `${VAR:-default}` expansions
+# directly.
+steps:
+  # ---- cross-vendor CORRECTNESS legs (a test, not a benchmark — BENCH_EXP=repro) -------
+  # Same deterministic pencil/grid/x₀, fixed driver, F32 (Intel has no FP64); the compare
+  # step diffs whichever vendor σ dumps arrived. See bench/cross_vendor_repro.jl.
+  - label: ":microscope: cross-vendor repro — AMD leg"
+    key: "amd-repro-leg"
+    <<: &repro_leg
+      if: build.env("BENCH_EXP") != null && build.env("BENCH_EXP") =~ /repro/
+      plugins: &julia
+        - JuliaCI/julia#v1:
+            version: "1"
+      agents:
+        queue: "rx6900xt-arca380"
+      timeout_in_minutes: 30
+      soft_fail: true
+      artifact_paths:
+        - "bench/results/cross_vendor_sigma_*.csv"
+    command: .buildkite/scripts/repro_leg.sh amdgpu
+
+  - label: ":microscope: cross-vendor repro — Intel leg"
+    key: "intel-repro-leg"
+    <<: *repro_leg
+    command: .buildkite/scripts/repro_leg.sh oneapi
+
+  - label: ":microscope: cross-vendor repro — CUDA leg"
+    key: "cuda-repro-leg"
+    <<: *repro_leg
+    command: .buildkite/scripts/repro_leg.sh cuda
+    agents:
+      queue: "cuda-a100"
+
+  - label: ":microscope: cross-vendor reproducibility compare"
+    if: build.env("BENCH_EXP") != null && build.env("BENCH_EXP") =~ /repro/
+    depends_on:
+      - "amd-repro-leg"
+      - "intel-repro-leg"
+      - "cuda-repro-leg"
+    allow_dependency_failure: true # one vendor's soft_fail mustn't block the diff
+    plugins: *julia
+    command: |
+      mkdir -p bench/results
+      buildkite-agent artifact download "bench/results/cross_vendor_sigma_*.csv" . || true
+      julia --project=bench bench/cross_vendor_compare.jl
+    agents:
+      queue: "rx6900xt-arca380"
+    timeout_in_minutes: 15
+    soft_fail: true
+    artifact_paths:
+      - "bench/results/cross_vendor_repro.csv"
+
+  # ---- 1080 Ti box: multigpu scaling + the f32-limb kernel ladder ----------------------
+  - label: ":nvidia: 1080Ti — multigpu / f32-limb kernels / nsys / nvprof / golub"
+    if: build.env("BENCH_EXP") != null && build.env("BENCH_ONLY_BOX") != "a100" && build.env("BENCH_EXP") =~ /all|multigpu|kernels|counters|nsys|tune|golub/
+    plugins: *julia
+    command: .buildkite/scripts/bench_1080ti.sh
+    agents:
+      queue: "cuda-6xgtx1080ti"
+    timeout_in_minutes: 240
+    soft_fail: # a perf regression (exit 1) must not fail the build — but a signal/timeout must
+      - exit_status: 1
+    artifact_paths:
+      - "bench/results/*"
+
+  # ---- correctness: end-to-end σ vs the BigFloat oracle (pure CPU) ---------------------
+  - label: ":abacus: end-to-end correctness (BigFloat oracle, CPU)"
+    if: build.env("BENCH_EXP") != null && build.env("BENCH_EXP") =~ /correctness/
+    plugins: *julia
+    command: |
+      julia --project=bench -e 'using Pkg; Pkg.instantiate()'
+      mkdir -p bench/results
+      .buildkite/scripts/exp/correctness.sh
+    agents:
+      queue: "cuda-6xgtx1080ti" # pure CPU — any queue with idle cores
+    timeout_in_minutes: 480
+    soft_fail: true
+    artifact_paths:
+      - "bench/results/bench_correctness.csv"
+
+  # ---- A100: everything else, serialized in ONE job ------------------------------------
+  - label: ":rocket: A100 — kernels / drivers / cpu-gpu / schur / stopping / batching / baseline / counters / trace / golub"
+    if: build.env("BENCH_EXP") != null && build.env("BENCH_ONLY_BOX") != "1080ti" && build.env("BENCH_EXP") =~ /all|kernels|drivers|cpu_gpu|schur|stopping|batching|baseline|counters|tune|golub/
+    plugins: *julia
+    command: .buildkite/scripts/bench_a100.sh
+    agents:
+      queue: "cuda-a100"
+    timeout_in_minutes: 720 # covers all sections serialized under "all", and hours-scale golub portraits
+    soft_fail: # a perf regression (exit 1) must not fail the build — but a signal/timeout must
+      - exit_status: 1
+    artifact_paths:
+      - "bench/results/*"

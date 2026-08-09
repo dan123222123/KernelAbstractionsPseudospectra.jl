@@ -2,12 +2,10 @@ module KATRSM
 
 using Preferences
 
-# Complex division for the triangular/pencil solves. Default (`x / d`) widens
-# `Complex{Float16/Float32}` through `double` for accuracy. FP64-less GPUs (most Intel
-# iGPUs, Apple Metal) can't compile that widening — set `pdiv_accurate` to false
-# (`set_pdiv_accurate!(false)`) so `_pdiv` divides in the input precision instead
-# (`x·conj(d)/abs2(d)`), slightly less accurate but the only form such hardware can run.
-# Float64 is unaffected. Baked in at load time: changing it requires restarting Julia.
+# Complex division for triangular/pencil solves. Default widens Complex{Float16/Float32}
+# through Float64 for accuracy; FP64-less GPUs (Intel iGPUs, Apple Metal) can't compile that, so
+# pdiv_accurate=false divides in the input precision instead (less accurate, but the only form
+# such hardware can run). Float64 unaffected. Baked in at load time: needs a Julia restart.
 const PDIV_ACCURATE = @load_preference("pdiv_accurate", true)
 
 if PDIV_ACCURATE
@@ -37,7 +35,7 @@ end
 include("trsm_pencil_wrappers.jl")
 include("trsm_tiled_kernels.jl")
 
-# The underscore kernel entry points are internal — consumers import them explicitly
+# Underscore kernel entry points are internal; consumers import them explicitly
 # (`using .KATRSM: _tiled_panel_forward, ...`) rather than via a blanket export.
 export set_pdiv_accurate!
 

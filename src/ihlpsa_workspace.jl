@@ -1,9 +1,8 @@
 # Lanczos KA kernels and the device-resident per-batch workspace (IHLworkspace) for ihlpsa.
 # Split out of ihlpsa.jl for readability; included from there after `using .KATRSM`.
 
-# Copy a (g × m) 2D source V into a g-vector-of-m-vectors destination W.
-# V is a 2D SubArray (e.g. view(Qv[2], 1:g, :)), not a VectorOfSimilarVectors,
-# so the dimensions come from size(V).
+# Copy a (g × m) 2D source V into a g-vector-of-m-vectors destination W. V is a 2D SubArray
+# (e.g. view(Qv[2], 1:g, :)), not a VectorOfSimilarVectors, so dims come from size(V).
 @kernel function _v2v!(W, V)
     I = @index(Global, Linear)
     g, m = size(V)
@@ -15,10 +14,9 @@
     end
 end
 
-# Normalize v[I] into row I of Q and return the norm — the shared normalize step of
-# the two Lanczos kernels below. `reseed` also overwrites v[I] with the normalized
-# vector (the next iteration's solve RHS); it is a literal at both call sites, so the
-# branch folds away after inlining.
+# Normalize v[I] into row I of Q and return the norm — shared by the two Lanczos kernels
+# below. `reseed` also overwrites v[I] with the normalized vector (next iteration's RHS);
+# it's a literal at both call sites, so the branch folds away after inlining.
 @inline function _normalize_row!(Q, v, I, reseed)
     vnorm = zero(real(eltype(v[I])))
     # @inbounds: callers guard I ≤ g = length(v); loops run over m = length(v[I]) = size(Q, 2)
@@ -36,9 +34,8 @@ end
     return vnorm
 end
 
-# Normalize each v[I] into Qₙ₊₁ and record the norms in βₙ₊₁, one thread per grid
-# point. v is a length-g vector of m-dim vectors; βₙ₊₁ is g-dim; Qₙ₊₁ is a (g × m)
-# matrix view of the Qv workspace.
+# Normalize each v[I] into Qₙ₊₁ and record the norms in βₙ₊₁, one thread per grid point.
+# v: length-g vector of m-dim vectors; βₙ₊₁: g-dim; Qₙ₊₁: (g × m) matrix view of Qv.
 @kernel function _qₙnext!(Qₙ₊₁, βₙ₊₁, v)
     I = @index(Global, Linear)
     g = length(v)
@@ -71,11 +68,10 @@ end
     end
 end
 
-# Gather rows `keepd` of a (g, m, k) source into a packed (nkeep, m, k) prefix; used
-# for the adaptive survivor gather of the Qv workspace. Do NOT replace with a plain
-# `src[keep,:,:]` fancy index: GPUArrays' first-axis fancy indexing of a 3-D array is
-# miscompiled on oneAPI (silently wrong rows + device out-of-bounds, even through a
-# 2-D reshape). Last-axis gathers (`[:, keep]`) are unaffected and fine as fancy indexing.
+# Gather rows `keepd` of a (g, m, k) source into a packed (nkeep, m, k) prefix; used for the
+# adaptive survivor gather of the Qv workspace. Do NOT replace with `src[keep,:,:]` fancy
+# indexing: GPUArrays' first-axis fancy indexing of a 3-D array is miscompiled on oneAPI (wrong
+# rows + device out-of-bounds, even through a 2-D reshape). Last-axis gathers (`[:, keep]`) are fine.
 @kernel function _qv_gather!(dst, @Const(src), @Const(keepd))
     i, j, k = @index(Global, NTuple)
     @inbounds dst[i, j, k] = src[keepd[i], j, k]
@@ -106,9 +102,9 @@ function IHLworkspace(P::AbstractMatrixPencil{T}, maxbatch, x₀ = missing) wher
         x = randn(T, m)
         x₀ = VectorOfSimilarVectors(repeat(x / norm(x), outer = (1, maxbatch)))
     elseif !(x₀ isa VectorOfSimilarVectors)
-        # User-supplied x₀ is in the original-A basis, but ihlpsa runs Lanczos in the
-        # Schur basis; Z'x₀ maps it across (P.Z = identity for a raw, non-Schur pencil,
-        # making this a no-op) so Ritz values match textbook Lanczos on x₀ in A's basis.
+        # User-supplied x₀ is in the original-A basis, but ihlpsa runs Lanczos in the Schur
+        # basis; Z'x₀ maps it across (a no-op when P.Z = identity) so Ritz values match
+        # textbook Lanczos on x₀ in A's basis.
         x₀ = P.Z' * x₀
         x₀ = VectorOfSimilarVectors(repeat(x₀ / norm(x₀), outer = (1, maxbatch)))
     end

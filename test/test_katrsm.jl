@@ -74,6 +74,43 @@ _from(x) = adapt(Array, x)
             @test isapprox(y, yref; rtol = rtol)
         end
     end
+
+    # The column solve's `wgs` resolves through a piecewise-constant schedule over `m`
+    # (`tune_trsm_wgs!` persists it); these cover the pure host-side parse/lookup, which is
+    # where a malformed or hand-edited preference would otherwise surface as a runtime error.
+    @testset "wgs schedule" begin
+        parse_s = KAPseudospectra._parse_wgs_schedule
+        from_s = KAPseudospectra._wgs_from_schedule
+
+        sched = parse_s("32:32,512:64,1024:128")
+        @test sched == [(32, 32), (512, 64), (1024, 128)]
+        @test KAPseudospectra._format_wgs_schedule(sched) == "32:32,512:64,1024:128"
+        @test parse_s(" 512 : 64 , 32:32 ") == [(32, 32), (512, 64)]   # whitespace + reordering
+        @test parse_s("128:64") == [(128, 64)]                          # m-independent optimum
+
+        @test from_s(sched, 16) == 32        # below the first threshold → the schedule's floor
+        @test from_s(sched, 32) == 32
+        @test from_s(sched, 511) == 32       # between thresholds → the lower one
+        @test from_s(sched, 512) == 64
+        @test from_s(sched, 4096) == 128     # above the last → the top entry
+
+        # Malformed values must degrade to `_auto_wgs`, never throw on a solve.
+        for bad in ("", "  ", "32", "32:", ":64", "a:64", "32:b", "32:64:128", "0:64", "32:0")
+            @test parse_s(bad) === nothing
+        end
+    end
+
+    @testset "wgs resolution" begin
+        P = MatrixPencil(schur(_rand_uppertri(ComplexF64, 16)))
+        @test KAPseudospectra._auto_wgs(CPU(), 1024) == 1        # CPU is always serial per point
+        @test KAPseudospectra.column_wgs(CPU(), P) == 1
+        withenv("KAPSEUDO_TRSM_WGS" => "128") do
+            @test KAPseudospectra.column_wgs(CPU(), P) == 128    # env wins over everything
+        end
+        withenv("KAPSEUDO_TRSM_WGS" => "0") do
+            @test_throws ErrorException KAPseudospectra.column_wgs(CPU(), P)
+        end
+    end
 end
 
 # Backend-parameterized KA kernel tests; called once per available backend from runtests.jl.
@@ -238,13 +275,12 @@ function test_trsm_strategies(backend; types = (ComplexF32, ComplexF64))
             # Standard (B=I) pencil. Sizes span power-of-two panels and partial last panels (m not a
             # multiple of 32), and small m < 32 (the tiled panel solve is intrinsically 32-wide and
             # masks lanes past a partial last panel — exercised here end-to-end via `tiled`).
-            # 64/256 were folded in from the former bench/tiled_check.jl.
             for m in (8, 16, 31, 32, 64, 100, 128, 256, 300)
                 rng = Random.seed!(2024)
                 check(MatrixPencil(schur(randn(rng, T, m, m))), T)
             end
             # Generalized (B≠I) pencil: the ONLY coverage of the two-tile generic tiled trailing
-            # kernels (_tiled_trailing_{forward,backward}) and the B≠I tiled/column paths — every
+            # kernels (`_tiled_trailing`, both sweeps) and the B≠I tiled/column paths — every
             # other case here is B=I, so `b_is_identity` selects the sB-free `*_eye` kernels. m>32 so
             # the trailing update actually runs; 100 adds a partial last panel. B is diagonally
             # dominant so z*B−A stays well-conditioned across the grid.
@@ -253,6 +289,79 @@ function test_trsm_strategies(backend; types = (ComplexF32, ComplexF64))
                 A = randn(rng, T, m, m)
                 B = randn(rng, T, m, m) + T(5) * I
                 check(MatrixPencil(A, B), T)
+            end
+        end
+    end
+end
+
+# Unit coverage for the tiled TRAILING kernels across the whole knob grid the tuner may persist.
+# `tune_trsm_tiled!` picks one (TC, W, gt) out of `_TILECOLS_CANDIDATES × _BLOCKWARPS_CANDIDATES × _WARPGRIDPTS_CANDIDATES`
+# per device+type, but `test_trsm_strategies` above only ever runs whichever combination the
+# resolvers happen to return — so every OTHER combination the tuner might select would otherwise
+# ship unverified (tuned full-rate-FP64 hardware persists TC=8/W=8/gt=4, none of which is the
+# zero-setup default).
+#
+# Not gated on `warp_trsm_safe`: that gate exists for the panel solve's warp shuffle
+# and these kernels use none, so they run even where the `tiled` STRATEGY self-gates to `column`
+# (Intel, Metal) — which is what makes this runnable off a CUDA box. CPU is excluded because KA's
+# barrier transform cannot compile them: per-workitem values don't survive the `@synchronize`
+# phase split, so the CPU codegen raises `UndefVarError`.
+#
+# Reference is a dense GEMM over the panel, matching the kernel formulas in trsm_tiled_kernels.jl:
+# B=I gives `x[rows] += A[rows,panel]·x[panel]`, generic gives `x[rows] -= (z·B − A)[rows,panel]·x[panel]`.
+function test_tiled_trailing_kernels(backend; types = (ComplexF32, ComplexF64))
+    KernelAbstractions.isgpu(backend) || return
+    wrows = KAPseudospectra.tile_warp_rows(backend)
+    @testset "tiled trailing kernels over the tuner's knob grid -- $(backend)" begin
+        # (m, poff): partial row tile, partial panel, and poff=0 (backward no-op boundary).
+        for T in types, (m, poff) in ((128, 32), (100, 64), (37, 0))
+            rtol = _tol(T)
+            psize = min(32, m - poff)
+            rbase = poff + psize
+            pan = (poff + 1):(poff + psize)
+            g = 70                       # not a multiple of any W*gt ⇒ partial grid tile
+            rng = Random.Xoshiro(0x7A11 + m + poff)
+            A = randn(rng, T, m, m)
+            Bm = randn(rng, T, m, m) + T(5) * I
+            zv = T(2) .+ T(3 // 10) .* randn(rng, T, g)
+            X0 = reduce(hcat, [randn(rng, T, m) for _ in 1:g])
+            Ad, Bd, zd = _to(backend, A), _to(backend, Bm), _to(backend, zv)
+
+            for rows in ((rbase + 1):m, 1:poff)
+                isempty(rows) && continue
+                rtiles = cld(length(rows), wrows)
+                ref_eye = copy(X0)
+                ref_eye[rows, :] .+= A[rows, pan] * X0[pan, :]
+                ref_gen = copy(X0)
+                for j in 1:g
+                    ref_gen[rows, j] .-= (zv[j] .* Bm[rows, pan] .- A[rows, pan]) * X0[pan, j]
+                end
+
+                for TC in KAPseudospectra._TILECOLS_CANDIDATES,
+                    W in KAPseudospectra._BLOCKWARPS_CANDIDATES,
+                    gt in KAPseudospectra._WARPGRIDPTS_CANDIDATES
+
+                    ndr = (wrows * W * rtiles, cld(g, W * gt))
+                    for (eye, ref) in ((true, ref_eye), (false, ref_gen))
+                        # Same shared-memory admission the tuner applies before probing a TC.
+                        ntiles = eye ? 1 : 2
+                        ntiles * wrows * TC * sizeof(T) <=
+                        KAPseudospectra.device_smem_bytes(backend) || continue
+                        X = _to(backend, copy(X0))
+                        bV = VectorOfSimilarVectors(X)
+                        if eye
+                            KATRSM._tiled_trailing_eye(backend, (wrows * W, 1))(
+                                bV, Ad, poff, psize, rows, gt, Val(wrows), Val(TC);
+                                ndrange = ndr)
+                        else
+                            KATRSM._tiled_trailing(backend, (wrows * W, 1))(
+                                bV, zd, Ad, Bd, poff, psize, rows, gt, Val(wrows), Val(TC);
+                                ndrange = ndr)
+                        end
+                        KernelAbstractions.synchronize(backend)
+                        @test isapprox(Array(X), ref; rtol = rtol)
+                    end
+                end
             end
         end
     end

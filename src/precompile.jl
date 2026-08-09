@@ -1,9 +1,9 @@
 # Precompile workloads: the CPU workload runs here; the GPU extensions call the two
 # helpers from their own @compile_workload blocks.
 
-# Shared precompile body for the GPU extensions: exercises the fixed and adaptive `ihlpsa`
-# paths, for both a B=I and a true B≠I pencil, on one device, so each extension's
-# `@compile_workload` traces the backend-specialized method instances.
+# Shared precompile body for the GPU extensions: exercises the fixed and adaptive `ihlpsa` paths,
+# for both a B=I and a B≠I pencil, so each extension's `@compile_workload` traces the
+# backend-specialized method instances.
 function _precompile_ihlpsa(backend, dev, Ts)
     for T in Ts
         _, _, zg = qgrid(T, (-4, 4), (-4, 4), (100, 100))
@@ -18,10 +18,9 @@ function _precompile_ihlpsa(backend, dev, Ts)
     return nothing
 end
 
-# Opt-in (PRECOMPILE_GPU_KERNELS) extension of the GPU precompile workload: exercises the
-# `tiled` solve so its CodeInstances get created during precompilation. Guarded: a flaky
-# precompile-worker GPU *execution* is tolerated since the kernel still *compiles* (the
-# CodeInstance is what we need cached), so a failure degrades gracefully.
+# Opt-in (PRECOMPILE_GPU_KERNELS) extension of the GPU precompile workload: exercises the `tiled`
+# solve so its CodeInstances get created. Guarded: a flaky precompile-worker GPU *execution* is
+# tolerated since the kernel still *compiles* (the CodeInstance is what's cached).
 function _precompile_gpu_kernels(backend, dev, Ts)
     try
         withenv("KAPSEUDO_TRSM" => "tiled") do

@@ -37,10 +37,10 @@ function MatrixPencil(A::AbstractMatrix{T},
     return MatrixPencil(schur(A, B))
 end
 
-# Schur-factored pencil for the GPU trsm path. The compile-time `STD` tag (true ⇒ B = I standard,
-# false ⇒ B ≠ I generalized) drives kernel selection and the adapt below at compile time, not via a
-# runtime flag. Z is the right Schur transform (A_orig = Z·A·Z'), used by ihlpsa to bring x₀ into the
-# Schur basis. Ac/Bc are lazy conjugate-transpose views on the host, materialized on device below.
+# Schur-factored pencil for the GPU trsm path. The compile-time `STD` tag (B = I standard vs
+# B ≠ I generalized) drives kernel selection and the adapt rule below, not a runtime flag. Z is
+# the right Schur transform (A_orig = Z·A·Z'), used by ihlpsa to bring x₀ into the Schur basis.
+# Ac/Bc are lazy conjugate-transpose views on the host, materialized on device below.
 struct SchurMatrixPencil{T, STD, MA <: AbstractMatrix{T}, MAc <: AbstractMatrix{T},
     MB <: AbstractMatrix{T}, MBc <: AbstractMatrix{T},
     MZ <: AbstractMatrix{T}} <: AbstractMatrixPencil{T}
@@ -68,6 +68,27 @@ function MatrixPencil(F::GeneralizedSchur{T}) where {T <: Complex}
     SchurMatrixPencil{T, false}(F.S, F.S', F.T, F.T', F.Z)
 end
 
+"""
+    bigfloat_schur_factor(A; bits=256) -> Matrix{Complex{BigFloat}}
+
+Upper-triangular Schur factor `T` of `A` (with `A = Z T Z'`), computed at `bits` of
+`BigFloat` precision. Lives in the `GenericSchurPseudospectra` extension, available once
+`GenericSchur` and `MultiFloats` are both loaded. Needed because LAPACK's `schur` is
+IEEE-only; backs `MatrixPencil(A::AbstractMatrix{<:Union{MultiFloat, Complex{<:MultiFloat}}})`.
+"""
+function bigfloat_schur_factor end
+
+"""
+    bigfloat_qz_factor(A, B; bits=256) -> (S, T)
+
+Upper-triangular generalized Schur (QZ) factors of the pencil `(A, B)`
+(`A = Q S Z'`, `B = Q T Z'`), computed at `bits` of `BigFloat` precision — the
+generalized analogue of [`bigfloat_schur_factor`](@ref). Lives in the
+`GenericSchurPseudospectra` extension; backs the `B ≠ I` case of `MatrixPencil` for
+MultiFloat element types. O(hours) at `m ≳ 512` — cache the factors if a size is revisited.
+"""
+function bigfloat_qz_factor end
+
 Base.size(x::AbstractMatrixPencil) = size(x.A)
 Base.size(x::AbstractMatrixPencil, i) = size(x.A, i)
 KernelAbstractions.get_backend(x::AbstractMatrixPencil) = get_backend(x.A)
@@ -93,6 +114,24 @@ function Adapt.adapt_structure(to, P::SchurMatrixPencil{T, STD}) where {T, STD}
     end
 end
 
+# Elements an array contributes once adapted: dense arrays their full length, a Diagonal its
+# diagonal (Adapt keeps the wrapper, so it never inflates to m²).
+_stored_elems(A::AbstractMatrix) = length(A)
+_stored_elems(D::Diagonal) = length(D.diag)
+
+# Bytes the adapt rules above place on device for `P`: Ac/Bc materialize dense, Z ships as
+# stored, and a standard pencil's B/Bc share ONE Diagonal identity.
+_device_pencil_bytes(P::AbstractMatrixPencil{T}) where {T} = sizeof(T) * 4 * size(P, 1)^2
+function _device_pencil_bytes(P::MatrixPencil{T}) where {T}
+    sizeof(T) * (_stored_elems(P.A) + _stored_elems(P.B))
+end
+function _device_pencil_bytes(P::SchurMatrixPencil{T, STD}) where {T, STD}
+    m = size(P, 1)
+    elems = _stored_elems(P.A) + m^2 + _stored_elems(P.Z)      # A + dense Ac + Z
+    elems += STD ? m : (_stored_elems(P.B) + m^2)              # shared Id, or B + dense Bc
+    sizeof(T) * elems
+end
+
 # Input validation shared by ℂsvdpsa/ℝsvdpsa/ihlpsa: non-empty shift grid, matching
 # A/B sizes (unless B is a UniformScaling), and valid (γ, δ) weights.
 function validate(zg, A::AbstractMatrix, B, γ = missing, δ = missing)
@@ -109,7 +148,7 @@ function validate(zg, P::AbstractMatrixPencil, γ = missing, δ = missing)
 end
 
 # Validate the (γ,δ) perturbation weights (value `σ_min(zB − A)/(γ + δ|z|)`): γ, δ ≥ 0, not both
-# zero. The set only depends on (γ,δ) up to a common scale. Shared by ℂsvdpsa, ihlpsa, and the
+# zero (the set only depends on (γ,δ) up to a common scale). Shared by ℂsvdpsa, ihlpsa, and the
 # adaptive driver so all paths accept the same inputs.
 function _validate_weights(γ, δ)
     (γ ≥ 0 && δ ≥ 0) ||

@@ -27,19 +27,17 @@ end
         @inline backward_solve_pencil!(b, z, A, B)
     end
 end
-# One workgroup per pencil (not one workitem): off-diagonal updates in a solved column are mutually
-# independent, so the workgroup does them in parallel, cycling if the workgroup is smaller than m.
+# One workgroup per pencil (not one workitem): off-diagonal updates in a solved column are
+# mutually independent, so the workgroup does them in parallel, cycling if smaller than m.
 #
-# Generic (B≠I) and B=I ("eye") kernels share only the per-element formula, via `_piv_elem`/`_offd_elem`
-# (`Val{false}` ⇒ `zBAij`; `Val{true}` ⇒ the B-free reduction `z-A[j,j]`/`-A[i,j]`). The eye kernels take
-# a single matrix and pass `B = nothing`, so they never read B. Eye and generic results match to
-# round-off.
+# Generic (B≠I) and eye (B=I) kernels share only the per-element formula, via
+# `_piv_elem`/`_offd_elem` (`Val{false}` ⇒ `zBAij`; `Val{true}` ⇒ the B-free reduction). Eye
+# kernels pass `B = nothing`.
 #
-# The loop body (lane-0 pivot into @localmem, broadcast via @synchronize) is written directly in each
-# @kernel rather than factored into a shared helper: KA's CPU backend can only split a kernel at
-# @synchronize points that are LEXICALLY inside the @kernel body — hiding them in an inlined helper
-# raises "@synchronize used outside kernel" on CPU (GPU backends inline through it fine, but CI runs
-# CPU). Dispatched from `_column_trsm!` per `b_is_identity(P)`. See DESIGN_TRSM.md.
+# The loop body is duplicated in each @kernel rather than factored into a shared helper: KA's CPU
+# backend can only split a kernel at @synchronize points LEXICALLY inside the @kernel body —
+# hiding them in an inlined helper raises "@synchronize used outside kernel" on CPU. Dispatched
+# from `_column_trsm!` per `b_is_identity(P)`.
 @kernel function _batched_column_oriented_forward_solve_pencil(bv, zv, @Const(A), @Const(B))
     @uniform begin
         BLKSIZE = @groupsize()[1]
