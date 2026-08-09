@@ -12,3 +12,8 @@ PerformanceTestTools = "dc46b164-d16f-48ec-a853-60448fc869fe"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TestItems = "1c621080-faea-4a02-84b6-bbd5e436b8fe"
+
+# Resolve the package under test from the checkout, relative — same as examples/ and bench/.
+# Without this Pkg records an absolute dev path in test/Manifest.toml, which is machine-specific.
+[sources]
+KAPseudospectra = {path = ".."}
