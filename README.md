@@ -29,10 +29,56 @@ srg = ihlpsa(CPU(), zg, P; verbose=true)     # also logs the convergence depth r
 
 Adaptive convergence is tunable with keyword arguments (`rtol`, `atol`, `nit_chunk`,
 `nit_max`, …) and `γ`,`δ` for perturbation scaling — see the `ihlpsa` docstring for
-the full list. Pass `devs` to restrict which GPUs are used.
+the full list. Pass `devs` to restrict which GPUs are used, and `on_batch` to receive
+each group of grid points as it retires, rather than waiting for the whole field:
+
+```julia
+ihlpsa(CPU(), zg, P; on_batch = (idx, σ, nit) -> checkpoint(idx, σ))
+```
+
+`idx` indexes the returned matrix, every grid point arrives exactly once, and the values
+match the final return — useful for checkpointing a long solve. Deliveries are serialized,
+so the callback need not be thread-safe.
 
 On FP64-less GPUs (Intel iGPUs, Apple Metal) call `set_pdiv_accurate!(false)` so the
 Float32 solves compile — the default uses Base's more accurate division, which needs FP64.
+
+# Extended precision
+
+`ihlpsa` and the KATRSM triangular solves are generic over the complex element type, so
+MultiFloats.jl's isbits extended floats run *inside* the kernels — GPU included — with no
+package changes. Load `GenericSchur` alongside `MultiFloats` and `MatrixPencil` reduces the
+pencil at `BigFloat`, rounding the triangular factor back to the working type:
+
+```julia
+using KAPseudospectra, KernelAbstractions, MatrixDepot
+using MultiFloats, GenericSchur, GenericLinearAlgebra   # generic Schur + tridiagonal eigen
+
+A = MatrixDepot.grcar(Float64x4, 64)                    # ~64 digits
+P = MatrixPencil(A)                                     # reduced at BigFloat, rounded to Float64x4
+_, _, zg = qgrid(Complex{Float64x4}, (-1, 3), (-3, 3), (60, 60))
+srg = ihlpsa(CPU(), zg, P)
+```
+
+The reduction is what makes this worth doing: a Float64 LAPACK Schur caps the end-to-end
+result near 1e-15 however wide the solve arithmetic is, so widening the solve alone buys
+nothing. Without `GenericSchur` loaded, a MultiFloat pencil fails with a clean `MethodError`.
+See `examples/ihlpsa_multifloats.jl` and `examples/ihlpsa_chebspec_oracle.jl`.
+
+# Device tuning
+
+The triangular solve has per-device knobs — trailing-tile width, warps per block, grid points
+per warp, and the column solve's workgroup size — which default to heuristics.
+`KAPseudospectra.tune_trsm!` probes a device and can persist what it finds as a profile:
+
+```julia
+KAPseudospectra.tune_trsm!(CUDABackend(); profile = "mybox.toml")
+```
+
+Point `KAPSEUDO_TUNE_PROFILE` at that file to use it. `tune_profile_path()`, `tune_profile()`
+and `reload_tuning!()` inspect and re-read the active profile. Per knob the resolution order is
+`KAPSEUDO_TRSM_*` environment variable > profile > `LocalPreferences.toml` > heuristic. Tuned
+profiles for the CI machines are tracked in `bench/tuning/`.
 
 # Examples
 Check out `examples/` for scripts that showcase usage of this package. See
@@ -42,6 +88,8 @@ Check out `examples/` for scripts that showcase usage of this package. See
 - `loewner_pseudospectra.jl` -- reproduces Example 1 of Embree & Ioniţă, *Pseudospectra of Loewner Matrix Pencils* (2022): how interpolation-point placement controls the sensitivity of poles recovered by Loewner realization
 - `ihlpsa_backends.jl` -- a good starting point, showing how to switch between device-specific backends (`CUDA` and `AMDGPU` have been tested thusfar)
   Note, `AMDGPU` currently requires running Julia with a single thread (there is a bug in Julia when running with multiple threads, likely related to premature garbage collection)
+- `ihlpsa_multifloats.jl` -- extended precision in practice: where a `ComplexF32` solve reports the wrong σ near a strongly non-normal spectrum, and double-single recovers it
+- `ihlpsa_chebspec_oracle.jl` -- the same pseudospectra three ways on chebspec (`ComplexF64`, `Complex{Float64x2}`, and a 256-bit BigFloat dense-SVD oracle), reporting median and worst relative error
 - `test_real_structured_psa.jl` -- compute structured/unstructured pseudospectra for a matrix using `CPU()` and plot them together
 - `test_ihlpsa_large.jl` -- timing sweep over increasingly large matrices (CPU by default; uncomment a backend for an accelerator), writing timing information and plots to `examples/test_large_results/`
 
