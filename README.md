@@ -5,6 +5,9 @@ Accelerated pseudospectral calculations using KernelAbstractions.jl
 1) Clone this repo
 2) Inside of the Julia REPL (preferably within a top-level environment e.g. @v1.10, etc.) run `]dev path/to/KAPseudospectra.jl`
 3) You may need to run `]instantiate` to resolve package dependencies of `KAPseudospectra.jl`
+4) Run `]add KernelAbstractions` — the backend types (`CPU()`, and the GPU backends) come from
+   it, so it has to be in *your* environment, not just this package's. Add the vendor package
+   for your device (`]add CUDA`/`AMDGPU`/`Metal`/`oneAPI`) to run on a GPU.
 
 # Usage
 `ihlpsa` computes pseudospectra (resolvent-norm contours) of a matrix pencil over
@@ -13,7 +16,7 @@ devices of the chosen KernelAbstractions backend.
 
 ```julia
 using KAPseudospectra, KernelAbstractions   # + `using CUDA`/`AMDGPU`/... for a GPU backend
-A = my_matrix
+A = ComplexF64.(my_matrix)                   # a complex element type is required
 P = MatrixPencil(A)                          # or MatrixPencil(A, B) for a pencil zB − A
 _, _, zg = qgrid(ComplexF64, (-2, 5), (-4.5, 4.5), (300, 300))   # grid of shifts
 
@@ -42,6 +45,8 @@ so the callback need not be thread-safe.
 
 On FP64-less GPUs (Intel iGPUs, Apple Metal) call `set_pdiv_accurate!(false)` so the
 Float32 solves compile — the default uses Base's more accurate division, which needs FP64.
+It writes the setting to `LocalPreferences.toml`, so it is a one-time call, but Julia has to
+be restarted before it takes effect.
 
 # Extended precision
 
