@@ -8,7 +8,7 @@
 # adding that backend package first — see "Running on a GPU" in examples/README.md).
 using LinearAlgebra, MatrixDepot
 using KernelAbstractions
-using KAPseudospectra
+using KernelAbstractionsPseudospectra
 ##
 
 ## choose your backend
@@ -40,7 +40,7 @@ srg = ihlpsa(backend, zg, P; wgs)
 ihlpsa(backend, zg, P; wgs, verbose = true)   # (a) verbose=true logs the deepest depth reached
 # (b) the un-exported driver returns (σ, nit_grid): nit_grid[i] is the depth
 #     at which grid point i retired
-srg_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; wgs)
+srg_adp, nit_grid = KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P; wgs)
 @info "adaptive driver" deepest=maximum(nit_grid) shallowest=minimum(nit_grid) mean_depth=sum(nit_grid)/length(nit_grid)
 ##
 
@@ -53,7 +53,7 @@ rel = maximum(abs, srg_adp .- srg_fixed) / maximum(abs, srg_fixed)
 ##
 
 ## 4) tighten the tolerance — costs more depth, sharper σ
-srg_tight, nit_grid_tight = KAPseudospectra._ihlpsa_adaptive(
+srg_tight, nit_grid_tight = KernelAbstractionsPseudospectra._ihlpsa_adaptive(
     backend, zg, P; wgs, rtol = 1e-6)
 @info "tighter rtol" deepest_default=maximum(nit_grid) deepest_tight=maximum(nit_grid_tight)
 ##
@@ -61,7 +61,7 @@ srg_tight, nit_grid_tight = KAPseudospectra._ihlpsa_adaptive(
 ## 5) plot — σ (left) vs per-point Lanczos depth (right); top row default rtol, bottom row rtol=1e-6
 using Plots
 
-# σ pseudospectra contour (eigenvalues overlaid) via the KAPseudospectra recipe
+# σ pseudospectra contour (eigenvalues overlaid) via the KernelAbstractionsPseudospectra recipe
 σcontour(srg, title) = psaplot(gx, gy, srg, eigvals(A); levels = -3:0.25:0, title = title)
 # per-point adaptive Lanczos depth map
 depthmap(nit, title) = heatmap(gx, gy, nit; color = :viridis, title = title)

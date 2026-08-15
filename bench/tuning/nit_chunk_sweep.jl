@@ -34,7 +34,7 @@ logln, logio = bench_logger(joinpath(RESULTS, "nit_chunk_sweep_log.txt"))
 # Device count for the header; `reclaim_all` (from bench_common) resets the per-device
 # allocator state between configs so none inherits another's.
 const NDEV = KernelAbstractions.isgpu(BACKEND) ?
-             length(collect(KAPseudospectra.devices(BACKEND))) : 1
+             length(collect(KernelAbstractionsPseudospectra.devices(BACKEND))) : 1
 
 # best-of-REPS adaptive run at a given nit_chunk. `_ihlpsa_adaptive` returns (σ, nit_grid);
 # nu = maximum(nit_grid) is the depth reached. nit_max stays fixed across the sweep.
@@ -45,7 +45,7 @@ function best_adaptive(zg, P, nit_chunk, nit_max, zpd)
     for _ in 1:REPS
         reclaim_all(BACKEND);
         local ng = nothing
-        t = @elapsed ((_, ng) = KAPseudospectra._ihlpsa_adaptive(
+        t = @elapsed ((_, ng) = KernelAbstractionsPseudospectra._ihlpsa_adaptive(
             BACKEND, zg, P; nit_chunk = nit_chunk, nit_max = nit_max, zpd = zpd))
         # nu = depth reached; iters = Σ nit_grid = true work (g·nit would over-credit skipped
         # iterations). Captured at the best rep.
@@ -69,7 +69,7 @@ csv = open_csv(joinpath(RESULTS, "nit_chunk_sweep.csv"),
 
 for m in MS
     P = MatrixPencil(MatrixDepot.grcar(T, m))
-    eye = KAPseudospectra.b_is_identity(P)
+    eye = KernelAbstractionsPseudospectra.b_is_identity(P)
     nit_max = 8 * ceil(Int, log2(m))        # = the ihlpsa default cap
     # Pin the batch size for this m so every nit_chunk sees the same batching (else the
     # chunk comparison is confounded by an allocator-driven zpd — see bench_common).

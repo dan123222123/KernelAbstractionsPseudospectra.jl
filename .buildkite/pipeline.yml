@@ -1,4 +1,4 @@
-# Buildkite benchmarks for KAPseudospectra.jl. What each experiment does, the suite policy,
+# Buildkite benchmarks for KernelAbstractionsPseudospectra.jl. What each experiment does, the suite policy,
 # and every sizing knob: bench/README.md (the single home for that documentation).
 #
 # Selection is by build env vars, set in New Build → Environment Variables:

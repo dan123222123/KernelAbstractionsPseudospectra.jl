@@ -8,13 +8,13 @@
 #  3. Cross-backend — same problem, same x₀, must agree to ~1e-12 across
 #     CPU and the requested GPU backend.
 
-using Test, KAPseudospectra, KernelAbstractions, LinearAlgebra
+using Test, KernelAbstractionsPseudospectra, KernelAbstractions, LinearAlgebra
 using Random
 
 # Explicit x₀ so cross-backend comparisons can match modulo floating-point
 # accumulation order. This is the adaptive driver's internal deterministic seeded
 # start vector, reused (un-exported) so the test x₀ can't drift from the driver's default.
-const _seeded_x₀ = KAPseudospectra._adaptive_x₀
+const _seeded_x₀ = KernelAbstractionsPseudospectra._adaptive_x₀
 
 @testset "ihlpsa vs ℂsvdpsa" begin
     # Standard pencil, dense random A. nit > log2(m) by a healthy margin to
@@ -45,7 +45,7 @@ end
         A = randn(T, m, m)
         B = randn(T, m, m) + T(5) * I
         P = MatrixPencil(A, B)
-        @test P isa KAPseudospectra.SchurMatrixPencil
+        @test P isa KernelAbstractionsPseudospectra.SchurMatrixPencil
 
         gx, gy, zg = qgrid(T, (-1.0, 1.0), (-1.0, 1.0), (8, 8))
         γ, δ = T <: Complex ? (0.5, 0.5) : (0.5, 0.5)
@@ -74,7 +74,7 @@ end
         s_fixed = ihlpsa(CPU(), zg, P, nit_max; x₀ = x₀)    # over-converged control
         # Public `ihlpsa(…; …)` returns only σ; the internal driver also returns the
         # per-point convergence depth grid this testset asserts on.
-        s_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
+        s_adp, nit_grid = KernelAbstractionsPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
         s_svd = ℂsvdpsa(zg, P)
 
         # Comparison tol ~10× the adaptive stopping rtol (default 1e-4 F32 /
@@ -100,7 +100,7 @@ end
         gx, gy, zg = qgrid(T, (-1.5, 1.5), (-1.5, 1.5), (12, 12))
         x₀ = _seeded_x₀(T, m, 0xBEEF)
 
-        s_cau, nit_cau = KAPseudospectra._ihlpsa_adaptive(
+        s_cau, nit_cau = KernelAbstractionsPseudospectra._ihlpsa_adaptive(
             CPU(), zg, P; criterion = :cauchy, x₀ = x₀)
         s_svd = ℂsvdpsa(zg, P)
         rtol = T == ComplexF32 ? 1e-3 : 1e-5
@@ -110,7 +110,7 @@ end
     A64 = randn(ComplexF64, 8, 8)
     P8 = MatrixPencil(A64)
     zg8 = last(qgrid(ComplexF64, (-1, 1), (-1, 1), (4, 4)))
-    @test_throws ArgumentError KAPseudospectra._ihlpsa_adaptive(
+    @test_throws ArgumentError KernelAbstractionsPseudospectra._ihlpsa_adaptive(
         CPU(), zg8, P8; criterion = :bogus)
 end
 
@@ -126,7 +126,7 @@ end
         γ, δ = 0.5, 0.5
 
         x₀ = _seeded_x₀(T, m, 0xFEED)
-        s_adp, nit_grid = KAPseudospectra._ihlpsa_adaptive(
+        s_adp, nit_grid = KernelAbstractionsPseudospectra._ihlpsa_adaptive(
             CPU(), zg, P; γ = γ, δ = δ, x₀ = x₀)
         s_svd = ℂsvdpsa(zg, P, γ, δ)
         rtol = T == ComplexF32 ? 1e-3 : 1e-5
@@ -147,8 +147,8 @@ end
         gx, gy, zg = qgrid(T, (-1.5, 1.5), (-1.5, 1.5), (12, 12))
         x₀ = _seeded_x₀(T, m, 0xBEEF)
 
-        s_one, ng_one = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
-        s_many, ng_many = KAPseudospectra._ihlpsa_adaptive(
+        s_one, ng_one = KernelAbstractionsPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
+        s_many, ng_many = KernelAbstractionsPseudospectra._ihlpsa_adaptive(
             CPU(), zg, P; x₀ = x₀, zpd = 37)                  # 144 = 3·37 + 33 → 4 batches
         @test isapprox(s_one, s_many; rtol = (T == ComplexF32 ? 1e-3 : 1e-5))
         # A point's Lanczos sequence is independent of its batch-mates, so batching must not
@@ -171,8 +171,8 @@ end
         # a breakdown point before a generic one.
         zg = reshape([T.(1:4); T[0.5 + 0.25im, 1.5 - 0.25im, 2.5 + 0.5im, 3.5 - 0.5im]], 8, 1)
 
-        s_one, ng_one = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
-        s_many, ng_many = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀, zpd = 1)
+        s_one, ng_one = KernelAbstractionsPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
+        s_many, ng_many = KernelAbstractionsPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀, zpd = 1)
         @test all(isfinite, s_many)
         @test s_many == s_one
         @test ng_many == ng_one
@@ -191,7 +191,7 @@ end
         x₀ = _seeded_x₀(T, m, 0xBEEF)
 
         deliveries = Tuple{Vector{CartesianIndex{2}}, Vector{real(T)}, Vector{Int}}[]
-        s, ng = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀, zpd = zpd,
+        s, ng = KernelAbstractionsPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀, zpd = zpd,
             on_batch = (idx, σv, nitv) -> push!(deliveries, (idx, σv, nitv)))
 
         @test sort(reduce(vcat, first.(deliveries))) == vec(collect(CartesianIndices(s)))
@@ -214,7 +214,7 @@ end
     zg = last(qgrid(T, (-1.0, 1.0), (-1.0, 1.0), (7, 5)))
     x₀ = _seeded_x₀(T, m, 0xFEED)
     σacc = fill(-1.0, 5, 7)
-    s, _ = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; γ = 0.5, δ = 0.5, x₀ = x₀,
+    s, _ = KernelAbstractionsPseudospectra._ihlpsa_adaptive(CPU(), zg, P; γ = 0.5, δ = 0.5, x₀ = x₀,
         zpd = 4, on_batch = (idx, σv, nitv) -> (σacc[idx] .= σv))
     @test σacc == s
 end
@@ -234,12 +234,12 @@ end
         zpts = T[complex(x, 0.3) for x in range(-1, 1; length = g)]
 
         runs = map((zero(T), T(NaN))) do q₀fill
-            ihl = KAPseudospectra.IHLworkspace(P, g, x₀)
+            ihl = KernelAbstractionsPseudospectra.IHLworkspace(P, g, x₀)
             fill!(ihl.Qv[1], q₀fill)
             ihl.zv[1:g] .= zpts
             α = zeros(T, nit, g)
             β = zeros(T, nit + 1, g)
-            KAPseudospectra.lockstep_ihl!(α, β, ihl, nit, g)
+            KernelAbstractionsPseudospectra.lockstep_ihl!(α, β, ihl, nit, g)
             (α, β)
         end
         (α_fresh, β_fresh), (α_reused, β_reused) = runs
@@ -263,7 +263,7 @@ end
         nit_cap = 3
 
         s_adp,
-        nit_grid = @test_logs (:warn,) match_mode = :any KAPseudospectra._ihlpsa_adaptive(
+        nit_grid = @test_logs (:warn,) match_mode = :any KernelAbstractionsPseudospectra._ihlpsa_adaptive(
             CPU(), zg, P; x₀ = x₀, nit_max = nit_cap, rtol = 1e-12)
         s_fix = ihlpsa(CPU(), zg, P, nit_cap; x₀ = x₀)
 
@@ -320,8 +320,8 @@ function test_adaptive_backend(backend; types = (ComplexF32, ComplexF64))
 
             # Adaptive (per-point hybrid) across the device fan-out: exercises the
             # on-device state gather (custom `_qv_gather!` kernel) and multi-device partition.
-            s_cpu, grid_cpu = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
-            s_gpu, grid_gpu = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀ = x₀)
+            s_cpu, grid_cpu = KernelAbstractionsPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀)
+            s_gpu, grid_gpu = KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀ = x₀)
             @test isapprox(s_cpu, s_gpu; rtol = rtol)
             @test abs(maximum(grid_cpu) - maximum(grid_gpu)) <= ceil(Int, log2(m))   # within one chunk
 
@@ -330,7 +330,7 @@ function test_adaptive_backend(backend; types = (ComplexF32, ComplexF64))
             # returned-matrix coordinates, values identical to the returned matrices.
             seen = CartesianIndex{2}[]
             σacc = fill(real(T)(-1), size(s_gpu))
-            s_cb, _ = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀ = x₀, zpd = 217,
+            s_cb, _ = KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P; x₀ = x₀, zpd = 217,
                 on_batch = (idx, σv, nitv) -> (append!(seen, idx); σacc[idx] .= σv))
             @test sort(seen) == vec(collect(CartesianIndices(s_cb)))
             @test σacc == s_cb

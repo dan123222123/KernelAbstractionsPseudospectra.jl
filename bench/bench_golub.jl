@@ -48,12 +48,12 @@ const COLS = let s = get(ENV, "BENCH_GOLUB_COLS", "1:$(GRIDN)")
     lo:hi
 end
 const DEVS = KernelAbstractions.isgpu(backend) ?
-             collect(KAPseudospectra.devices(backend)) : missing
+             collect(KernelAbstractionsPseudospectra.devices(backend)) : missing
 const NDEV = DEVS === missing ? 1 : length(DEVS)
 
 logln, logio = bench_logger(joinpath(RESULTS, "bench_golub_log.txt"))
 logln("="^72)
-logln("KAPseudospectra.jl golub portrait   ", Dates.now())
+logln("KernelAbstractionsPseudospectra.jl golub portrait   ", Dates.now())
 logln("backend=", backend, "  devices=", NDEV, " x ", device_name(backend))
 logln("m=", M, "  T=", T, "  grid=", GRIDN, "²  cols=", COLS, "  window=±", HW,
     "  nit_max=", NITMAX, "  seed=", SEED)
@@ -68,7 +68,7 @@ function golub_pencil(T, m)
     A = nothing
     tsch = @elapsed ((S, _, w) = LAPACK.gees!('N', S))
     Iₘ = Diagonal(ones(T, m))
-    (; P = KAPseudospectra.SchurMatrixPencil{T, true}(S, S', Iₘ, Iₘ, Diagonal(ones(T, m))),
+    (; P = KernelAbstractionsPseudospectra.SchurMatrixPencil{T, true}(S, S', Iₘ, Iₘ, Diagonal(ones(T, m))),
         w, tsch)
 end
 
@@ -76,7 +76,7 @@ end
 logln("[", clock(), "] warmup (compiling the adaptive multi-device path)...")
 let wp = golub_pencil(T, 256), hw = 80.0 * 256
     zgw = bench_grid(T, 24; box = ((-hw, hw), (-hw, hw)))
-    tw = @elapsed KAPseudospectra._ihlpsa_adaptive(backend, zgw, wp.P;
+    tw = @elapsed KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zgw, wp.P;
         nit_max = 16, devs = DEVS, on_batch = (idx, σv, nitv) -> nothing)
     logln("[", clock(), "] warmup done in ", @sprintf("%.1f s", tw))
 end
@@ -126,7 +126,7 @@ end
 
 logln("[", clock(), "] solving rows ", COLS, " of ", GRIDN, "² (", npts,
     " points), adaptive, on ", NDEV, " device(s)...")
-tsolve = @elapsed ((σ, nitg) = KAPseudospectra._ihlpsa_adaptive(backend,
+tsolve = @elapsed ((σ, nitg) = KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend,
     zg[:, COLS], pc.P; nit_max = NITMAX, devs = DEVS, zpd, on_batch = checkpoint))
 σfull[COLS, :] .= to64.(abs.(σ))
 nitfull[COLS, :] .= nitg

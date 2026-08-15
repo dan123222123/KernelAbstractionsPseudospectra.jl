@@ -20,7 +20,7 @@ const backend = select_backend(ARGS; default = "cuda")
 KernelAbstractions.isgpu(backend) ||
     error("bench_multigpu needs a GPU backend (got $(backend)); pass cuda|amdgpu|oneapi.")
 const RESULTS = results_dir()
-const ALLDEVS = collect(KAPseudospectra.devices(backend))
+const ALLDEVS = collect(KernelAbstractionsPseudospectra.devices(backend))
 const NAVAIL = length(ALLDEVS)
 # Optional 2nd positional arg caps the device count (strong scaling needs ≥ 2 devices of ONE
 # backend; self-skips below when only one is in play).
@@ -45,14 +45,14 @@ const MODES = (("fixed", run_fixed), ("adaptive", run_adaptive))
 # internal-driver call (total work is ndev-independent, so compute it once per pencil).
 mode_iters(name, zg, P, nit, zpd, g) =
     name == "fixed" ? total_iters(g, nit) :
-    total_iters(last(KAPseudospectra._ihlpsa_adaptive(backend, zg, P;
+    total_iters(last(KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P;
         nit_max = converged_nit_max(size(P, 1)), devs = DEVS, zpd)))
 
 logln, logio = bench_logger(joinpath(RESULTS, "bench_multigpu_log.txt"))
 logln("="^72)
-logln("KAPseudospectra.jl multi-device benchmark   ", Dates.now())
+logln("KernelAbstractionsPseudospectra.jl multi-device benchmark   ", Dates.now())
 logln("backend=", backend, "  devices: ", N_GPU, " of ", NAVAIL, " x ", device_name(backend),
-    @sprintf("  (%.1f GiB free)", KAPseudospectra.device_bytes_available(backend)/2^30))
+    @sprintf("  (%.1f GiB free)", KernelAbstractionsPseudospectra.device_bytes_available(backend)/2^30))
 logln("Julia threads: ", Threads.nthreads(), "   eltypes=", join(TOKS, ","),
     "  strong-scaling n=", SS_N, "  size sweep n=", NS)
 foreach(logln, repro_stamp(backend))
@@ -66,7 +66,7 @@ function strong_scaling(tok, T)
     end
     ss = bench_setup(backend, T, SS_N)
     g = ss.gridn^2
-    eye = KAPseudospectra.b_is_identity(ss.P)
+    eye = KernelAbstractionsPseudospectra.b_is_identity(ss.P)
     logln("\n## STRONG SCALING [", tok, "]  n=", SS_N, "  grid=", ss.gridn, "²  nit=", ss.nit)
     for (name, runner) in MODES
         iters = mode_iters(name, ss.zg, ss.P, ss.nit, ss.zpd, g)
@@ -96,7 +96,7 @@ function size_sweep(tok, T)
     for n in NS
         w = bench_setup(backend, T, n)
         g = w.gridn^2
-        eye = KAPseudospectra.b_is_identity(w.P)
+        eye = KernelAbstractionsPseudospectra.b_is_identity(w.P)
         for (name, runner) in MODES
             iters = mode_iters(name, w.zg, w.P, w.nit, w.zpd, g)
             t = bestof(() -> runner(w.zg, w.P, w.nit, DEVS, w.zpd), backend; reps = REPS)

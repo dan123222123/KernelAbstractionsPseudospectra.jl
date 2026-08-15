@@ -20,7 +20,7 @@ include(joinpath(@__DIR__, "..", "bench_common.jl"))
 
 # Probing under an active profile would measure the profile's knobs and persist values it shadows.
 haskey(ENV, "KAPSEUDO_TUNE_PROFILE") && (@info "unsetting KAPSEUDO_TUNE_PROFILE for the probe";
-    delete!(ENV, "KAPSEUDO_TUNE_PROFILE"); KAPseudospectra.reload_tuning!())
+    delete!(ENV, "KAPSEUDO_TUNE_PROFILE"); KernelAbstractionsPseudospectra.reload_tuning!())
 
 backend = select_backend()
 KernelAbstractions.isgpu(backend) ||
@@ -28,7 +28,7 @@ KernelAbstractions.isgpu(backend) ||
 
 # Probe the FIRST device: the knobs are a property of the architecture. Assumes every device
 # on the queue is the same model — a heterogeneous box needs one pass per model.
-dev = first(KAPseudospectra.devices(backend))
+dev = first(KernelAbstractionsPseudospectra.devices(backend))
 foreach(println, repro_stamp(backend))
 @info "tuning device" backend dev device_name(backend)
 println("BEFORE: ", tuning_stamp())
@@ -49,7 +49,7 @@ tune_types = Tuple(ELTYPES[t] for t in tune_toks)
 # idle baseline is certain; every later run compares against it.
 canary = device_canary(backend)
 @info "contention canary (idle baseline)" canary_gflops=canary
-chosen = KAPseudospectra.tune_trsm!(backend, dev; types = tune_types, profile,
+chosen = KernelAbstractionsPseudospectra.tune_trsm!(backend, dev; types = tune_types, profile,
     device = device_name(backend),
     extra = isnan(canary) ? Dict{String, String}() :
             Dict("canary_gflops" => string(round(canary; digits = 1))))
@@ -61,7 +61,7 @@ chosen = KAPseudospectra.tune_trsm!(backend, dev; types = tune_types, profile,
 # instead of silently heuristic.
 if isfile(profile)
     tbl = let raw = TOML.parsefile(profile)
-        get(raw, "KAPseudospectra", raw)
+        get(raw, "KernelAbstractionsPseudospectra", raw)
     end
     audit = [(T, e,
                  [k for k in ("trsm_tilecols", "trsm_blockwarps", "trsm_warpgridpts", "trsm_wgs")
@@ -83,7 +83,7 @@ end
 for m in env_ints("BENCH_TUNE_SWEEP_MS", (1024, 2048))
     @info "===== tiled sweep at m=$m (persist=false, log only) ====="
     try
-        KAPseudospectra.tune_trsm_tiled!(backend, dev; types = tune_types, m, persist = false)
+        KernelAbstractionsPseudospectra.tune_trsm_tiled!(backend, dev; types = tune_types, m, persist = false)
     catch e
         @warn "sweep at m=$m failed" exception = e
     end

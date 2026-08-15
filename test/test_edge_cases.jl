@@ -5,8 +5,8 @@
 #  - long-aspect grid: nx ≠ ny, exercises the transpose/permutedims at return
 #  - findmaxbatchihl returns sane positive values on each backend
 
-using Test, KAPseudospectra, KernelAbstractions, LinearAlgebra, Random
-using KAPseudospectra: findmaxbatchihl, _device_column_partition
+using Test, KernelAbstractionsPseudospectra, KernelAbstractions, LinearAlgebra, Random
+using KernelAbstractionsPseudospectra: findmaxbatchihl, _device_column_partition
 
 @testset "edge cases" begin
     @testset "m=1" begin
@@ -60,7 +60,7 @@ end
     # The trsm strategy is validated both when persisted and on every ENV read.
     @test_throws ErrorException set_trsm_strategy!("bogus")
     withenv("KAPSEUDO_TRSM" => "bogus") do
-        @test_throws ErrorException KAPseudospectra.trsm_strategy()
+        @test_throws ErrorException KernelAbstractionsPseudospectra.trsm_strategy()
     end
 end
 
@@ -70,7 +70,7 @@ end
     A = randn(ComplexF64, 4, 4)
     gx, gy, zg = qgrid(ComplexF64, (-1.0, 1.0), (-1.0, 1.0), (3, 3))
     P3 = MatrixPencil(A, 3I)
-    @test !KAPseudospectra.b_is_identity(P3)
+    @test !KernelAbstractionsPseudospectra.b_is_identity(P3)
     @test ℂsvdpsa(zg, P3) ≈ ℂsvdpsa(zg, A, Matrix{ComplexF64}(3I, size(A))) rtol = 1e-12
 end
 
@@ -98,11 +98,11 @@ end
     # stored, a standard pencil's B/Bc share one Diagonal identity, a raw pencil ships as-is.
     m = 12
     T = ComplexF64
-    bytes = KAPseudospectra._device_pencil_bytes
+    bytes = KernelAbstractionsPseudospectra._device_pencil_bytes
     S = Matrix{T}(triu(randn(T, m, m)))
     Dm = Diagonal(ones(T, m))
 
-    P_std_diag = KAPseudospectra.SchurMatrixPencil{T, true}(S, S', Dm, Dm, Diagonal(ones(T, m)))
+    P_std_diag = KernelAbstractionsPseudospectra.SchurMatrixPencil{T, true}(S, S', Dm, Dm, Diagonal(ones(T, m)))
     @test bytes(P_std_diag) == sizeof(T) * (2m^2 + 2m)           # A + Ac + Id + Diagonal Z
 
     P_std_dense = MatrixPencil(schur(randn(T, m, m)))
@@ -111,7 +111,7 @@ end
     P_gen = MatrixPencil(schur(randn(T, m, m), randn(T, m, m) + T(5) * I))
     @test bytes(P_gen) == sizeof(T) * 5m^2                       # A + Ac + B + Bc + Z
 
-    P_raw = KAPseudospectra.MatrixPencil{T}(randn(T, m, m), Matrix{T}(I, m, m))
+    P_raw = KernelAbstractionsPseudospectra.MatrixPencil{T}(randn(T, m, m), Matrix{T}(I, m, m))
     @test bytes(P_raw) == sizeof(T) * 2m^2
 
     # Pencil-aware batch planning consumes these bytes; sanity on the host path.
@@ -167,7 +167,7 @@ end
     α[1, 3] = NaN                      # dead from the start for point 3
     zv = fill(1.0 + 0im, g)
     sr = zeros(g)
-    KAPseudospectra.ihlsrg!(sr, zv, 1.0, 0.0, α, β)
+    KernelAbstractionsPseudospectra.ihlsrg!(sr, zv, 1.0, 0.0, α, β)
     @test all(isfinite, sr)
     @test sr[2] ≈ sr[1] rtol = 0.2     # prefix estimate (depth 3 vs 5), NOT the eps pin
     @test sr[3] == eps(Float64)
@@ -181,8 +181,8 @@ end
     for n in (1, 2, 3, 8, 24)
         d = randn(rng, n)
         e = randn(rng, max(n - 1, 0))
-        λ = KAPseudospectra._eigmax_tridiag(d, e)                        # Float64 → LAPACK
-        λ32 = KAPseudospectra._eigmax_tridiag(Float32.(d), Float32.(e))  # generic → bisection
+        λ = KernelAbstractionsPseudospectra._eigmax_tridiag(d, e)                        # Float64 → LAPACK
+        λ32 = KernelAbstractionsPseudospectra._eigmax_tridiag(Float32.(d), Float32.(e))  # generic → bisection
         @test isfinite(λ32)
         @test isapprox(Float64(λ32), λ, rtol = 2e-5)
     end
@@ -200,7 +200,7 @@ end
         e = randn(rng, n - 1)
         F = eigen(SymTridiagonal(d, e))
         sk_ref = abs(F.vectors[end, argmax(F.values)])
-        λ = KAPseudospectra._eigmax_tridiag(d, e)
-        @test isapprox(KAPseudospectra._tridiag_top_lastcomp(d, e, λ), sk_ref, atol = 1e-8)
+        λ = KernelAbstractionsPseudospectra._eigmax_tridiag(d, e)
+        @test isapprox(KernelAbstractionsPseudospectra._tridiag_top_lastcomp(d, e, λ), sk_ref, atol = 1e-8)
     end
 end

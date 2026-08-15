@@ -1,4 +1,4 @@
-# Benchmarking KAPseudospectra.jl
+# Benchmarking KernelAbstractionsPseudospectra.jl
 
 `bench/` holds the benchmark **experiments**, all sharing one bench framework in `bench_common.jl`.
 

@@ -8,8 +8,8 @@ include(joinpath(@__DIR__, "bench_common.jl"))
 backend = select_backend(filter(a -> !startswith(a, "--"), ARGS))
 gpu = KernelAbstractions.isgpu(backend)
 # Single-device only: multi-device load-balance is bench_multigpu's concern.
-devs = gpu ? [first(KAPseudospectra.devices(backend))] : missing
-gpu && KAPseudospectra.device!(backend, first(KAPseudospectra.devices(backend)))
+devs = gpu ? [first(KernelAbstractionsPseudospectra.devices(backend))] : missing
+gpu && KernelAbstractionsPseudospectra.device!(backend, first(KernelAbstractionsPseudospectra.devices(backend)))
 
 using Adapt: adapt
 
@@ -33,23 +33,23 @@ nearest_q(sorted, q) = sorted[clamp(round(Int, 1 + q * (length(sorted) - 1)), 1,
 function replay_sequences(backend, P, zv_h, idxbatches, nit_max, x₀)
     T = eltype(zv_h)
     R = real(T)
-    bg = KAPseudospectra.get_bgarray(backend)
+    bg = KernelAbstractionsPseudospectra.get_bgarray(backend)
     ks = collect(CHUNK:CHUNK:nit_max)
     σs = Matrix{R}(undef, length(ks), length(zv_h))
     rs = similar(σs)
     for idxb in idxbatches
         g = length(idxb)
         # Per-batch workspace (not the driver's hoisted one) — idxbatches is a single batch here.
-        ihl = adapt(bg, KAPseudospectra.IHLworkspace(P, g, x₀))
+        ihl = adapt(bg, KernelAbstractionsPseudospectra.IHLworkspace(P, g, x₀))
         α = adapt(bg, zeros(T, nit_max, g))
         β = adapt(bg, zeros(T, nit_max + 1, g))
         view(ihl.zv, 1:g) .= adapt(bg, zv_h[idxb])
-        KAPseudospectra.lockstep_ihl!(α, β, ihl, nit_max, g)
+        KernelAbstractionsPseudospectra.lockstep_ihl!(α, β, ihl, nit_max, g)
         αh, βh = adapt(Array, α), adapt(Array, β)
         σk = zeros(R, g)
         rk = zeros(R, g)
         for (i, k) in enumerate(ks)
-            KAPseudospectra.ihlsrg!(σk, view(zv_h, idxb), 1, 0,
+            KernelAbstractionsPseudospectra.ihlsrg!(σk, view(zv_h, idxb), 1, 0,
                 αh[1:k, :], βh[1:(k + 1), :]; resid = rk)
             σs[i, idxb] .= σk
             rs[i, idxb] .= rk
@@ -71,8 +71,8 @@ function replay_rule(criterion, nconfirm, ks, σs, rs, rtol, atol)
         retired = false
         for i in 2:ncp
             ok = criterion === :certified ?
-                 KAPseudospectra._adaptive_converged(σs[i, j], rs[i, j], rtol, atol) :
-                 KAPseudospectra._cauchy_converged(σs[i, j], σprev, rtol, atol)
+                 KernelAbstractionsPseudospectra._adaptive_converged(σs[i, j], rs[i, j], rtol, atol) :
+                 KernelAbstractionsPseudospectra._cauchy_converged(σs[i, j], σprev, rtol, atol)
             streak = ok ? streak + 1 : 0
             if streak >= nconfirm
                 depth[j], σret[j], retired = ks[i], σs[i, j], true
@@ -131,8 +131,8 @@ csv = open_csv(csvpath,
 for tok in TOKS
     T = ELTYPES[tok]
     R = real(T)
-    rtol = R(KAPseudospectra._adaptive_default_rtol(T))
-    atol = R(KAPseudospectra._adaptive_default_atol(T))
+    rtol = R(KernelAbstractionsPseudospectra._adaptive_default_rtol(T))
+    atol = R(KernelAbstractionsPseudospectra._adaptive_default_atol(T))
     for m in MS
         gridn = bench_gridn(backend)
         zg = bench_grid(T, gridn)
@@ -140,8 +140,8 @@ for tok in TOKS
         P = bench_pencil(T, m).P
         zpd = pinned_zpd(backend, T, m, nitmax; ngrid = gridn * gridn,
             headroom = zpd_headroom())
-        x₀ = KAPseudospectra._adaptive_x₀(T, size(P, 1), 0x61646170)   # driver default seed
-        zv_h, idxbatches = KAPseudospectra._grid_batches(zg, ismissing(zpd) ? length(zg) : zpd)
+        x₀ = KernelAbstractionsPseudospectra._adaptive_x₀(T, size(P, 1), 0x61646170)   # driver default seed
+        zv_h, idxbatches = KernelAbstractionsPseudospectra._grid_batches(zg, ismissing(zpd) ? length(zg) : zpd)
         sel, σt = oracle_sigma(P, zv_h, m)
 
         # ---- replay leg: one deep trajectory, every rule on the same data ----
@@ -182,7 +182,7 @@ for tok in TOKS
 
         # ---- live leg: the actual driver per rule (cold + hot best-of) ----
         for (crit, nc) in RULES
-            run() = KAPseudospectra._ihlpsa_adaptive(backend, zg, P;
+            run() = KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P;
                 criterion = crit, nconfirm = nc, nit_max = nitmax, devs, zpd)
             local σL, ngL
             t1 = @elapsed ((σL, ngL) = run())
@@ -207,17 +207,17 @@ end
 if get(ENV, "BENCH_STOP_TORTURE", "1") == "1"
     T = ComplexF64
     R = Float64
-    rtol = R(KAPseudospectra._adaptive_default_rtol(T))
-    atol = R(KAPseudospectra._adaptive_default_atol(T))
+    rtol = R(KernelAbstractionsPseudospectra._adaptive_default_rtol(T))
+    atol = R(KernelAbstractionsPseudospectra._adaptive_default_atol(T))
     m = env_int("BENCH_STOP_TORTURE_M", 256)
     nitmax = stop_nitmax(m)
-    x₀ = KAPseudospectra._adaptive_x₀(T, m, 0x61646170)
+    x₀ = KernelAbstractionsPseudospectra._adaptive_x₀(T, m, 0x61646170)
     for gap in (1e-2, 1e-3, 1e-4, 1e-5)
         σ1 = 1e-2
         S = Matrix(Diagonal(T.(σ1 .* (1.0 .+ gap .* (0:(m - 1))))))
         P = MatrixPencil(schur(S))
         zg1 = fill(zero(T), 1, 1)
-        zv_h, idxb = KAPseudospectra._grid_batches(zg1, 1)
+        zv_h, idxb = KernelAbstractionsPseudospectra._grid_batches(zg1, 1)
         ks, σs, rs = replay_sequences(CPU(), P, zv_h, idxb, nitmax, x₀)
         for (crit, nc) in RULES
             rr = replay_rule(crit, nc, ks, σs, rs, rtol, atol)

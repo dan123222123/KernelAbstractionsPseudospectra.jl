@@ -14,7 +14,7 @@ case "$vendor" in
   oneapi)
     julia --project=bench -e 'using Pkg; Pkg.instantiate(); Pkg.add("oneAPI")'
     # Arc A380 (Xe-HPG) has NO native FP64 — persist pdiv_accurate=false first.
-    julia --project=bench -e 'using KAPseudospectra; set_pdiv_accurate!(false)'
+    julia --project=bench -e 'using KernelAbstractionsPseudospectra; set_pdiv_accurate!(false)'
     ;;
   cuda)
     julia --project=bench -e 'using Pkg; Pkg.instantiate(); Pkg.add("CUDA")'

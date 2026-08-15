@@ -9,7 +9,7 @@
 #     KAPSEUDO_TUNE_PROFILE=bench/tuning/a100.toml julia --project=bench bench/bench_kernels.jl cuda
 #
 # Per-knob resolution order: KAPSEUDO_TRSM_* env scalar > profile > LocalPreferences.toml >
-# heuristic. File format is a `[KAPseudospectra]` table of string-valued knob keys, identical to
+# heuristic. File format is a `[KernelAbstractionsPseudospectra]` table of string-valued knob keys, identical to
 # LocalPreferences.toml.
 const _PROFILE_LOCK = ReentrantLock()
 const _PROFILE_SRC = Ref{String}("")                          # path the cache was parsed from
@@ -29,11 +29,11 @@ const _TUNED_KNOBS = ("trsm_tilecols", "trsm_blockwarps", "trsm_warpgridpts", "t
 tuning_keys() = [string(k, "_", T, "_", e)
                  for k in _TUNED_KNOBS for T in _TUNED_TYPES for e in ("eye", "gen")]
 
-# Accepts both a `[KAPseudospectra]`-wrapped file and a bare key table. Values are stringified
+# Accepts both a `[KernelAbstractionsPseudospectra]`-wrapped file and a bare key table. Values are stringified
 # since the knob resolvers all `tryparse`.
 function _parse_profile(path)
     raw = TOML.parsefile(path)
-    tbl = get(raw, "KAPseudospectra", raw)
+    tbl = get(raw, "KernelAbstractionsPseudospectra", raw)
     return Dict{String, String}(k => string(v) for (k, v) in tbl if !(v isa AbstractDict))
 end
 
@@ -185,16 +185,16 @@ end
 """
     set_intel_force_simd32!(flag::Bool)
 
-Persist whether KAPseudospectra forces Intel GPUs to SIMD32, so the `tiled` trsm strategy's
+Persist whether KernelAbstractionsPseudospectra forces Intel GPUs to SIMD32, so the `tiled` trsm strategy's
 warp-shuffle panel solve is correct at every `m` (otherwise IGC may narrow the SIMD width and
 the warp shuffles break past the subgroup boundary). Stored in LocalPreferences.toml and applied
-from `__init__`; for full effect start a fresh session with `using KAPseudospectra`
+from `__init__`; for full effect start a fresh session with `using KernelAbstractionsPseudospectra`
 **before** `using oneAPI`. Without it, use `KAPSEUDO_TRSM=column` on Intel.
 """
 function set_intel_force_simd32!(flag::Bool)
     @set_preferences!("intel_force_simd32" => flag)
     flag && _apply_intel_simd32!()
-    @info "intel_force_simd32 = $flag (LocalPreferences.toml). For full effect, restart Julia and load KAPseudospectra before oneAPI."
+    @info "intel_force_simd32 = $flag (LocalPreferences.toml). For full effect, restart Julia and load KernelAbstractionsPseudospectra before oneAPI."
     return flag
 end
 

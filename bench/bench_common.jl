@@ -4,7 +4,7 @@
 # `converged_solve`. Everything else runs fixed-`nit` so iteration count stays a controlled
 # variable.
 
-using KAPseudospectra, KernelAbstractions
+using KernelAbstractionsPseudospectra, KernelAbstractions
 using LinearAlgebra, MatrixDepot, MultiFloats, Printf, Dates, Random, SHA
 import GenericLinearAlgebra
 import GenericSchur
@@ -44,12 +44,12 @@ end
 # double GC.
 function reclaim_all(backend)
     if KernelAbstractions.isgpu(backend)
-        for d in KAPseudospectra.devices(backend)
-            KAPseudospectra.device!(backend, d)
-            KAPseudospectra.device_reclaim(backend)
+        for d in KernelAbstractionsPseudospectra.devices(backend)
+            KernelAbstractionsPseudospectra.device!(backend, d)
+            KernelAbstractionsPseudospectra.device_reclaim(backend)
         end
     else
-        KAPseudospectra.device_reclaim(backend)
+        KernelAbstractionsPseudospectra.device_reclaim(backend)
     end
     GC.gc();
     GC.gc()
@@ -168,7 +168,7 @@ function bigfloat_schur(A::AbstractMatrix, m::Integer)
             @warn "Schur cache unreadable — regenerating" path
         end
     end
-    S = KAPseudospectra.bigfloat_schur_factor(A; bits = HIPREC_BITS)
+    S = KernelAbstractionsPseudospectra.bigfloat_schur_factor(A; bits = HIPREC_BITS)
     mkpath(SCHUR_CACHE)
     JLD2.jldsave(path; S)
     S
@@ -210,7 +210,7 @@ function bench_pencil(T, m; pencil::Symbol = PENCIL_MODE)
         end
         Fg = schur(A, bench_matrix_b(ComplexF64, m))
         S, TB = T.(Fg.S), T.(Fg.T)
-        return (; P = KAPseudospectra.SchurMatrixPencil{T, false}(
+        return (; P = KernelAbstractionsPseudospectra.SchurMatrixPencil{T, false}(
             S, collect(S'), TB, collect(TB'), Matrix(T.(Fg.Z))), A)
     end
     Iₘ = Diagonal(ones(T, m))   # B = Bc = I as a Diagonal, mirroring MatrixPencil(::Schur)
@@ -220,7 +220,7 @@ function bench_pencil(T, m; pencil::Symbol = PENCIL_MODE)
     else
         (hiprec_schur(A, T), Matrix{T}(I, m, m))   # default: full-precision cached GenericSchur factor
     end
-    (; P = KAPseudospectra.SchurMatrixPencil{T, true}(S, collect(S'), Iₘ, Iₘ, Z), A)
+    (; P = KernelAbstractionsPseudospectra.SchurMatrixPencil{T, true}(S, collect(S'), Iₘ, Iₘ, Z), A)
 end
 
 const ELTYPES = (;
@@ -261,11 +261,11 @@ function runnable_eltypes(backend, toks)
     filter(collect(toks)) do tok
         T = ELTYPES[tok]
         if gpu && (real(T) === Float64 || real(T) <: Float64x) &&
-           !KAPseudospectra.supports_fp64(backend)
+           !KernelAbstractionsPseudospectra.supports_fp64(backend)
             @warn "skipping $tok — no native FP64 on $(backend)"
             return false
         end
-        if gpu && iswide(T) && !KAPseudospectra.warp_trsm_safe(backend, true)
+        if gpu && iswide(T) && !KernelAbstractionsPseudospectra.warp_trsm_safe(backend, true)
             @warn "skipping $tok — wide warp shuffle not usable on $(backend)"
             return false
         end
@@ -282,8 +282,8 @@ function strategies_for(backend, T)
     # @shfl recurses infinitely if _tiled_trsm! is invoked directly — the package only
     # avoids it by strategy-gating inside its own run paths.
     KernelAbstractions.isgpu(backend) || return ("column",)
-    KAPseudospectra.warp_trsm_safe(backend, iswide(T)) || return ("column",)
-    KAPseudospectra.tiled_gemm_safe(backend, T) ? ("column", "tiled", "tiled-gemm") :
+    KernelAbstractionsPseudospectra.warp_trsm_safe(backend, iswide(T)) || return ("column",)
+    KernelAbstractionsPseudospectra.tiled_gemm_safe(backend, T) ? ("column", "tiled", "tiled-gemm") :
     ("column", "tiled")
 end
 
@@ -300,8 +300,8 @@ to64(x::MultiFloat) = sum(Float64, x._limbs)
 function pinned_zpd(backend, T, m, nit; ngrid = nothing, headroom = 1, P = nothing)
     KernelAbstractions.isgpu(backend) || return missing
     reclaim_all(backend)
-    z = P === nothing ? KAPseudospectra.findmaxbatchihl(backend, T, m, nit) :
-        KAPseudospectra.findmaxbatchihl(backend, P, nit)
+    z = P === nothing ? KernelAbstractionsPseudospectra.findmaxbatchihl(backend, T, m, nit) :
+        KernelAbstractionsPseudospectra.findmaxbatchihl(backend, P, nit)
     ngrid === nothing || (z = min(z, ngrid))
     haskey(ENV, "KAPSEUDO_MAX_ZPD") && (z = min(z, parse(Int, ENV["KAPSEUDO_MAX_ZPD"])))
     max(z ÷ headroom, 1)
@@ -317,12 +317,12 @@ function bench_setup(backend, T, m; gridn = bench_gridn(backend), nit = default_
         headroom = zpd_headroom(), pencil = PENCIL_MODE)
     pc = bench_pencil(T, m; pencil)
     (; gridn, g = gridn * gridn, zg = bench_grid(T, gridn), nit, P = pc.P, A = pc.A,
-        eye = KAPseudospectra.b_is_identity(pc.P),
+        eye = KernelAbstractionsPseudospectra.b_is_identity(pc.P),
         zpd = pinned_zpd(backend, T, m, nit; ngrid = gridn * gridn, headroom, P = pc.P))
 end
 
 # FLOPs per shift: `nit` iterations × two triangular solves = 8m² per iteration for a standard
-# pencil (B = I; detect via KAPseudospectra.b_is_identity), 16m² generalized (the z·B−A term).
+# pencil (B = I; detect via KernelAbstractionsPseudospectra.b_is_identity), 16m² generalized (the z·B−A term).
 # O(m) recurrence + host eigmax excluded (<1%).
 flops_per_shift(m, nit; eye = true) = nit * (eye ? 8 : 16) * m^2
 
@@ -357,7 +357,7 @@ function _tuning_table()
         end
         prefs = try
             raw = TOML.parsefile(path)
-            get(raw, "KAPseudospectra", raw)
+            get(raw, "KernelAbstractionsPseudospectra", raw)
         catch err
             push!(src, "$label(UNREADABLE: $err)")
             continue
@@ -370,7 +370,7 @@ function _tuning_table()
     return src, tbl
 end
 
-# Mirror of KAPseudospectra.tuning_keys(); defined here too so the stamp works against a package
+# Mirror of KernelAbstractionsPseudospectra.tuning_keys(); defined here too so the stamp works against a package
 # version that predates it (the bench env resolves the package from the checkout, not a release).
 tuning_keys_expected() = [string(k, "_", T, "_", e)
                           for k in ("trsm_tilecols", "trsm_blockwarps", "trsm_warpgridpts", "trsm_wgs")
@@ -449,12 +449,12 @@ function repro_stamp(backend = CPU(); matrix = BENCH_MATRIX)
     # sha256, not Base.hash (unstable across Julia versions).
     mhash = isfile(manifest) ? bytes2hex(sha256(read(manifest)))[1:16] : "none"
     strat = try
-        KAPseudospectra.trsm_strategy()
+        KernelAbstractionsPseudospectra.trsm_strategy()
     catch
         "?"
     end
     pdiv = try
-        KAPseudospectra.KATRSM.PDIV_ACCURATE
+        KernelAbstractionsPseudospectra.KATRSM.PDIV_ACCURATE
     catch
         "?"
     end

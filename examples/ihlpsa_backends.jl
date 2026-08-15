@@ -18,7 +18,7 @@ backend = CPU()
 #
 #using oneAPI            # Intel GPUs (Float32 only on FP64-less iGPUs)
 #backend = oneAPIBackend()
-using KAPseudospectra
+using KernelAbstractionsPseudospectra
 # trsm kernel workgroup size: 256 for CPU/CUDA, 16 for AMDGPU, 32 for Intel (one subgroup)
 ##
 

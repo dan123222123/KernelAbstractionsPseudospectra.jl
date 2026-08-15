@@ -20,13 +20,13 @@ using Adapt, ArraysOfArrays
 
 backend = select_backend(filter(a -> !startswith(a, "--"), ARGS))
 gpu = KernelAbstractions.isgpu(backend)
-devs = gpu ? KAPseudospectra.devices(backend) : missing
+devs = gpu ? KernelAbstractionsPseudospectra.devices(backend) : missing
 
 # This experiment races KAPSEUDO_TRSM strategies. Where the shuffle isn't usable (stock oneAPI's
 # @shfl stub; Metal without opt-in) `tiled` self-gates to column, making the race meaningless —
 # skip and exit 0. On CUDA/AMDGPU the shuffle always exists, so a false there is a regression:
 # fail red instead.
-if gpu && !KAPseudospectra.warp_trsm_safe(backend, false)
+if gpu && !KernelAbstractionsPseudospectra.warp_trsm_safe(backend, false)
     msg = "tiled solve not usable on $(backend) (warp_trsm_safe == false)"
     nameof(typeof(backend)) in (:CUDABackend, :ROCBackend) &&
         error(msg * " — this backend always supports the warp shuffle; investigate the regression.")
@@ -48,7 +48,7 @@ const RESULTS = results_dir()
 # One batched solve closure for `strategy` on backend `bk` (GPU, or CPU for the cpu row).
 # RHS/shifts are drawn at ComplexF64 then converted to T (MultiFloats has no randn).
 function make_solve(bk, T, m, strategy)
-    bg = KAPseudospectra.get_bgarray(bk)
+    bg = KernelAbstractionsPseudospectra.get_bgarray(bk)
     rng = Random.Xoshiro(0xF00D + m)
     P = adapt(bg, bench_pencil(T, m).P)
     zv = adapt(bg, T.(ComplexF64(2) .+ ComplexF64(3 // 10) .* randn(rng, ComplexF64, SOLVE_BATCH)))
@@ -56,10 +56,10 @@ function make_solve(bk, T, m, strategy)
         T.(reduce(hcat, [randn(rng, ComplexF64, m) for _ in 1:SOLVE_BATCH]))))
     # `column_wgs`, not `_auto_wgs`: the harness must see the schedule the shipped path uses,
     # not the raw heuristic.
-    wgs = KAPseudospectra.column_wgs(bk, P)
+    wgs = KernelAbstractionsPseudospectra.column_wgs(bk, P)
     solve = strategy == "column" ?
-            (() -> KAPseudospectra._column_trsm!(bk, bV, zv, P, wgs)) :
-            (() -> KAPseudospectra._tiled_trsm!(bk, bV, zv, P, wgs;
+            (() -> KernelAbstractionsPseudospectra._column_trsm!(bk, bV, zv, P, wgs)) :
+            (() -> KernelAbstractionsPseudospectra._tiled_trsm!(bk, bV, zv, P, wgs;
         gemm = strategy == "tiled-gemm"))
     (; solve, P)
 end
@@ -88,7 +88,7 @@ analytic_bytes(T, m, g; eye) = sizeof(T) * ((eye ? 1 : 2) * (m * (m + 1) ÷ 2) +
 function resolved_tcw(P)
     gpu || return ("NA", "NA")
     try
-        (string(KAPseudospectra.tile_cols(backend, P)), string(KAPseudospectra.block_warps(backend, P)))
+        (string(KernelAbstractionsPseudospectra.tile_cols(backend, P)), string(KernelAbstractionsPseudospectra.block_warps(backend, P)))
     catch
         ("NA", "NA")
     end
@@ -180,7 +180,7 @@ for tok in TOKS
         # e2e FoM iteration count: Σ nit_grid for the converged IEEE rungs (one _ihlpsa_adaptive
         # call — strategy-independent), g·nit for the fixed MF rungs.
         iters = if e2e_converged
-            total_iters(last(KAPseudospectra._ihlpsa_adaptive(backend, zg, P;
+            total_iters(last(KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P;
                 rtol = converged_rtol(T), nit_max = converged_nit_max(m), devs, zpd)))
         else
             total_iters(g, nit)

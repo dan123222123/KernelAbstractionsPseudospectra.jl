@@ -45,15 +45,15 @@ naive_bytes(T, m, batch; eye) = sizeof(T) * (batch * m^2 + 4 * batch * m)   # 2 
 
 # One cohort of shifts, the shared factors, and the RHS block — the state both legs solve with.
 function make_state(T, m, batch)
-    bg = KAPseudospectra.get_bgarray(backend)
+    bg = KernelAbstractionsPseudospectra.get_bgarray(backend)
     rng = Random.Xoshiro(0xBA5E + m)
     P = adapt(bg, bench_pencil(T, m).P)
     zv = adapt(bg, T.(ComplexF64(2) .+ ComplexF64(3 // 10) .* randn(rng, ComplexF64, batch)))
     bM = adapt(bg, T.(reduce(hcat, [randn(rng, ComplexF64, m) for _ in 1:batch])))
     # `column_wgs`, not `_auto_wgs` — same trap as bench_kernels: the raw heuristic ignores a
     # schedule persisted by `tune_trsm_wgs!`.
-    (; P, zv, bM, eye = KAPseudospectra.b_is_identity(P),
-        wgs = KAPseudospectra.column_wgs(backend, P))
+    (; P, zv, bM, eye = KernelAbstractionsPseudospectra.b_is_identity(P),
+        wgs = KernelAbstractionsPseudospectra.column_wgs(backend, P))
 end
 
 # The naive leg's working set: `batch` explicit m×m upper-triangular shifted factors — an OOM
@@ -63,7 +63,7 @@ function materialize(st, T, m, batch)
     # A standard pencil stores B as a `Diagonal`, which neither broadcasts reliably against a
     # CuMatrix nor supports scalar indexing. Materializing ONE dense device identity sidesteps
     # both for a single m² buffer against the batch·m² allocated next anyway.
-    Bd = eye ? adapt(KAPseudospectra.get_bgarray(backend), Matrix{T}(I, m, m)) : st.P.B
+    Bd = eye ? adapt(KernelAbstractionsPseudospectra.get_bgarray(backend), Matrix{T}(I, m, m)) : st.P.B
     z = Array(st.zv)
     Ms = [CuMatrix{T}(undef, m, m) for _ in 1:batch]
     for i in 1:batch
@@ -80,8 +80,8 @@ end
 function leg_ours(st, strategy)
     bV = VectorOfSimilarVectors(st.bM)
     strategy == "column" ?
-    (() -> KAPseudospectra._column_trsm!(backend, bV, st.zv, st.P, st.wgs)) :
-    (() -> KAPseudospectra._tiled_trsm!(backend, bV, st.zv, st.P, st.wgs;
+    (() -> KernelAbstractionsPseudospectra._column_trsm!(backend, bV, st.zv, st.P, st.wgs)) :
+    (() -> KernelAbstractionsPseudospectra._tiled_trsm!(backend, bV, st.zv, st.P, st.wgs;
         gemm = strategy == "tiled-gemm"))
 end
 
@@ -140,7 +140,7 @@ for tok in TOKS
         # The naive working set can exceed device memory long before ours does, so record it
         # and carry on to the next size rather than dying.
         wset = sizeof(T) * batch * m^2
-        free = KAPseudospectra.device_bytes_available(backend)
+        free = KernelAbstractionsPseudospectra.device_bytes_available(backend)
         Ms = nothing
         tmat = NaN
         if wset < 0.7 * free

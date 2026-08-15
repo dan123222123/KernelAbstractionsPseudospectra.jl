@@ -1,4 +1,4 @@
-name = "KAPseudospectra"
+name = "KernelAbstractionsPseudospectra"
 uuid = "8b8afa22-3073-43c5-8823-151938199226"
 version = "0.1.0"
 authors = ["Dan Folescu"]

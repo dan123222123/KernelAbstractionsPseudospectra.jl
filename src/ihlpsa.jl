@@ -449,7 +449,7 @@ chunks so the residual compares one Lanczos run at successive depths. The σ mat
 the fixed layout
 (`ihlpsa(...) ≈ ihlpsa(..., nit)` at the converged depth). The convergence depth
 reached is a diagnostic, not a routine return value: pass `verbose=true` to log
-the deepest depth, or call the un-exported `KAPseudospectra._ihlpsa_adaptive`
+the deepest depth, or call the un-exported `KernelAbstractionsPseudospectra._ihlpsa_adaptive`
 driver, which returns `(σ::Matrix, nit_grid::Matrix{Int})` — `nit_grid[i]` is the
 depth at which grid point `i` retired (`maximum(nit_grid)` is the deepest point).
 
@@ -462,7 +462,7 @@ writes), and an exception aborts it. Made for checkpointing hours-scale solves.
 
 # Examples
 ```julia
-using KAPseudospectra, KernelAbstractions
+using KernelAbstractionsPseudospectra, KernelAbstractions
 P = MatrixPencil(A)                                   # or MatrixPencil(A, B)
 _, _, zg = qgrid(ComplexF64, (-2, 5), (-4.5, 4.5), (300, 300))
 

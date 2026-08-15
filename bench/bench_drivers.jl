@@ -16,7 +16,7 @@ backend = select_backend(filter(a -> !startswith(a, "--"), ARGS))
 gpu = KernelAbstractions.isgpu(backend)
 # Single-device showcase: restrict to the first device so this measures the per-device
 # fixed-vs-adaptive win (multi-device scaling is bench_multigpu.jl).
-devs = gpu ? [first(KAPseudospectra.devices(backend))] : missing
+devs = gpu ? [first(KernelAbstractionsPseudospectra.devices(backend))] : missing
 
 const MS = env_ints("BENCH_MS", (64, 128, 256, 512, 1024))
 const REPS = env_int("BENCH_REPS", 3)
@@ -97,7 +97,7 @@ function trace_mode()
         (; P, zg, zpd) = bench_setup(backend, T, m; gridn)
         # Converged-fixed baseline: flat depth = the adaptive stop's deepest point, so the fixed
         # band and the adaptive retirement tail are compared at like accuracy.
-        (_, ng0) = KAPseudospectra._ihlpsa_adaptive(backend, zg, P; nit_max = converged_nit_max(m), devs, zpd)
+        (_, ng0) = KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P; nit_max = converged_nit_max(m), devs, zpd)
         nit = maximum(ng0)
         runs = (("fixed", () -> ihlpsa(backend, zg, P, nit; devs, zpd)),
             ("adaptive", () -> ihlpsa(backend, zg, P; nit_max = converged_nit_max(m), devs, zpd)))
@@ -158,10 +158,10 @@ function timing_mode()
             # depth a non-adaptive solver needs everywhere. Cold TTFP accrues here.
             nitmax = converged_nit_max(m)
             local σ, ng
-            t1a = @elapsed ((σ, ng) = KAPseudospectra._ihlpsa_adaptive(
+            t1a = @elapsed ((σ, ng) = KernelAbstractionsPseudospectra._ihlpsa_adaptive(
                 backend, zg, P; nit_max = nitmax, devs, zpd))
             ta = bestof(backend; reps = REPS) do
-                KAPseudospectra._ihlpsa_adaptive(backend, zg, P; nit_max = nitmax, devs, zpd)
+                KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P; nit_max = nitmax, devs, zpd)
             end
 
             # Converged-fixed baseline: flat depth = Dmax (the adaptive stop's deepest point), so

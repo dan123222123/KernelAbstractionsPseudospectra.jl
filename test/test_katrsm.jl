@@ -11,12 +11,12 @@
 # O(1), and pencil shifts are biased so cond(z*B - A) = O(1) too, so a backward-stable solve
 # must agree with LAPACK to a small constant multiple of eps(T) regardless of backend.
 
-using Test, KAPseudospectra, KernelAbstractions, LinearAlgebra
+using Test, KernelAbstractionsPseudospectra, KernelAbstractions, LinearAlgebra
 using ArraysOfArrays
 using Adapt
 using Random
 
-const KATRSM = KAPseudospectra.KATRSM
+const KATRSM = KernelAbstractionsPseudospectra.KATRSM
 
 # Strictly diagonally dominant triangular matrices: diag ≈ 1, off-diagonals
 # scaled by 1/(2m+1) so each row's off-diagonal sum is ≤ 1/2. Condition number
@@ -44,7 +44,7 @@ _tol(::Type{ComplexF32}) = 32 * eps(Float32)
 _tol(::Type{ComplexF64}) = 32 * eps(Float64)
 
 # Move CPU array(s) onto the backend's device array type. CPU() ↦ Array.
-_to(backend, x) = adapt(KAPseudospectra.get_bgarray(backend), x)
+_to(backend, x) = adapt(KernelAbstractionsPseudospectra.get_bgarray(backend), x)
 # Pull device array(s) back to host for comparison.
 _from(x) = adapt(Array, x)
 
@@ -79,12 +79,12 @@ _from(x) = adapt(Array, x)
     # (`tune_trsm_wgs!` persists it); these cover the pure host-side parse/lookup, which is
     # where a malformed or hand-edited preference would otherwise surface as a runtime error.
     @testset "wgs schedule" begin
-        parse_s = KAPseudospectra._parse_wgs_schedule
-        from_s = KAPseudospectra._wgs_from_schedule
+        parse_s = KernelAbstractionsPseudospectra._parse_wgs_schedule
+        from_s = KernelAbstractionsPseudospectra._wgs_from_schedule
 
         sched = parse_s("32:32,512:64,1024:128")
         @test sched == [(32, 32), (512, 64), (1024, 128)]
-        @test KAPseudospectra._format_wgs_schedule(sched) == "32:32,512:64,1024:128"
+        @test KernelAbstractionsPseudospectra._format_wgs_schedule(sched) == "32:32,512:64,1024:128"
         @test parse_s(" 512 : 64 , 32:32 ") == [(32, 32), (512, 64)]   # whitespace + reordering
         @test parse_s("128:64") == [(128, 64)]                          # m-independent optimum
 
@@ -102,13 +102,13 @@ _from(x) = adapt(Array, x)
 
     @testset "wgs resolution" begin
         P = MatrixPencil(schur(_rand_uppertri(ComplexF64, 16)))
-        @test KAPseudospectra._auto_wgs(CPU(), 1024) == 1        # CPU is always serial per point
-        @test KAPseudospectra.column_wgs(CPU(), P) == 1
+        @test KernelAbstractionsPseudospectra._auto_wgs(CPU(), 1024) == 1        # CPU is always serial per point
+        @test KernelAbstractionsPseudospectra.column_wgs(CPU(), P) == 1
         withenv("KAPSEUDO_TRSM_WGS" => "128") do
-            @test KAPseudospectra.column_wgs(CPU(), P) == 128    # env wins over everything
+            @test KernelAbstractionsPseudospectra.column_wgs(CPU(), P) == 128    # env wins over everything
         end
         withenv("KAPSEUDO_TRSM_WGS" => "0") do
-            @test_throws ErrorException KAPseudospectra.column_wgs(CPU(), P)
+            @test_throws ErrorException KernelAbstractionsPseudospectra.column_wgs(CPU(), P)
         end
     end
 end
@@ -311,7 +311,7 @@ end
 # B=I gives `x[rows] += A[rows,panel]·x[panel]`, generic gives `x[rows] -= (z·B − A)[rows,panel]·x[panel]`.
 function test_tiled_trailing_kernels(backend; types = (ComplexF32, ComplexF64))
     KernelAbstractions.isgpu(backend) || return
-    wrows = KAPseudospectra.tile_warp_rows(backend)
+    wrows = KernelAbstractionsPseudospectra.tile_warp_rows(backend)
     @testset "tiled trailing kernels over the tuner's knob grid -- $(backend)" begin
         # (m, poff): partial row tile, partial panel, and poff=0 (backward no-op boundary).
         for T in types, (m, poff) in ((128, 32), (100, 64), (37, 0))
@@ -337,16 +337,16 @@ function test_tiled_trailing_kernels(backend; types = (ComplexF32, ComplexF64))
                     ref_gen[rows, j] .-= (zv[j] .* Bm[rows, pan] .- A[rows, pan]) * X0[pan, j]
                 end
 
-                for TC in KAPseudospectra._TILECOLS_CANDIDATES,
-                    W in KAPseudospectra._BLOCKWARPS_CANDIDATES,
-                    gt in KAPseudospectra._WARPGRIDPTS_CANDIDATES
+                for TC in KernelAbstractionsPseudospectra._TILECOLS_CANDIDATES,
+                    W in KernelAbstractionsPseudospectra._BLOCKWARPS_CANDIDATES,
+                    gt in KernelAbstractionsPseudospectra._WARPGRIDPTS_CANDIDATES
 
                     ndr = (wrows * W * rtiles, cld(g, W * gt))
                     for (eye, ref) in ((true, ref_eye), (false, ref_gen))
                         # Same shared-memory admission the tuner applies before probing a TC.
                         ntiles = eye ? 1 : 2
                         ntiles * wrows * TC * sizeof(T) <=
-                        KAPseudospectra.device_smem_bytes(backend) || continue
+                        KernelAbstractionsPseudospectra.device_smem_bytes(backend) || continue
                         X = _to(backend, copy(X0))
                         bV = VectorOfSimilarVectors(X)
                         if eye

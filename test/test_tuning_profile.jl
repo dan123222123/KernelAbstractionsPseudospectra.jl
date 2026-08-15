@@ -3,8 +3,8 @@
 # a run configured by the wrong layer produces plausible numbers, and the only symptom is a
 # benchmark that disagrees with the last one for no visible reason.
 
-using KAPseudospectra, Test
-using KAPseudospectra: tune_profile, tune_profile_path, tuned_knob, tuning_keys, reload_tuning!,
+using KernelAbstractionsPseudospectra, Test
+using KernelAbstractionsPseudospectra: tune_profile, tune_profile_path, tuned_knob, tuning_keys, reload_tuning!,
                        write_tune_profile, _parse_wgs_schedule, _wgs_from_schedule
 
 const _KEY = "trsm_tilecols_ComplexF64_gen"
@@ -28,7 +28,7 @@ end
     mktempdir() do dir
         full = joinpath(dir, "full.toml")
         write(full, """
-        [KAPseudospectra]
+        [KernelAbstractionsPseudospectra]
         $_KEY = "8"
         trsm_wgs_ComplexF64_gen = "128:32,1024:128"
         """)
@@ -66,7 +66,7 @@ end
 
         @testset "switching profiles re-reads" begin
             other = joinpath(dir, "other.toml")
-            write(other, "[KAPseudospectra]\n$_KEY = \"32\"\n")
+            write(other, "[KernelAbstractionsPseudospectra]\n$_KEY = \"32\"\n")
             with_profile(full) do
                 @test tuned_knob(_KEY) == "8"
             end

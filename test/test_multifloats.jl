@@ -63,14 +63,14 @@ end
 # kernels to column for m ≤ 32. Only runs where the warp shuffle is usable for wide types (CUDA /
 # AMDGPU / Metal-opt-in); skipped on CPU and stock oneAPI (its KernelIntrinsics @shfl is a TODO stub).
 function test_multifloats_tiled_shuffle(backend)
-    (KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, true)) ||
+    (KernelAbstractions.isgpu(backend) && KernelAbstractionsPseudospectra.warp_trsm_safe(backend, true)) ||
         return
     @testset "MultiFloats per-limb tiled shuffle (bitwise vs column) -- $(backend)" begin
         T = Complex{Float64x2}
         # Panel width follows the hardware warp, as `_tiled_trsm!` does — the panel is exactly one
         # shuffle's reach. The column kernels below stay at a fixed 32: their `wgs` is an unrelated
         # knob, and holding it fixed is what keeps the bitwise comparison meaningful.
-        wp = KAPseudospectra.warp_width(backend)
+        wp = KernelAbstractionsPseudospectra.warp_width(backend)
         for m in (16, 31, 32)            # single panel (m ≤ wp): the tiled panel solve is the full solve
             g = 4
             # Build well-conditioned triangular pencils by promoting Float64 randoms (MultiFloats
@@ -115,7 +115,7 @@ end
 # tile-able and the full multi-panel tiled driver matches the column driver to round-off (m > 32 so
 # the trailing update actually runs). GPU + usable wide shuffle only.
 function test_multifloats_tiled_generic(backend)
-    (KernelAbstractions.isgpu(backend) && KAPseudospectra.warp_trsm_safe(backend, true)) ||
+    (KernelAbstractions.isgpu(backend) && KernelAbstractionsPseudospectra.warp_trsm_safe(backend, true)) ||
         return
     @testset "MultiFloats wide generic tiled (TC-aware fit, vs column) -- $(backend)" begin
         T = Complex{Float64x2}
@@ -124,19 +124,19 @@ function test_multifloats_tiled_generic(backend)
         up() = (Mr = s .* triu(randn(ComplexF64, m, m), 1);
             [Mr[i, i] = 1 + s * randn(ComplexF64) for i in 1:m]; T.(Mr))
         A, B = up(), up()        # upper-tri ⇒ Ac=A', Bc=B' are lower-tri for the forward sweep
-        P = KAPseudospectra.SchurMatrixPencil{T, false}(
+        P = KernelAbstractionsPseudospectra.SchurMatrixPencil{T, false}(
             A, collect(A'), B, collect(B'), Matrix{T}(I, m, m))
-        @test KAPseudospectra.tiled_tiles_fit(backend, P)            # narrow TC fits → tiled, not column
-        @test KAPseudospectra.tile_cols(backend, P) in KAPseudospectra._TILECOLS_CANDIDATES
+        @test KernelAbstractionsPseudospectra.tiled_tiles_fit(backend, P)            # narrow TC fits → tiled, not column
+        @test KernelAbstractionsPseudospectra.tile_cols(backend, P) in KernelAbstractionsPseudospectra._TILECOLS_CANDIDATES
         Pdev = _to(backend, P)
         zv = _to(backend, T.(2 .+ 0.3 .* randn(ComplexF64, g)))
         b0 = reduce(hcat, [T.(randn(ComplexF64, m)) for _ in 1:g])
-        wgs = KAPseudospectra.column_wgs(backend, Pdev)
+        wgs = KernelAbstractionsPseudospectra.column_wgs(backend, Pdev)
         bt = VectorOfSimilarVectors(_to(backend, copy(b0)))
-        KAPseudospectra._tiled_trsm!(backend, bt, zv, Pdev, wgs);
+        KernelAbstractionsPseudospectra._tiled_trsm!(backend, bt, zv, Pdev, wgs);
         KernelAbstractions.synchronize(backend)
         bc = VectorOfSimilarVectors(_to(backend, copy(b0)))
-        KAPseudospectra._column_trsm!(backend, bc, zv, Pdev, wgs);
+        KernelAbstractionsPseudospectra._column_trsm!(backend, bc, zv, Pdev, wgs);
         KernelAbstractions.synchronize(backend)
         xt, xc = _from(bt.data), _from(bc.data)
         @test maximum(Float64.(abs.(xt .- xc))) / maximum(Float64.(abs.(xc))) < 1e-25
@@ -159,7 +159,7 @@ function test_multifloats_f32limb_range()
             β = fill(T(scale / 8), nit + 1, g)    # rows 2:end-1 are the off-diagonals
             zv = [T(x) for x in range(0.5, 2.0, length = g)]
             sr = zeros(Float32x4, g)
-            KAPseudospectra.ihlsrg!(sr, zv, 1.0, 0.0, α, β)
+            KernelAbstractionsPseudospectra.ihlsrg!(sr, zv, 1.0, 0.0, α, β)
             @test all(isfinite, sr)
             @test all(>(0), sr)
             # σ = 1/√λmax up to the O(1) tridiag factor: σ·√scale ∈ (0.5, 1.5)
@@ -184,8 +184,8 @@ function test_multifloats_residual_stop()
             F = eigen(SymTridiagonal(d, e))
             sk_ref = abs(F.vectors[end, argmax(F.values)])
             d2, e2 = Float32x2.(d), Float32x2.(e)
-            sk2 = KAPseudospectra._tridiag_top_lastcomp(
-                d2, e2, KAPseudospectra._eigmax_tridiag(d2, e2))
+            sk2 = KernelAbstractionsPseudospectra._tridiag_top_lastcomp(
+                d2, e2, KernelAbstractionsPseudospectra._eigmax_tridiag(d2, e2))
             @test isfinite(sk2)
             @test isapprox(sk2, Float32x2(sk_ref), atol = 1e-6)
         end
@@ -199,9 +199,9 @@ function test_multifloats_residual_stop()
         region = ((minimum(real, eigs) - pad, maximum(real, eigs) + pad),
             (minimum(imag, eigs) - pad, maximum(imag, eigs) + pad))
         zg = qgrid(T, region[1], region[2], (8, 8))[3]
-        x₀ = KAPseudospectra._adaptive_x₀(T, m, 0xBEEF)
+        x₀ = KernelAbstractionsPseudospectra._adaptive_x₀(T, m, 0xBEEF)
         cap = 32 * ceil(Int, log2(m))
-        s_adp, _ = KAPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀, rtol = 1e-25, nit_max = cap)
+        s_adp, _ = KernelAbstractionsPseudospectra._ihlpsa_adaptive(CPU(), zg, P; x₀ = x₀, rtol = 1e-25, nit_max = cap)
         s_fix = ihlpsa(CPU(), zg, P, cap; x₀ = x₀)      # deep fixed control at the floor
         to64(x) = sum(Float64, x._limbs)
         @test all(isfinite, s_adp)
@@ -215,8 +215,8 @@ function test_multifloats_residual_stop()
         A64 = ComplexF64.(Matrix(MatrixDepot.grcar(Float64, m)))
         B64 = ComplexF64.(MatrixDepot.kms(Float64, m))
         P = MatrixPencil(T.(A64), T.(B64))
-        @test P isa KAPseudospectra.SchurMatrixPencil{T, false}
-        @test !KAPseudospectra.b_is_identity(P)
+        @test P isa KernelAbstractionsPseudospectra.SchurMatrixPencil{T, false}
+        @test !KernelAbstractionsPseudospectra.b_is_identity(P)
         @test istriu(P.A) && istriu(P.B)
         # reduction fidelity, bounded by the ComplexF64 reference
         λ = ComplexF64.(diag(P.A) ./ diag(P.B))
@@ -231,6 +231,6 @@ function test_multifloats_residual_stop()
         @test maximum(abs.(to64.(real.(σ)) .- σref) ./ max.(σref, eps())) < 1e-10
         # real-matrix convenience method complexifies both operands
         Pr = MatrixPencil(Float64x2.(real.(A64)), Float64x2.(real.(B64)); bits = 128)
-        @test !KAPseudospectra.b_is_identity(Pr)
+        @test !KernelAbstractionsPseudospectra.b_is_identity(Pr)
     end
 end

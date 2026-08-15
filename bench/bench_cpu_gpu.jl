@@ -16,11 +16,11 @@ if !KernelAbstractions.isgpu(backend)
     @warn "bench_cpu_gpu compares a GPU backend against the CPU — nothing to do for $(backend)"
     exit(0)
 end
-devs = KAPseudospectra.devices(backend)
+devs = KernelAbstractionsPseudospectra.devices(backend)
 
 # ComplexF64: EigTool is double-precision-only. FP64-less devices fall back to F32 (the
 # EigTool leg self-skips there).
-const T = KAPseudospectra.supports_fp64(backend) ? ComplexF64 : ComplexF32
+const T = KernelAbstractionsPseudospectra.supports_fp64(backend) ? ComplexF64 : ComplexF32
 const MS = env_ints("BENCH_MS", (64, 128, 256, 512, 1024))
 const EIGTOOL_MS = env_ints("BENCH_EIGTOOL_MS", (64, 128, 256, 512))  # MATLAB is the long pole
 const REPS = env_int("BENCH_REPS", 3)
@@ -87,7 +87,7 @@ for m in MS
 
     # Time-to-solution of the same converged deliverable on GPU and CPU; σg/σc share the
     # layout, so the sentinel differences directly.
-    σg, nitg = KAPseudospectra._ihlpsa_adaptive(backend, zg, P;              # warm-up + GPU σ + depth
+    σg, nitg = KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P;              # warm-up + GPU σ + depth
         rtol = converged_rtol(T), nit_max = nitmax, devs, zpd)
     maxdepth = maximum(nitg)
 

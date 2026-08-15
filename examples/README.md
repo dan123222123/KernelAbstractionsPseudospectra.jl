@@ -1,6 +1,6 @@
-# KAPseudospectra examples
+# KernelAbstractionsPseudospectra examples
 
-Runnable example scripts for `KAPseudospectra`. The environment here is
+Runnable example scripts for `KernelAbstractionsPseudospectra`. The environment here is
 **CPU-only and plot-ready**: it instantiates on any machine without GPU drivers
 or vendor toolkits, and ships the plotting stack (`Plots` with its default GR
 backend, `LaTeXStrings`) so every script produces figures out of the box on
@@ -20,7 +20,7 @@ julia> # started with: julia --project=examples
 julia> include("examples/ihlpsa_adaptive.jl")
 ```
 
-`KAPseudospectra` itself resolves from the repo checkout one directory up (via
+`KernelAbstractionsPseudospectra` itself resolves from the repo checkout one directory up (via
 the `[sources]` entry in `Project.toml`), so there's no separate `dev` step —
 `Pkg.instantiate()` is enough.
 
@@ -75,7 +75,7 @@ environment outside the repo is convenient and reusable:
 ```julia
 julia> # started with: julia --project=@kaps-examples
 julia> using Pkg
-julia> Pkg.develop(path="/path/to/KAPseudospectra.jl")   # the repo root
+julia> Pkg.develop(path="/path/to/KernelAbstractionsPseudospectra.jl")   # the repo root
 julia> Pkg.add(["KernelAbstractions", "MatrixDepot", "Plots", "LaTeXStrings"])
 julia> Pkg.add("oneAPI")        # whichever backend you have
 ```

@@ -1,4 +1,4 @@
-using Test, KAPseudospectra
+using Test, KernelAbstractionsPseudospectra
 using Aqua
 
 if isempty(ARGS) || "all" in ARGS
@@ -10,7 +10,7 @@ end
 # Package hygiene: method ambiguities, unbound type params, compat coverage on every
 # dep, stale deps, type piracy.
 @testset "quality (Aqua)" begin
-    Aqua.test_all(KAPseudospectra)
+    Aqua.test_all(KernelAbstractionsPseudospectra)
 end
 
 include("eigtool_core.jl")
@@ -121,7 +121,7 @@ if "oneapi" in ARGS
     if oneAPI.functional()
         # Most Intel iGPUs lack native FP64; restrict to ComplexF32 there, and
         # auto-enable ComplexF64 on FP64-capable Intel GPUs (Arc, Data Center Max).
-        Ts = KAPseudospectra.supports_fp64(oneAPIBackend()) ? (ComplexF32, ComplexF64) :
+        Ts = KernelAbstractionsPseudospectra.supports_fp64(oneAPIBackend()) ? (ComplexF32, ComplexF64) :
              (ComplexF32,)
         test_ihlpsa_parter16(oneAPIBackend(); types = Ts)
         test_cross_backend(oneAPIBackend(); types = Ts)
@@ -140,7 +140,7 @@ end
 if "metal" in ARGS
     using Metal
     if Metal.functional()
-        Ts = KAPseudospectra.supports_fp64(MetalBackend()) ? (ComplexF32, ComplexF64) :
+        Ts = KernelAbstractionsPseudospectra.supports_fp64(MetalBackend()) ? (ComplexF32, ComplexF64) :
              (ComplexF32,)
         test_ihlpsa_parter16(MetalBackend(); types = Ts)
         test_cross_backend(MetalBackend(); types = Ts)

@@ -14,7 +14,7 @@ using Adapt, ArraysOfArrays
 const backend = select_backend(ARGS; default = "cuda")
 KernelAbstractions.isgpu(backend) ||
     error("bench_batching needs a GPU backend (got $(backend)); pass cuda|amdgpu|oneapi.")
-const devs = KAPseudospectra.devices(backend)
+const devs = KernelAbstractionsPseudospectra.devices(backend)
 const RESULTS = results_dir()
 const REPS = env_int("BENCH_REPS", 3)
 const TOKS = runnable_eltypes(backend, eltype_tokens("f64"))
@@ -35,30 +35,30 @@ ihl_workspace_bytes(T, m, nit, zpd) =
 # Batched and unbatched closures over one allocation; the solve is in-place, so reps overwrite
 # the previous result (values drift, but FLOPs/traffic per rep don't).
 function make_solves(T, m, batch)
-    bg = KAPseudospectra.get_bgarray(backend)
+    bg = KernelAbstractionsPseudospectra.get_bgarray(backend)
     rng = Random.Xoshiro(0xBA7C + m)
     P = adapt(bg, bench_pencil(T, m).P)
     zv = adapt(bg, T.(ComplexF64(2) .+ ComplexF64(3 // 10) .* randn(rng, ComplexF64, batch)))
     bM = adapt(bg, T.(reduce(hcat, [randn(rng, ComplexF64, m) for _ in 1:batch])))
     # `column_wgs`, not the raw heuristic — races batched against unbatched COLUMN solves; a
     # `wgs` the shipped path would never choose mis-states both sides.
-    wgs = KAPseudospectra.column_wgs(backend, P)
-    batched = () -> KAPseudospectra._column_trsm!(
+    wgs = KernelAbstractionsPseudospectra.column_wgs(backend, P)
+    batched = () -> KernelAbstractionsPseudospectra._column_trsm!(
         backend, VectorOfSimilarVectors(bM), zv, P, wgs)
     unbatched = function ()
         for i in 1:batch
-            KAPseudospectra._column_trsm!(backend,
+            KernelAbstractionsPseudospectra._column_trsm!(backend,
                 VectorOfSimilarVectors(view(bM, :, i:i)), view(zv, i:i), P, wgs)
         end
     end
-    (; batched, unbatched, eye = KAPseudospectra.b_is_identity(P))
+    (; batched, unbatched, eye = KernelAbstractionsPseudospectra.b_is_identity(P))
 end
 
 logln, logio = bench_logger(joinpath(RESULTS, "bench_batching_log.txt"))
 logln("="^72)
-logln("KAPseudospectra.jl batching benchmark   ", Dates.now())
+logln("KernelAbstractionsPseudospectra.jl batching benchmark   ", Dates.now())
 logln("backend=", backend, "  device: ", device_name(backend),
-    @sprintf("  (%.1f GiB free)", KAPseudospectra.device_bytes_available(backend) / 2^30))
+    @sprintf("  (%.1f GiB free)", KernelAbstractionsPseudospectra.device_bytes_available(backend) / 2^30))
 logln("eltypes=", join(TOKS, ","), "  batch m=", BATCH_M, "  zpd m=", ZPD_M)
 foreach(logln, repro_stamp(backend))
 logln("="^72)

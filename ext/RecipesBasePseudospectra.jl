@@ -2,10 +2,10 @@ module RecipesBasePseudospectra
 
 # Plots recipe for pseudospectra fields: contours of log10(σ) over the shift grid, with an
 # optional eigenvalue overlay. Activates once RecipesBase (pulled in by Plots) is loaded, so
-# the core package carries no plotting dependency. Implements `KAPseudospectra.psaplot[!]`.
+# the core package carries no plotting dependency. Implements `KernelAbstractionsPseudospectra.psaplot[!]`.
 
 using RecipesBase
-import KAPseudospectra: psaplot, psaplot!
+import KernelAbstractionsPseudospectra: psaplot, psaplot!
 
 # Carries the positional args (gx, gy, σ[, eigenvalues]) into the recipe.
 struct PsaPlot

@@ -10,7 +10,7 @@ include(joinpath(@__DIR__, "bench_common.jl"))
 
 backend = select_backend(ARGS)
 gpu = KernelAbstractions.isgpu(backend)
-devs = gpu ? [first(KAPseudospectra.devices(backend))] : missing
+devs = gpu ? [first(KernelAbstractionsPseudospectra.devices(backend))] : missing
 
 # ComplexF64 is the reported eltype; f32 is the GPU-performance story only.
 const T = get(ENV, "BENCH_SCHUR_ELTYPE", "f64") == "f32" ? ComplexF32 : ComplexF64
@@ -45,7 +45,7 @@ for m in MS
         # Cold first call doubles as warm-up and yields the per-point retirement grid for the
         # FoM (max_depth, Σ iters).
         local nitg
-        t1 = @elapsed ((_, nitg) = KAPseudospectra._ihlpsa_adaptive(backend, zg, P;
+        t1 = @elapsed ((_, nitg) = KernelAbstractionsPseudospectra._ihlpsa_adaptive(backend, zg, P;
             rtol = converged_rtol(T), nit_max = nitmax, devs, zpd))
         tf = bestof(() -> converged_solve(backend, zg, P; devs, zpd), backend; reps = REPS)
         pp = tf / g

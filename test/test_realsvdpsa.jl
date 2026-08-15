@@ -9,7 +9,7 @@
 #    minimum-norm real perturbation distance is ≥ the complex one. Hence
 #    psa_real ≥ psa_complex pointwise (modulo a small numerical slack).
 
-using Test, KAPseudospectra, LinearAlgebra
+using Test, KernelAbstractionsPseudospectra, LinearAlgebra
 using Random
 
 @testset "ℝsvdpsa basic" begin

@@ -1,5 +1,5 @@
 """
-    KAPseudospectra
+    KernelAbstractionsPseudospectra
 
 Backend-agnostic pseudospectra computation on CPUs and GPUs via KernelAbstractions.jl.
 
@@ -9,7 +9,7 @@ on Schur-factored pencils ([`MatrixPencil`](@ref)), with CUDA/AMDGPU/Metal/oneAP
 support through package extensions and extended precision through MultiFloats.jl.
 Build shift grids with [`qgrid`](@ref) and plot results with [`psaplot`](@ref).
 """
-module KAPseudospectra
+module KernelAbstractionsPseudospectra
 
 using Preferences
 using PrecompileTools

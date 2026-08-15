@@ -44,7 +44,7 @@ for m in MS
         Iₘ = Diagonal(ones(T, m))
         # Standard (B = I), not via bench_pencil: subject is the REDUCTION's accuracy.
         # Exempt from BENCH_PENCIL.
-        pen(Z, S) = KAPseudospectra.SchurMatrixPencil{T, true}(S, collect(S'), Iₘ, Iₘ, Z)
+        pen(Z, S) = KernelAbstractionsPseudospectra.SchurMatrixPencil{T, true}(S, collect(S'), Iₘ, Iₘ, Z)
         modes = (("promoted", (T.(F.Z), T.(F.T))),
             ("generic", (Matrix{T}(I, m, m), hiprec_schur(Ac, T))))
         for (mode, (Z, S)) in modes

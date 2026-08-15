@@ -2,7 +2,7 @@
 
 julia_version = "1.12.4"
 manifest_format = "2.0"
-project_hash = "9b998f00477cea2bd002a60803f80390302fb14d"
+project_hash = "9284853a82cdb0217eb1fc427b96334a26c841c1"
 
 [[deps.ADTypes]]
 git-tree-sha1 = "d9aaef7c63466eee4de23b4d9dad03629df54bea"
@@ -523,30 +523,6 @@ deps = ["StyledStrings"]
 uuid = "ac6e5ff7-fb65-4e79-a425-ec3bc9c03011"
 version = "1.12.0"
 
-[[deps.KAPseudospectra]]
-deps = ["Adapt", "ArraysOfArrays", "KernelAbstractions", "KernelIntrinsics", "LinearAlgebra", "Optim", "PrecompileTools", "Preferences", "ProgressBars", "Random", "TOML", "ThreadsX"]
-path = ".."
-uuid = "8b8afa22-3073-43c5-8823-151938199226"
-version = "0.1.0"
-
-    [deps.KAPseudospectra.extensions]
-    AMDGPUPseudospectra = "AMDGPU"
-    CUDAPseudospectra = "CUDA"
-    GenericSchurPseudospectra = ["GenericSchur", "MultiFloats"]
-    MetalPseudospectra = "Metal"
-    MultiFloatsPseudospectra = "MultiFloats"
-    RecipesBasePseudospectra = "RecipesBase"
-    oneAPIPseudospectra = "oneAPI"
-
-    [deps.KAPseudospectra.weakdeps]
-    AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
-    CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
-    GenericSchur = "c145ed77-6b09-5dd9-b285-bf645a82121e"
-    Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
-    MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
-    RecipesBase = "3cdcf5f2-1ef4-517c-9805-6587b60abb01"
-    oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
-
 [[deps.KernelAbstractions]]
 deps = ["Adapt", "Atomix", "InteractiveUtils", "MacroTools", "PrecompileTools", "Requires", "StaticArrays", "UUIDs"]
 git-tree-sha1 = "a5b87110fa95d711355af44832497745aa93fb52"
@@ -562,6 +538,30 @@ version = "0.9.42"
     EnzymeCore = "f151be2c-9106-41f4-ab19-57ee4f262869"
     LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
     SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+
+[[deps.KernelAbstractionsPseudospectra]]
+deps = ["Adapt", "ArraysOfArrays", "KernelAbstractions", "KernelIntrinsics", "LinearAlgebra", "Optim", "PrecompileTools", "Preferences", "ProgressBars", "Random", "TOML", "ThreadsX"]
+path = ".."
+uuid = "8b8afa22-3073-43c5-8823-151938199226"
+version = "0.1.0"
+
+    [deps.KernelAbstractionsPseudospectra.extensions]
+    AMDGPUPseudospectra = "AMDGPU"
+    CUDAPseudospectra = "CUDA"
+    GenericSchurPseudospectra = ["GenericSchur", "MultiFloats"]
+    MetalPseudospectra = "Metal"
+    MultiFloatsPseudospectra = "MultiFloats"
+    RecipesBasePseudospectra = "RecipesBase"
+    oneAPIPseudospectra = "oneAPI"
+
+    [deps.KernelAbstractionsPseudospectra.weakdeps]
+    AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
+    CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+    GenericSchur = "c145ed77-6b09-5dd9-b285-bf645a82121e"
+    Metal = "dde4c033-4e86-420c-a63e-0dd931031962"
+    MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
+    RecipesBase = "3cdcf5f2-1ef4-517c-9805-6587b60abb01"
+    oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
 
 [[deps.KernelIntrinsics]]
 deps = ["KernelAbstractions", "LLVM", "SIMD"]

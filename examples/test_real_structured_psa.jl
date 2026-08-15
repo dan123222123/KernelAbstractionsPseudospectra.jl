@@ -1,5 +1,5 @@
 ##
-using KAPseudospectra
+using KernelAbstractionsPseudospectra
 using LinearAlgebra
 using KernelAbstractions
 using Plots          # GR backend (Plots' default — no extra deps)

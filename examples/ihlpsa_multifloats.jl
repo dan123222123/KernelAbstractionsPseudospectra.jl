@@ -13,7 +13,7 @@
 #
 # Both precisions here are Float32-based, so the whole example runs on GPUs *without*
 # Float64 (Intel iGPUs, Apple Metal) as well as on Float64 hardware. On an FP64-less GPU,
-# also run `KAPseudospectra.set_pdiv_accurate!(false)` once and restart Julia, so the
+# also run `KernelAbstractionsPseudospectra.set_pdiv_accurate!(false)` once and restart Julia, so the
 # ComplexF32 baseline solve doesn't widen its complex divide through `double`. On a card
 # with fast Float64, use ComplexF64 / Complex{Float64x2} for the ~16-vs-32-digit story.
 
@@ -23,7 +23,7 @@ backend = CPU()                            # portable default; uncomment the GPU
 # using AMDGPU; backend = ROCBackend()
 # using oneAPI; backend = oneAPIBackend()
 
-using KAPseudospectra, LinearAlgebra, Random, MatrixDepot, MultiFloats
+using KernelAbstractionsPseudospectra, LinearAlgebra, Random, MatrixDepot, MultiFloats
 using GenericSchur, GenericLinearAlgebra  # generic schur / eigen for the extended types
 
 LP = ComplexF32                          # plain single precision — the baseline that degrades
@@ -102,7 +102,7 @@ if true
     scatter!(p1, real.(eigs), imag.(eigs); m = (:diamond, 3, :white), label = "")
     scatter!(p2, real.(eigs), imag.(eigs); m = (:diamond, 3, :cyan), label = "")
     plt = plot(p1, p2; layout = (1, 2), size = (1500, 720),
-        plot_title = "KAPseudospectra inverse-Lanczos + GenericSchur, chebspec m=$(size(A, 1))")
+        plot_title = "KernelAbstractionsPseudospectra inverse-Lanczos + GenericSchur, chebspec m=$(size(A, 1))")
     savefig(plt, joinpath(@__DIR__, "ihlpsa_multifloats.png"))
     @info "saved figure" path = joinpath(@__DIR__, "ihlpsa_multifloats.png")
 end

@@ -17,7 +17,7 @@
 #
 # Tiny n = 2 pencils: dense O(n³) SVD, runs on CPU out of the box (see README.md).
 using LinearAlgebra
-using KAPseudospectra
+using KernelAbstractionsPseudospectra
 ##
 
 ## the SISO system and its scalar transfer function H(z) = C(zI − A)⁻¹B

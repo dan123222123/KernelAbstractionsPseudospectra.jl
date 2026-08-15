@@ -3,7 +3,7 @@
 # The same pseudospectra computed three ways on chebspec (a standard strongly non-normal example):
 # 1) inverse-Lanczos at ComplexF64; 2) inverse-Lanczos at Complex{Float64x2}; and, 3) a dense-SVD
 # oracle (`ℂsvdpsa`) in BigFloat at 256 bits (~77 digits).
-using KAPseudospectra, KernelAbstractions, LinearAlgebra, MatrixDepot, MultiFloats
+using KernelAbstractionsPseudospectra, KernelAbstractions, LinearAlgebra, MatrixDepot, MultiFloats
 using GenericSchur, GenericLinearAlgebra  # generic schur / eigen for the extended types
 
 m, G, nit = 20, 21, 12
