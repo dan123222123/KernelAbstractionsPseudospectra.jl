@@ -27,6 +27,9 @@ include("svdpsa.jl")
 export ℂsvdpsa, ℝsvdpsa
 
 include("backend.jl")   # general per-backend device interface (CPU defaults; GPU exts override)
+# Re-exported from KernelAbstractions so `ihlpsa(CPU(), ...)` works without KA in the
+# caller's own environment; GPU backend types come from the vendor package they load anyway.
+export CPU
 
 include("ihlpsa.jl")    # also brings in the KATRSM triangular-solve submodule
 export ihlpsa

@@ -462,7 +462,7 @@ writes), and an exception aborts it. Made for checkpointing hours-scale solves.
 
 # Examples
 ```julia
-using KernelAbstractionsPseudospectra, KernelAbstractions
+using KernelAbstractionsPseudospectra                 # + `using CUDA`/`AMDGPU`/… for a GPU backend
 P = MatrixPencil(A)                                   # or MatrixPencil(A, B)
 _, _, zg = qgrid(ComplexF64, (-2, 5), (-4.5, 4.5), (300, 300))
 
