@@ -14,7 +14,7 @@ function batched_forward_solve_pencil(bV, zv, A, B)
     xV = deepcopy(bV)
     batched_forward_solve_pencil!(xV, zv, A, B)
     synchronize(get_backend(A))
-    return Vector.(xV)
+    return [Vector(x) for x in xV]
 end
 
 function batched_backward_solve_pencil!(bV, zv, A, B)
@@ -30,5 +30,5 @@ function batched_backward_solve_pencil(bV, zv, A, B)
     xV = deepcopy(bV)
     batched_backward_solve_pencil!(xV, zv, A, B)
     synchronize(get_backend(A))
-    return Vector.(xV)
+    return [Vector(x) for x in xV]
 end

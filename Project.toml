@@ -42,7 +42,7 @@ oneAPIPseudospectra = "oneAPI"
 [compat]
 AMDGPU = "1"
 Adapt = "4"
-ArraysOfArrays = "0.6"
+ArraysOfArrays = "0.6, 1"
 CUDA = "5"
 GenericSchur = "0.5"
 KernelAbstractions = "0.9"
